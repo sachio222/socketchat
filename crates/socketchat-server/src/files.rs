@@ -156,7 +156,7 @@ pub fn get(state: &State, cs: &ConnState, file: FileId, index: u32) -> Response 
 }
 
 /// Deletes a file's chunks and records.
-pub fn delete(state: &State, db: &rusqlite::Connection, file: &FileId) {
+pub(crate) fn delete(state: &State, db: &rusqlite::Connection, file: &FileId) {
     let _ = std::fs::remove_dir_all(file_dir(state, file));
     let _ = db.execute("DELETE FROM files WHERE id = ?1", [file.0.as_slice()]);
     let _ = db.execute(

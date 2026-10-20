@@ -11,6 +11,7 @@ pub mod db;
 mod files;
 mod groups;
 mod invites;
+mod retention;
 pub mod tls;
 
 use std::net::SocketAddr;
@@ -151,6 +152,18 @@ impl Server {
             online: Default::default(),
         });
         let (stop, stop_rx) = watch::channel(false);
+        let sweeper = state.clone();
+        let mut sweep_stop = stop_rx.clone();
+        tokio::spawn(async move {
+            let hour = std::time::Duration::from_secs(3600);
+            let mut every = tokio::time::interval_at(tokio::time::Instant::now() + hour, hour);
+            loop {
+                tokio::select! {
+                    _ = sweep_stop.changed() => break,
+                    _ = every.tick() => retention::sweep(&sweeper),
+                }
+            }
+        });
         let st = state.clone();
         tokio::spawn(async move {
             let mut stop_rx2 = stop_rx.clone();
@@ -178,6 +191,12 @@ impl ServerHandle {
     /// Moves the server's clock forward, for tests of expiry and retention.
     pub fn advance_clock(&self, secs: u64) {
         self.state.clock_offset.fetch_add(secs, Ordering::Relaxed);
+    }
+
+    /// Runs the hourly cleanup now: expired messages, files, invites and
+    /// join requests go.
+    pub fn sweep_now(&self) {
+        retention::sweep(&self.state);
     }
 
     /// Stops accepting and closes every connection.
