@@ -1,6 +1,6 @@
 # socketchat v4 design
 
-Status: draft for review, 2026-10-19.
+Status: the design socketchat v4.0 was built from, 2026-10-19. Where the code differs, the code and SECURITY.md describe what v4.0 does.
 
 ## What this is and why
 
