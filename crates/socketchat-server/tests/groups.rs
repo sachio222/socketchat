@@ -121,7 +121,7 @@ async fn admin_add_accepted_and_welcome_delivered() {
 
 #[tokio::test]
 async fn non_admin_add_refused() {
-    let e = env().await;
+    let e = env_with(|c| c.members_can_invite = false).await;
     let mut a = e.admin().await;
     let mut b = e.member(&mut a).await;
     let mut c = e.person().await;
@@ -398,4 +398,32 @@ async fn garbage_post_refused() {
     assert!(matches!(r, Response::Refused(_)), "{r:?}");
     let _ = a.g().export_ratchet_tree().tls_serialize_detached();
     let _ = a.prov.storage();
+}
+
+#[tokio::test]
+async fn member_add_allowed_when_members_can_invite() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let mut b = e.member(&mut a).await;
+    let mut c = e.person().await;
+    let t = a.invite().await;
+    assert_eq!(c.redeem_mailbox(t).await, Response::Ok);
+    let r = b.add(c.key_package(), t).await;
+    assert!(matches!(r, Response::Posted { .. }), "{r:?}");
+}
+
+#[tokio::test]
+async fn member_cannot_remove_others_even_when_members_can_invite() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let mut b = e.member(&mut a).await;
+    let gb = b.group.as_mut().unwrap();
+    let (c, _, _) = gb
+        .remove_members(&b.prov, &b.key, &[LeafNodeIndex::new(0)])
+        .unwrap();
+    let r = b.post(ser(&c), None).await;
+    assert!(
+        matches!(r, Response::Refused(ref s) if s.contains("admin")),
+        "{r:?}"
+    );
 }

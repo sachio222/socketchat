@@ -60,7 +60,7 @@ fn key_registered(db: &Connection, k: &Key) -> bool {
 }
 
 /// The key this connection holds that is a joined member of `group`.
-fn member_key(db: &Connection, cs: &ConnState, group: &Gid) -> Option<Key> {
+pub(crate) fn member_key(db: &Connection, cs: &ConnState, group: &Gid) -> Option<Key> {
     cs.proven.iter().copied().find(|k| {
         db.query_row(
             "SELECT EXISTS(SELECT 1 FROM mailboxes
@@ -70,6 +70,11 @@ fn member_key(db: &Connection, cs: &ConnState, group: &Gid) -> Option<Key> {
         )
         .unwrap_or(false)
     })
+}
+
+/// Keys of the joined members of `group`.
+pub(crate) fn joined_keys(db: &Connection, group: &Gid) -> Vec<Key> {
+    joined(db, group).into_keys().collect()
 }
 
 /// Joined members of `group` with the log sequence at which each joined.
@@ -274,6 +279,7 @@ fn check_commit(
     committer: &Key,
     sc: &StagedCommit,
     join_order: &HashMap<Key, u64>,
+    members_can_add: bool,
 ) -> Result<(), &'static str> {
     let old_admins = parse_admins(pg.group_context());
     let is_admin = old_admins.contains(committer);
@@ -288,7 +294,7 @@ fn check_commit(
     for q in sc.queued_proposals() {
         match q.proposal() {
             Proposal::Add(a) => {
-                if !is_admin {
+                if !is_admin && !members_can_add {
                     return Err("adding people needs an admin");
                 }
                 if let Some(k) = key_of(a.key_package().leaf_node().signature_key().as_slice()) {
@@ -435,7 +441,9 @@ pub fn post(
         }
         ProcessedMessageContent::StagedCommitMessage(sc) => {
             let order = joined(&db, &group);
-            if let Err(why) = check_commit(&pg, &sender_key, &sc, &order) {
+            if let Err(why) =
+                check_commit(&pg, &sender_key, &sc, &order, state.cfg.members_can_invite)
+            {
                 return refused(why);
             }
             let added: Vec<Key> = sc

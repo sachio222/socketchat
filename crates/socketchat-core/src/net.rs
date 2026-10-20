@@ -374,6 +374,16 @@ impl Conn {
         self.keys.lock().unwrap().retain(|k| &k.public() != key);
     }
 
+    /// A push that already arrived, without waiting.
+    pub fn try_push(&mut self) -> Option<Push> {
+        self.pushes.try_recv().ok()
+    }
+
+    /// Polls for the next push; `Ready(None)` means the connection dropped.
+    pub fn poll_push(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Push>> {
+        self.pushes.poll_recv(cx)
+    }
+
     /// The next push from the server. `None` means the connection dropped.
     pub async fn next_push(&mut self) -> Option<Push> {
         self.pushes.recv().await

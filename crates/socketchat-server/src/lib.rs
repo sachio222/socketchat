@@ -9,6 +9,7 @@ pub mod config;
 mod conn;
 pub mod db;
 mod groups;
+mod invites;
 pub mod tls;
 
 use std::net::SocketAddr;

@@ -2627,6 +2627,8 @@ dependencies = [
 name = "socketchat-testkit"
 version = "0.4.0"
 dependencies = [
+ "openmls_rust_crypto",
+ "rusqlite",
  "socketchat-core",
  "socketchat-proto",
  "socketchat-server",

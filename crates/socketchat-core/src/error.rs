@@ -8,6 +8,10 @@ pub enum CoreError {
     NoProfile,
     #[error("a profile already exists here")]
     ProfileExists,
+    #[error(transparent)]
+    Net(#[from] crate::net::NetError),
+    #[error("group encryption: {0}")]
+    Mls(String),
     #[error("local storage: {0}")]
     Storage(String),
     #[error("{0}")]
