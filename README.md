@@ -93,7 +93,7 @@ Joining from the command line:
 
 ## What the server sees
 
-The server stores and forwards encrypted data. It never sees message text, file contents, display names, group names, or any key that can decrypt them. It does see the size and timing of encrypted messages and files, the IP addresses of connected apps, and for each group a list of random keys and the signed changes to that list. A person gets a fresh random key in every group, so no key or ID in the server's records ties one person's groups together. Someone watching the server live can still link a person's groups by IP address and connection, and one more exception, for people who send invites, is described in SECURITY.md.
+The server stores and forwards encrypted data. It never sees message text, file contents, display names, group names, or any key that can decrypt them. It does see the size and timing of encrypted messages and files, the IP addresses of connected apps, and for each group a list of random keys and the signed changes to that list. A person gets a fresh random key in every group, so no key or ID in the server's records ties one person's groups together. Someone watching the server live can still link a person's groups by IP address and connection.
 
 [SECURITY.md](SECURITY.md) has the full list, the cryptography, and what socketchat does not protect.
 
