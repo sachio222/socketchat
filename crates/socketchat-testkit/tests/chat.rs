@@ -9,7 +9,7 @@ async fn group(s: &TestServer, names: &[&str]) -> (GroupId, Vec<TestClient>) {
     let g = a.create_group("Crew").await.unwrap();
     let mut all = vec![a];
     for n in &names[1..] {
-        let link = all[0].invite(Some(g), false).await.unwrap();
+        let link = all[0].invite(Some(g), false).await.unwrap().0;
         let mut c = TestClient::new(s, n).await;
         c.join(&link).await.unwrap();
         all.push(c);
@@ -43,7 +43,7 @@ fn key_of(c: &TestClient, g: GroupId) -> Key {
 async fn direct_message() {
     let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;
-    let link = a.invite(None, true).await.unwrap();
+    let link = a.invite(None, true).await.unwrap().0;
     let mut b = TestClient::profile_only("Bo").await;
     b.join(&link).await.unwrap();
     settle(&mut [&mut a, &mut b]).await;
@@ -179,7 +179,7 @@ async fn new_identity_same_name_not_verified() {
     let s = TestServer::start().await;
     let (g, mut all) = group(&s, &["Ada", "Bo"]).await;
     // Bo invites a stranger who also calls themselves Bo.
-    let link = all[1].invite(Some(g), false).await.unwrap();
+    let link = all[1].invite(Some(g), false).await.unwrap().0;
     let mut impostor = TestClient::new(&s, "Bo").await;
     impostor.join(&link).await.unwrap();
     all.push(impostor);
@@ -258,7 +258,7 @@ async fn commit_in_flight_when_connection_drops_applies_once() {
     let mut a = TestClient::profile_only("Ada").await;
     a.join(&link).await.unwrap();
     let g = a.create_group("G").await.unwrap();
-    let mut inv = a.invite(Some(g), false).await.unwrap();
+    let mut inv = a.invite(Some(g), false).await.unwrap().0;
     inv.port = s.addr().port();
     let mut b = TestClient::new(&s, "Bo").await;
     b.join(&inv).await.unwrap();

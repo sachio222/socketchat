@@ -1,6 +1,6 @@
 ---
 source: crates/socketchat-tui/tests/screens.rs
-expression: "render(&app, &crew(), 80, 24)"
+expression: small
 ---
 ┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
 │# Book club       ││09:14 Ada: Who is bringing the book   ││✓ Ada* (you)      │
@@ -10,8 +10,8 @@ expression: "render(&app, &crew(), 80, 24)"
 │                  ││09:16 Cy: Got it, thanks. Saturday    ││                  │
 │                  ││      still works for me, and I can   ││                  │
 │ ┌ Invite link ─────────────────────────────────────────────────────────────┐ │
-│ │Send this link to one person. It works once and expires in 24 hours.      │ │
-│ │Anyone who has it can ask to join.                                        │ │
+│ │Send this link to one person. It works once and expires in 2 hours. Anyone│ │
+│ │who has it can ask to join.                                               │ │
 │ │                                                                          │ │
 │ │socketchat://chat.example.com:7444/j/AAECAwQFBgcICQoLDA0ODw#3q2-7wABAgMEBQ│ │
 │ │YHCAkKCwwNDg8QERITFBUWFxgZGhs.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.│ │

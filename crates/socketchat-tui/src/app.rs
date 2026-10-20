@@ -36,10 +36,23 @@ impl Focus {
     }
 }
 
+/// The status line after sending a file: a photo says it was cleaned, so
+/// the person knows the app removed its location and device data.
+pub fn sent_file_status(offer: &socketchat_core::files::FileOffer) -> Option<String> {
+    offer.metadata_removed().then(|| {
+        format!(
+            "Sent {} with its location and device data removed.",
+            offer.name
+        )
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Modal {
     Invite {
         link: String,
+        /// Hours until the link expires, as the server set them.
+        hours: u64,
     },
     Verify {
         name: String,
@@ -118,7 +131,7 @@ impl App {
             let act = match (m, yes) {
                 (Modal::Verify { key, .. }, true) => Some(Action::MarkVerified(*key)),
                 (Modal::ConfirmVideo { path }, true) => Some(Action::ConfirmVideo(path.clone())),
-                (Modal::Invite { link }, _) if matches!(k.code, KeyCode::Char('c' | 'C')) => {
+                (Modal::Invite { link, .. }, _) if matches!(k.code, KeyCode::Char('c' | 'C')) => {
                     self.status =
                         Some("Link copied. Paste it to the person you are inviting.".into());
                     return vec![Action::Copy(link.clone())];

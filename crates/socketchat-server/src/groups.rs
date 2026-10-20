@@ -118,7 +118,7 @@ pub fn register_mailbox(
             if db
                 .execute(
                     "INSERT INTO mailboxes (key, group_id, created_unix) VALUES (?1, NULL, ?2)",
-                    params![key.0.as_slice(), now as i64],
+                    params![key.0.as_slice(), state.today() as i64],
                 )
                 .is_err()
             {
@@ -146,7 +146,7 @@ pub fn register_mailbox(
                 .and_then(|_| {
                     db.execute(
                         "INSERT INTO mailboxes (key, group_id, created_unix) VALUES (?1, ?2, ?3)",
-                        params![key.0.as_slice(), group, now as i64],
+                        params![key.0.as_slice(), group, state.today() as i64],
                     )
                 })
                 .and_then(|_| {

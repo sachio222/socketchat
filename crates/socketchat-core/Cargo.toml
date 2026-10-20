@@ -17,6 +17,7 @@ openmls_traits.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
 hmac.workspace = true
+hkdf.workspace = true
 rand_core.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true

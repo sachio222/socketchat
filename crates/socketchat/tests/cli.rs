@@ -45,6 +45,11 @@ impl Drop for Server {
 }
 
 fn server() -> Server {
+    server_with_config(|c| c)
+}
+
+/// A server whose config file `edit` rewrites between init and run.
+fn server_with_config(edit: impl FnOnce(String) -> String) -> Server {
     let dir = tempfile::tempdir().unwrap();
     let listen = format!("127.0.0.1:{}", free_port());
     let d = dir.path().to_str().unwrap();
@@ -62,6 +67,8 @@ fn server() -> Server {
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", out(&o));
+    let cfg = dir.path().join("socketchat-server.toml");
+    std::fs::write(&cfg, edit(std::fs::read_to_string(&cfg).unwrap())).unwrap();
     let mut child = Command::new(BIN)
         .args(["server", "run", "--data-dir", d])
         .stdout(Stdio::piped())
@@ -141,6 +148,43 @@ fn server_invite_prints_link() {
     let link = server_invite(&s);
     assert!(link.starts_with("socketchat://127.0.0.1:"), "{link}");
     assert_eq!(link.lines().count(), 1);
+}
+
+#[test]
+fn invites_state_the_configured_expiry() {
+    let s = server_with_config(|c| {
+        assert!(c.contains("invite_ttl_hours = 24"), "{c}");
+        c.replace("invite_ttl_hours = 24", "invite_ttl_hours = 2")
+    });
+    let o = Command::new(BIN)
+        .args([
+            "server",
+            "invite",
+            "--data-dir",
+            s.dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", out(&o));
+    let said = String::from_utf8_lossy(&o.stderr);
+    assert!(said.contains("expires in 2 hours."), "{said}");
+    let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    assert!(run(&ada, &["join", &link]).status.success());
+    assert!(run(&ada, &["new", "Crew"]).status.success());
+    for args in [
+        ["invite", "--group", "Crew"].as_slice(),
+        ["invite", "--dm"].as_slice(),
+    ] {
+        let o = run(&ada, args);
+        assert!(o.status.success(), "{}", out(&o));
+        let said = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            said.contains("It works once and expires in 2 hours."),
+            "{args:?}: {said}"
+        );
+    }
 }
 
 #[test]

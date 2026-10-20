@@ -7,8 +7,8 @@ expression: "render(&app, &crew(), 100, 50)"
 │@ Bo             3││09:15 Bo: Me. Sending it now.                             ││✓ Bo              │
 │# Climbing Sat… 12││09:15 · Bo sent books.pdf (84 KB)                         ││  Cy              │
 │           ┌ Invite link ─────────────────────────────────────────────────────────────┐           │
-│           │Send this link to one person. It works once and expires in 24 hours.      │           │
-│           │Anyone who has it can ask to join.                                        │           │
+│           │Send this link to one person. It works once and expires in 2 hours. Anyone│           │
+│           │who has it can ask to join.                                               │           │
 │           │                                                                          │           │
 │           │socketchat://chat.example.com:7444/j/AAECAwQFBgcICQoLDA0ODw#3q2-7wABAgMEBQ│           │
 │           │YHCAkKCwwNDg8QERITFBUWFxgZGhs.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.│           │

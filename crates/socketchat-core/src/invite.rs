@@ -44,3 +44,40 @@ pub fn pick_key_package(
         (kp.ciphersuite() == suite).then_some(kp)
     })
 }
+
+/// Whole hours from `now_unix` until `expires_unix`, rounded to the nearest
+/// hour so a few seconds of travel time or clock drift do not show.
+pub fn hours_left(expires_unix: u64, now_unix: u64) -> u64 {
+    (expires_unix.saturating_sub(now_unix) + 1800) / 3600
+}
+
+/// "1 hour" or "N hours", for sentences about when a link expires.
+pub fn hours_text(hours: u64) -> String {
+    if hours == 1 {
+        "1 hour".into()
+    } else {
+        format!("{hours} hours")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hours_left_rounds_to_the_nearest_hour() {
+        let now = 1_800_000_000;
+        assert_eq!(hours_left(now + 2 * 3600, now), 2);
+        assert_eq!(hours_left(now + 2 * 3600 - 5, now), 2);
+        assert_eq!(hours_left(now + 2 * 3600 + 5, now), 2);
+        assert_eq!(hours_left(now + 48 * 3600, now), 48);
+        assert_eq!(hours_left(now, now + 10), 0, "already expired");
+    }
+
+    #[test]
+    fn hours_text_counts_one_hour_as_singular() {
+        assert_eq!(hours_text(1), "1 hour");
+        assert_eq!(hours_text(2), "2 hours");
+        assert_eq!(hours_text(24), "24 hours");
+    }
+}

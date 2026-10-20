@@ -16,7 +16,10 @@ use socketchat_proto::{InviteLink, Token};
 
 use crate::appmsg::AppMsg;
 use crate::invite::{key_package_blob, pick_key_package};
-use crate::keys::{fingerprint, invite_mac, mac_matches, Binding, GroupId, Key, KeyPair, Voucher};
+use crate::keys::{
+    fingerprint, invite_mac, mac_matches, open_voucher, seal_voucher, Binding, GroupId, Key,
+    KeyPair, Voucher,
+};
 use crate::net::{Conn, NetError};
 use crate::provider::Provider;
 use crate::store::{GroupRow, PendingJoin, Profile, Store};
@@ -481,12 +484,14 @@ impl Client {
                 .try_into()
                 .map_err(|_| CoreError::Mls("group ID is not 16 bytes".into()))?,
         );
-        let voucher: Option<Voucher> = postcard::from_bytes(&w.voucher).ok();
         let now = self.now();
         let (inviter_fpr, link_secret) = link
             .as_ref()
             .map(|l| (l.inviter_fpr, l.secret))
             .unwrap_or((None, None));
+        // A voucher that does not open under the link's secret counts as
+        // missing: the invite could not be checked.
+        let voucher: Option<Voucher> = link_secret.and_then(|s| open_voucher(&s, &w.voucher));
         let verification = match (&voucher, inviter_fpr, link_secret, adder) {
             _ if dm_from.is_some() => {
                 // A direct message offered inside a shared group: the
@@ -796,12 +801,13 @@ impl Client {
         ))
     }
 
-    /// Makes an invite link. `group: None` makes a server invite.
+    /// Makes an invite link and returns it with the Unix time it expires.
+    /// `group: None` makes a server invite.
     pub async fn invite(
         &mut self,
         group: Option<GroupId>,
         dm: bool,
-    ) -> Result<InviteLink, CoreError> {
+    ) -> Result<(InviteLink, u64), CoreError> {
         let gid = match (group, dm) {
             (_, true) => Some(
                 self.create_group_on(self.account_server()?, "", true)
@@ -855,7 +861,13 @@ impl Client {
             link.inviter_fpr = Some(fingerprint(&self.profile.identity.public()));
             link.secret = Some(secret);
         }
-        Ok(link)
+        Ok((link, expires_unix))
+    }
+
+    /// Whole hours from now until `expires_unix`, for telling someone when
+    /// an invite link stops working.
+    pub fn hours_until(&self, expires_unix: u64) -> u64 {
+        crate::invite::hours_left(expires_unix, self.now())
     }
 
     async fn handle_join_request(
@@ -914,7 +926,9 @@ impl Client {
             let welcome = WelcomeOut {
                 token,
                 welcome: ser(&welcome)?,
-                voucher: vbytes.clone(),
+                // Sealed under the invite secret: the server stores it but
+                // cannot read the inviter's identity key inside.
+                voucher: seal_voucher(&secret, &voucher),
             };
             match self.post_commit(gid, commit, Some(welcome)).await {
                 Ok(Some(seq)) => {
@@ -1839,13 +1853,13 @@ impl Client {
 
     /// Sends a file, photo or video to a group. Photos lose their location
     /// and device data first. A video keeps its own, so it needs
-    /// `video_ok`.
+    /// `video_ok`. Returns the offer the group received.
     pub async fn send_file(
         &mut self,
         gid: GroupId,
         path: &Path,
         video_ok: bool,
-    ) -> Result<socketchat_proto::msg::FileId, CoreError> {
+    ) -> Result<crate::files::FileOffer, CoreError> {
         use crate::files::*;
         let server_id = self.server_of(&gid)?;
         let mut head = [0u8; 16];
@@ -1929,7 +1943,7 @@ impl Client {
         let now = self.now();
         self.store
             .add_message(&gid, seq, me.as_ref(), kind::FILE, &text, now)?;
-        Ok(id)
+        Ok(offer)
     }
 
     /// Downloads, opens and checks a file, then saves it in `dir` under a

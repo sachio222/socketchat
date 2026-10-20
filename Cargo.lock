@@ -3678,6 +3678,7 @@ dependencies = [
  "argon2",
  "chacha20poly1305",
  "ed25519-dalek",
+ "hkdf 0.12.4",
  "hmac 0.12.1",
  "img-parts",
  "openmls",

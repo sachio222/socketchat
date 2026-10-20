@@ -4,7 +4,7 @@ use rusqlite::params;
 use socketchat_proto::msg::FileId;
 
 use crate::invites::JOIN_WAIT_SECS;
-use crate::State;
+use crate::{State, DAY_SECS};
 
 /// Mailboxes made for a group nobody created, or for an invite nobody
 /// completed, go after this long.
@@ -14,7 +14,9 @@ pub fn sweep(state: &State) {
     let now = state.now();
     let cutoff = now.saturating_sub(state.cfg.retention_days as u64 * 24 * 3600) as i64;
     let join_cutoff = now.saturating_sub(JOIN_WAIT_SECS) as i64;
-    let mailbox_cutoff = now.saturating_sub(STALE_MAILBOX_SECS) as i64;
+    // Mailbox times are rounded down to the day, so allow one more day:
+    // a mailbox waiting on a join is never removed before the full wait.
+    let mailbox_cutoff = now.saturating_sub(STALE_MAILBOX_SECS + DAY_SECS) as i64;
     let db = state.db.lock().unwrap();
     let _ = db.execute("DELETE FROM log WHERE created_unix < ?1", [cutoff]);
     let _ = db.execute("DELETE FROM welcomes WHERE created_unix < ?1", [cutoff]);

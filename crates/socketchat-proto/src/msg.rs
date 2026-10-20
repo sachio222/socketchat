@@ -125,6 +125,8 @@ pub struct WelcomeOut {
     pub token: Token,
     #[serde(with = "serde_bytes")]
     pub welcome: Vec<u8>,
+    /// The voucher sealed under a key from the invite secret, which the
+    /// server never holds. Empty for a direct message.
     #[serde(with = "serde_bytes")]
     pub voucher: Vec<u8>,
 }

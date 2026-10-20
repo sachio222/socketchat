@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use socketchat_core::client::{Client, Event, JoinStatus, Verification};
+use socketchat_core::invite::hours_text;
 use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
 use socketchat_proto::InviteLink;
@@ -303,9 +304,11 @@ async fn server(cmd: ServerCmd) -> Result<(), Fail> {
             Ok(())
         }
         ServerCmd::Invite { data_dir } => {
-            let link = make_server_invite(&server_dir(data_dir))?;
+            let dir = server_dir(data_dir);
+            let link = make_server_invite(&dir)?;
+            let hours = hours_text(Config::load(&dir)?.invite_ttl_hours.into());
             println!("{link}");
-            eprintln!("This link registers one person and expires in 24 hours.");
+            eprintln!("This link registers one person and expires in {hours}.");
             Ok(())
         }
     }
@@ -345,7 +348,7 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
         Some(Cmd::Invite { group, dm }) => {
             let mut c = open().await?;
             c.sync().await?;
-            let link = match (group, dm) {
+            let (link, expires_unix) = match (group, dm) {
                 (None, true) => c.invite(None, true).await?,
                 (Some(g), false) => {
                     let gid = group_by_name(&c, &g)?;
@@ -353,8 +356,9 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
                 }
                 _ => return Err(Fail(1, "Use --group <name>, or --dm on its own.".into())),
             };
+            let hours = hours_text(c.hours_until(expires_unix));
             println!("{link}");
-            eprintln!("Send this to one person. It works once and expires in 24 hours.");
+            eprintln!("Send this to one person. It works once and expires in {hours}.");
             Ok(())
         }
         Some(Cmd::Send { group, text }) => {

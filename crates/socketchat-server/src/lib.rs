@@ -124,7 +124,21 @@ impl State {
     pub fn now(&self) -> u64 {
         system_now() + self.clock_offset.load(Ordering::Relaxed)
     }
+
+    /// Today, as the Unix time of its first second. Account and mailbox
+    /// records store this instead of the exact second, so an account and a
+    /// mailbox made by one group invite cannot be paired by their times.
+    pub fn today(&self) -> u64 {
+        start_of_day(self.now())
+    }
 }
+
+/// `t` rounded down to a whole day.
+pub fn start_of_day(t: u64) -> u64 {
+    t - t % DAY_SECS
+}
+
+pub const DAY_SECS: u64 = 24 * 3600;
 
 pub struct Server;
 

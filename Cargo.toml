@@ -30,6 +30,7 @@ rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
 ed25519-dalek = { version = "2.2", features = ["rand_core", "zeroize"] }
 sha2 = "0.10"
 hmac = "0.12"
+hkdf = "0.12"
 rand_core = { version = "0.6", features = ["getrandom"] }
 argon2 = "0.5"
 chacha20poly1305 = { version = "0.10", features = ["stream"] }

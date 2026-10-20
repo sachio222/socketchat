@@ -39,11 +39,11 @@ async fn server_restart_keeps_all_state() {
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
     let mut b = TestClient::new(&s, "Bo").await;
-    b.join(&a.invite(Some(g), false).await.unwrap())
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
         .await
         .unwrap();
     let mut c = TestClient::new(&s, "Cy").await;
-    c.join(&a.invite(Some(g), false).await.unwrap())
+    c.join(&a.invite(Some(g), false).await.unwrap().0)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut b, &mut c]).await;
@@ -72,11 +72,11 @@ async fn retention_sweep_deletes_old_entries() {
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
     let mut b = TestClient::new(&s, "Bo").await;
-    b.join(&a.invite(Some(g), false).await.unwrap())
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut b]).await;
-    let _unused = a.invite(Some(g), false).await.unwrap();
+    let _unused = a.invite(Some(g), false).await.unwrap().0;
     a.send_text(g, "Bo never reads this").await.unwrap();
     let db = open_server_db(&s);
     let count = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -95,7 +95,7 @@ async fn server_bytes_hold_no_plaintext() {
     let mut a = TestClient::new(&s, "Zelda Quixote").await;
     let g = a.create_group("Velvet Harbor Society").await.unwrap();
     let mut b = TestClient::new(&s, "Ignatius Plumtree").await;
-    b.join(&a.invite(Some(g), false).await.unwrap())
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut b]).await;
@@ -145,18 +145,34 @@ async fn server_cannot_link_person_across_groups() {
     let mut c = TestClient::new(&s, "Cy").await;
     let g2 = c.create_group("Two").await.unwrap();
     let mut p = TestClient::new(&s, "Pat").await;
-    p.join(&a.invite(Some(g1), false).await.unwrap())
+    p.join(&a.invite(Some(g1), false).await.unwrap().0)
         .await
         .unwrap();
-    p.join(&c.invite(Some(g2), false).await.unwrap())
+    p.join(&c.invite(Some(g2), false).await.unwrap().0)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut c, &mut p]).await;
     let (k1, k2) = (p.my_group_key(g1).unwrap(), p.my_group_key(g2).unwrap());
     assert_ne!(k1, k2, "a fresh key in each group");
-    let identity = p.identity();
-    for (path, bytes) in all_bytes(s.dir.path()) {
-        assert!(!has(&bytes, &identity.0), "identity key found in {path}");
+    // No identity key reaches the server: not the joiner's, and not the
+    // inviters' either, whose signed vouchers travel with each Welcome.
+    let identities = [
+        ("Ada", a.identity()),
+        ("Cy", c.identity()),
+        ("Pat", p.identity()),
+    ];
+    let files = all_bytes(s.dir.path());
+    assert!(
+        files.iter().any(|(path, _)| path.ends_with("-wal")),
+        "the scan covers the write-ahead log"
+    );
+    for (path, bytes) in files {
+        for (who, identity) in &identities {
+            assert!(
+                !has(&bytes, &identity.0),
+                "{who}'s identity key found in {path}"
+            );
+        }
     }
     let db = open_server_db(&s);
     let group_of = |k: &[u8]| -> Vec<u8> {
@@ -183,6 +199,64 @@ async fn server_cannot_link_person_across_groups() {
         .query_row("SELECT count(*) FROM joins", [], |r| r.get(0))
         .unwrap();
     assert_eq!(joins, 0, "finished joins leave no token-to-mailbox record");
+}
+
+#[tokio::test]
+async fn account_and_mailbox_times_are_whole_days() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    // Pat has no account yet, so the group invite registers an account and
+    // a mailbox together.
+    let mut p = TestClient::profile_only("Pat").await;
+    p.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut p]).await;
+    let db = open_server_db(&s);
+    let times = |sql: &str| -> Vec<i64> {
+        db.prepare(sql)
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let accounts = times("SELECT created_unix FROM accounts");
+    let mailboxes = times("SELECT created_unix FROM mailboxes");
+    assert_eq!(accounts.len(), 2, "Ada's and Pat's");
+    assert_eq!(mailboxes.len(), 2, "one in G for each");
+    for t in accounts.iter().chain(&mailboxes) {
+        assert_eq!(t % 86400, 0, "{t} is not a whole day");
+    }
+}
+
+#[tokio::test]
+async fn unfinished_join_mailbox_lasts_at_least_seven_days() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let mut p = TestClient::new(&s, "Pat").await;
+    // Nobody lets Pat in, so the mailbox stays unjoined.
+    p.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    let db = open_server_db(&s);
+    let waiting = || -> i64 {
+        db.query_row(
+            "SELECT count(*) FROM mailboxes WHERE joined_seq IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(waiting(), 1);
+    s.handle.advance_clock(7 * 24 * 3600 - 3600);
+    s.handle.sweep_now();
+    assert_eq!(waiting(), 1, "kept for the full seven-day wait");
+    s.handle.advance_clock(24 * 3600 + 7200);
+    s.handle.sweep_now();
+    assert_eq!(waiting(), 0, "gone a day later");
 }
 
 #[test]

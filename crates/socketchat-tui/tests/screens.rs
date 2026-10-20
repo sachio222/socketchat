@@ -3,7 +3,7 @@ use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use socketchat_core::keys::Key;
 use socketchat_proto::msg::GroupId;
-use socketchat_tui::app::{Action, App, Focus, Modal};
+use socketchat_tui::app::{sent_file_status, Action, App, Focus, Modal};
 use socketchat_tui::commands::{parse_command, Command};
 use socketchat_tui::ui::{draw, GroupView, LineView, MemberLine, ViewModel};
 
@@ -148,9 +148,20 @@ fn screen_invite_modal_with_qr() {
     let link = "socketchat://chat.example.com:7444/j/AAECAwQFBgcICQoLDA0ODw#3q2-7wABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhs.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
     let mut app = App::new();
     app.selected = Some(g(1));
-    app.modal = Some(Modal::Invite { link: link.into() });
-    insta::assert_snapshot!("invite_80x24", render(&app, &crew(), 80, 24));
+    app.modal = Some(Modal::Invite {
+        link: link.into(),
+        hours: 2,
+    });
+    let small = render(&app, &crew(), 80, 24);
+    assert!(small.contains("expires in 2 hours."), "{small}");
+    insta::assert_snapshot!("invite_80x24", small);
     insta::assert_snapshot!("invite_100x50", render(&app, &crew(), 100, 50));
+    app.modal = Some(Modal::Invite {
+        link: link.into(),
+        hours: 1,
+    });
+    let one = render(&app, &crew(), 100, 50);
+    assert!(one.contains("expires in 1 hour."), "{one}");
     assert_eq!(
         app.handle_key(key(KeyCode::Char('c')), &crew()),
         vec![Action::Copy(link.into())]
@@ -247,4 +258,37 @@ fn groups_focus_arrows_change_selection() {
         app.handle_key(key(KeyCode::Down), &vm),
         vec![Action::Select(g(2))]
     );
+}
+
+fn offer(name: &str, mime: &str) -> socketchat_core::files::FileOffer {
+    socketchat_core::files::FileOffer {
+        id: socketchat_proto::msg::FileId([0; 16]),
+        name: name.into(),
+        size: 1000,
+        mime: mime.into(),
+        sha256: [0; 32],
+        key: [0; 32],
+        nonce_prefix: [0; 19],
+    }
+}
+
+#[test]
+fn status_after_sending_a_photo_says_it_was_cleaned() {
+    for (name, mime) in [
+        ("beach.jpg", "image/jpeg"),
+        ("map.png", "image/png"),
+        ("cat.webp", "image/webp"),
+    ] {
+        assert_eq!(
+            sent_file_status(&offer(name, mime)),
+            Some(format!(
+                "Sent {name} with its location and device data removed."
+            ))
+        );
+    }
+    assert_eq!(
+        sent_file_status(&offer("books.pdf", "application/octet-stream")),
+        None
+    );
+    assert_eq!(sent_file_status(&offer("clip.mp4", "video")), None);
 }

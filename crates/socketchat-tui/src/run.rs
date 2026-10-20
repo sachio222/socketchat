@@ -19,7 +19,7 @@ use socketchat_proto::msg::GroupId;
 use socketchat_proto::InviteLink;
 use tokio::sync::mpsc;
 
-use crate::app::{Action, App, Modal};
+use crate::app::{sent_file_status, Action, App, Modal};
 use crate::commands::Command;
 use crate::ui::{draw, GroupView, LineView, MemberLine, ViewModel};
 
@@ -281,13 +281,14 @@ impl Screen {
             Command::Quit => self.quit = true,
             Command::Help => self.app.modal = Some(Modal::Help),
             Command::Invite { dm } => {
-                let link = if dm {
+                let (link, expires_unix) = if dm {
                     self.client.invite(None, true).await.map_err(e)?
                 } else {
                     self.client.invite(Some(need()?), false).await.map_err(e)?
                 };
                 self.app.modal = Some(Modal::Invite {
                     link: link.to_string(),
+                    hours: self.client.hours_until(expires_unix),
                 });
             }
             Command::Join(link) => {
@@ -320,7 +321,9 @@ impl Screen {
                         self.app.modal = Some(Modal::ConfirmVideo { path })
                     }
                     r => {
-                        r.map_err(e)?;
+                        if let Some(said) = sent_file_status(&r.map_err(e)?) {
+                            self.app.status = Some(said);
+                        }
                     }
                 }
             }

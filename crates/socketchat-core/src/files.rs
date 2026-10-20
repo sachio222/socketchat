@@ -36,6 +36,16 @@ pub struct FileOffer {
     pub nonce_prefix: [u8; 19],
 }
 
+impl FileOffer {
+    /// Whether this is a photo the sender's app cleaned of location and
+    /// device data before sending. Other files and videos go as they are.
+    pub fn metadata_removed(&self) -> bool {
+        [Kind::Jpeg, Kind::Png, Kind::WebP]
+            .iter()
+            .any(|k| self.mime == mime(*k))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Jpeg,

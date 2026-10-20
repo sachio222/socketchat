@@ -25,7 +25,7 @@ async fn group_invite_join_verified_by_inviter() {
     let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("Book club").await.unwrap();
-    let link = a.invite(Some(g), false).await.unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
     assert!(link.inviter_fpr.is_some() && link.secret.is_some());
     let mut b = TestClient::profile_only("Bo").await;
     assert!(matches!(
@@ -53,14 +53,14 @@ async fn join_completed_by_other_admin_when_inviter_offline_is_verified() {
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
     let mut c = TestClient::profile_only("Cy").await;
-    c.join(&a.invite(Some(g), false).await.unwrap())
+    c.join(&a.invite(Some(g), false).await.unwrap().0)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut c]).await;
     let ck = c.my_group_key(g).unwrap();
     a.make_admin(g, &ck).await.unwrap();
     settle(&mut [&mut a, &mut c]).await;
-    let link = a.invite(Some(g), false).await.unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
     settle(&mut [&mut a, &mut c]).await;
     // Ada goes offline; Cy, an admin, completes the join.
     drop(a);
@@ -76,7 +76,7 @@ async fn invite_single_use() {
     let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
-    let link = a.invite(Some(g), false).await.unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
     let mut b = TestClient::profile_only("Bo").await;
     b.join(&link).await.unwrap();
     let mut c = TestClient::profile_only("Cy").await;
@@ -92,7 +92,7 @@ async fn invite_expiry() {
     let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
-    let link = a.invite(Some(g), false).await.unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
     s.handle.advance_clock(25 * 3600);
     let mut b = TestClient::profile_only("Bo").await;
     let err = b.join(&link).await.unwrap_err();
@@ -103,11 +103,22 @@ async fn invite_expiry() {
 }
 
 #[tokio::test]
+async fn invite_reports_the_server_expiry() {
+    let s = TestServer::start_with(|c| c.invite_ttl_hours = 2).await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    for (group, dm) in [(Some(g), false), (None, true)] {
+        let (_, expires_unix) = a.invite(group, dm).await.unwrap();
+        assert_eq!(a.hours_until(expires_unix), 2, "{group:?} {dm}");
+    }
+}
+
+#[tokio::test]
 async fn mismatched_inviter_fingerprint_warns() {
     let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
-    let mut link = a.invite(Some(g), false).await.unwrap();
+    let mut link = a.invite(Some(g), false).await.unwrap().0;
     link.inviter_fpr = Some(fingerprint(&KeyPair::generate().public()));
     let mut b = TestClient::profile_only("Bo").await;
     b.join(&link).await.unwrap();
@@ -128,7 +139,7 @@ async fn server_cannot_forge_join() {
     let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
-    let link = a.invite(Some(g), false).await.unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
     // Ada is offline while Bo redeems, so the only copy of the request she
     // will see is the one the server hands her later.
     let mut a = a.reopen().await;
@@ -159,7 +170,7 @@ async fn members_cannot_invite_when_disabled() {
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
     let mut b = TestClient::new(&s, "Bo").await;
-    b.join(&a.invite(Some(g), false).await.unwrap())
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut b]).await;
@@ -177,13 +188,13 @@ async fn two_admins_race_on_one_join() {
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
     let mut c = TestClient::profile_only("Cy").await;
-    c.join(&a.invite(Some(g), false).await.unwrap())
+    c.join(&a.invite(Some(g), false).await.unwrap().0)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut c]).await;
     let ck = c.my_group_key(g).unwrap();
     a.make_admin(g, &ck).await.unwrap();
-    let link = a.invite(Some(g), false).await.unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
     settle(&mut [&mut a, &mut c]).await;
     drain(&mut a).await;
     drain(&mut c).await;

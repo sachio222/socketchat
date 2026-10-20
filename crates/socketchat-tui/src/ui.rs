@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
+use socketchat_core::invite::hours_text;
 use socketchat_core::keys::Key;
 use socketchat_proto::msg::GroupId;
 
@@ -400,9 +401,12 @@ fn draw_modal(f: &mut Frame, m: &Modal, area: Rect) {
     let width = area.width.saturating_sub(4).min(76);
     let inner_w = width.saturating_sub(2) as usize;
     let (title, mut lines): (String, Vec<Line>) = match m {
-        Modal::Invite { link } => {
+        Modal::Invite { link, hours } => {
             let mut v: Vec<Line> = wrap(
-                "Send this link to one person. It works once and expires in 24 hours. Anyone who has it can ask to join.",
+                &format!(
+                    "Send this link to one person. It works once and expires in {}. Anyone who has it can ask to join.",
+                    hours_text(*hours)
+                ),
                 inner_w,
             )
             .into_iter()

@@ -4,15 +4,19 @@
 //! byte, then the message, so a signature made for one purpose never
 //! verifies for another.
 
+use chacha20poly1305::aead::{Aead, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use openmls::prelude::{BasicCredential, CredentialWithKey};
 use openmls_traits::signatures::{Signer, SignerError};
 use openmls_traits::types::SignatureScheme;
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use socketchat_proto::Token;
+use zeroize::Zeroizing;
 
 pub use socketchat_proto::msg::{GroupId, Key, Sig};
 
@@ -271,6 +275,62 @@ impl Voucher {
     }
 }
 
+/// Labels the key and the associated data for a voucher sealed to a joiner.
+const VOUCHER_SEAL: &[u8] = b"socketchat/v1/voucher-seal";
+const SEAL_NONCE_LEN: usize = 24;
+
+fn voucher_seal_cipher(secret: &[u8; 32]) -> XChaCha20Poly1305 {
+    let mut key = Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(None, secret)
+        .expand(VOUCHER_SEAL, key.as_mut())
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    <XChaCha20Poly1305 as chacha20poly1305::KeyInit>::new(key.as_ref().into())
+}
+
+/// Seals a voucher for the joiner, who holds the invite secret from the link.
+/// The server stores and forwards the result but cannot read it, so it never
+/// learns the inviter's identity key.
+///
+/// Key: HKDF-SHA256 of the invite secret (no salt, info
+/// `socketchat/v1/voucher-seal`). Cipher: XChaCha20-Poly1305 with a fresh
+/// random nonce. Output: nonce, then ciphertext.
+pub fn seal_voucher(secret: &[u8; 32], voucher: &Voucher) -> Vec<u8> {
+    let plain = Zeroizing::new(postcard::to_stdvec(voucher).expect("a voucher always encodes"));
+    let mut nonce = [0u8; SEAL_NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+    let sealed = voucher_seal_cipher(secret)
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &plain,
+                aad: VOUCHER_SEAL,
+            },
+        )
+        .expect("XChaCha20-Poly1305 encrypts any voucher-sized message");
+    [nonce.as_slice(), &sealed].concat()
+}
+
+/// Opens a voucher sealed by [`seal_voucher`]. `None` when the secret is
+/// wrong or any byte was changed.
+pub fn open_voucher(secret: &[u8; 32], sealed: &[u8]) -> Option<Voucher> {
+    if sealed.len() < SEAL_NONCE_LEN {
+        return None;
+    }
+    let (nonce, body) = sealed.split_at(SEAL_NONCE_LEN);
+    let plain = Zeroizing::new(
+        voucher_seal_cipher(secret)
+            .decrypt(
+                XNonce::from_slice(nonce),
+                Payload {
+                    msg: body,
+                    aad: VOUCHER_SEAL,
+                },
+            )
+            .ok()?,
+    );
+    postcard::from_bytes(&plain).ok()
+}
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// MAC of a KeyPackage keyed by the invite secret. Only someone holding the
@@ -420,6 +480,47 @@ mod tests {
         assert_eq!(
             v.verify(&fingerprint(&id.public()), NOW + 3601),
             Err(VoucherError::Expired)
+        );
+    }
+
+    #[test]
+    fn sealed_voucher_roundtrip() {
+        let v = voucher(&KeyPair::generate());
+        let sealed = seal_voucher(&[7; 32], &v);
+        assert_eq!(open_voucher(&[7; 32], &sealed), Some(v));
+    }
+
+    #[test]
+    fn sealed_voucher_needs_the_invite_secret() {
+        let v = voucher(&KeyPair::generate());
+        let sealed = seal_voucher(&[7; 32], &v);
+        assert_eq!(open_voucher(&[8; 32], &sealed), None);
+    }
+
+    #[test]
+    fn sealed_voucher_rejects_any_changed_byte() {
+        let v = voucher(&KeyPair::generate());
+        let sealed = seal_voucher(&[7; 32], &v);
+        for i in 0..sealed.len() {
+            let mut bad = sealed.clone();
+            bad[i] ^= 1;
+            assert_eq!(open_voucher(&[7; 32], &bad), None, "byte {i}");
+        }
+        assert_eq!(open_voucher(&[7; 32], &sealed[..sealed.len() - 1]), None);
+        assert_eq!(open_voucher(&[7; 32], &[]), None);
+    }
+
+    #[test]
+    fn sealed_voucher_hides_inviter_identity() {
+        let id = KeyPair::generate();
+        let v = voucher(&id);
+        let sealed = seal_voucher(&[7; 32], &v);
+        let identity = id.public().0;
+        assert!(!sealed.windows(identity.len()).any(|w| w == identity));
+        assert_ne!(
+            seal_voucher(&[7; 32], &v),
+            sealed,
+            "a fresh nonce every time"
         );
     }
 

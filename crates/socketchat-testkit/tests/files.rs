@@ -40,7 +40,7 @@ async fn pair(s: &TestServer) -> (GroupId, TestClient, TestClient) {
     let mut a = TestClient::new(s, "Ada").await;
     let g = a.create_group("Photos").await.unwrap();
     let mut b = TestClient::new(s, "Bo").await;
-    b.join(&a.invite(Some(g), false).await.unwrap())
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut b]).await;
@@ -124,6 +124,24 @@ async fn exif_removed_from_jpeg_png_webp() {
         );
         assert!(!has(&got, b"Exif\0\0"), "{f} has no EXIF block");
     }
+}
+
+#[tokio::test]
+async fn send_file_says_which_files_were_cleaned() {
+    let s = TestServer::start().await;
+    let (g, mut a, _b) = pair(&s).await;
+    for f in ["gps.jpg", "gps.png", "gps.webp"] {
+        let offer = a.send_file(g, &fixture(f), false).await.unwrap();
+        assert_eq!(offer.name, f);
+        assert!(offer.metadata_removed(), "{f}");
+    }
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("notes.txt");
+    std::fs::write(&p, b"plain text").unwrap();
+    let offer = a.send_file(g, &p, false).await.unwrap();
+    assert!(!offer.metadata_removed(), "other files go as they are");
+    let offer = a.send_file(g, &fixture("clip.mp4"), true).await.unwrap();
+    assert!(!offer.metadata_removed(), "a video keeps its own data");
 }
 
 #[tokio::test]

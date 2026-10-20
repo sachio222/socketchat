@@ -127,7 +127,7 @@ pub fn register_account(
     if db
         .execute(
             "INSERT OR IGNORE INTO accounts (key, created_unix) VALUES (?1, ?2)",
-            params![key.0.as_slice(), now as i64],
+            params![key.0.as_slice(), state.today() as i64],
         )
         .is_err()
     {
