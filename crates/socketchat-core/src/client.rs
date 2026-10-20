@@ -438,7 +438,7 @@ impl Client {
             .await?
         {
             Response::JoinLodged => Ok(JoinStatus::Waiting {
-                for_name: "the person who invited you, or a group admin".into(),
+                for_name: "the person who invited you or a group admin".into(),
             }),
             Response::Refused(why) => Err(CoreError::Net(NetError::Refused(why))),
             other => Err(CoreError::Net(NetError::Unexpected(format!("{other:?}")))),
@@ -1436,7 +1436,7 @@ impl Client {
                     m.sender,
                     m.body,
                     m.sent_unix,
-                    m.kind == kind::NOTICE,
+                    m.kind != kind::TEXT,
                 )
             })
             .collect()

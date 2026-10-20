@@ -93,6 +93,13 @@ async fn file_transfer_hash_checked() {
     let offer = b.files(g).pop().unwrap();
     assert_eq!(offer.name, "notes.bin");
     assert_eq!(offer.size, 300_000);
+    let line = b
+        .messages(g, 10)
+        .into_iter()
+        .find(|l| l.text.contains("notes.bin"))
+        .unwrap();
+    assert!(line.notice, "file lines read as notices: {line:?}");
+    assert_eq!(line.text, "Ada sent notes.bin (300 KB)");
 }
 
 #[tokio::test]
