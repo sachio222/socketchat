@@ -5,6 +5,7 @@
 
 pub mod error;
 pub mod keys;
+pub mod net;
 pub mod provider;
 pub mod store;
 pub mod suite;

@@ -212,8 +212,9 @@ pub fn create_group(
     };
     let members: Vec<Member> = pg.members().collect();
     let creator = members.first().and_then(|m| key_of(&m.signature_key));
-    let valid_creator = members.len() == 1 && creator.is_some_and(|k| {
-        cs.proven.contains(&k)
+    let valid_creator = members.len() == 1
+        && creator.is_some_and(|k| {
+            cs.proven.contains(&k)
             && db
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM mailboxes WHERE key = ?1 AND group_id IS NULL)",
@@ -222,7 +223,7 @@ pub fn create_group(
                 )
                 .unwrap_or(false)
             && parse_admins(pg.group_context()) == vec![k]
-    });
+        });
     if !valid_creator {
         let _ = PublicGroup::delete(&storage, pg.group_id());
         return refused(

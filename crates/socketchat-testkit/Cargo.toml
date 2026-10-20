@@ -1,0 +1,17 @@
+[package]
+name = "socketchat-testkit"
+description = "Test helpers: a real socketchat server on a free port, and headless clients."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+socketchat-proto.workspace = true
+socketchat-core.workspace = true
+socketchat-server.workspace = true
+tokio.workspace = true
+tempfile.workspace = true

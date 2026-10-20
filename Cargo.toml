@@ -20,6 +20,7 @@ base64 = "0.22"
 proptest = "1"
 socketchat-core = { path = "crates/socketchat-core" }
 socketchat-server = { path = "crates/socketchat-server" }
+socketchat-testkit = { path = "crates/socketchat-testkit" }
 openmls = { version = "=0.9.1", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_rust_crypto = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_basic_credential = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }

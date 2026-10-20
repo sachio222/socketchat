@@ -2574,6 +2574,7 @@ dependencies = [
  "postcard",
  "rand_core 0.6.4",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -2581,6 +2582,8 @@ dependencies = [
  "socketchat-proto",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-rustls",
  "zeroize",
 ]
 
@@ -2618,6 +2621,17 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+]
+
+[[package]]
+name = "socketchat-testkit"
+version = "0.4.0"
+dependencies = [
+ "socketchat-core",
+ "socketchat-proto",
+ "socketchat-server",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
