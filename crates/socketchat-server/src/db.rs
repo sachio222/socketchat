@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS files (
     size INTEGER NOT NULL,
     chunks INTEGER NOT NULL DEFAULT 0,
     complete INTEGER NOT NULL DEFAULT 0,
+    uploader BLOB NOT NULL,
     created_unix INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS file_done (

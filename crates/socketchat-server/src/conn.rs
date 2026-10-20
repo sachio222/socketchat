@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 use tokio_rustls::TlsAcceptor;
 
-use crate::{auth, groups, invites, State};
+use crate::{auth, files, groups, invites, State};
 
 pub type Tx = mpsc::UnboundedSender<ServerFrame>;
 
@@ -191,6 +191,10 @@ async fn handle(state: &State, cs: &mut ConnState, req: Request) -> Response {
             mac,
         } => invites::redeem(state, cs, token, key_package, mac),
         Request::PendingJoins { group } => invites::pending(state, cs, group),
-        _ => Response::Error("this server does not handle that request yet".into()),
+        Request::FileBegin { group, size } => files::begin(state, cs, group, size),
+        Request::FileChunk { file, index, data } => files::chunk(state, cs, file, index, &data),
+        Request::FileEnd { file } => files::end(state, cs, file),
+        Request::FileGet { file, index } => files::get(state, cs, file, index),
+        Request::FileDone { file } => files::done(state, cs, file),
     }
 }

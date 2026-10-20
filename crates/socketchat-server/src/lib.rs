@@ -8,6 +8,7 @@ mod auth;
 pub mod config;
 mod conn;
 pub mod db;
+mod files;
 mod groups;
 mod invites;
 pub mod tls;

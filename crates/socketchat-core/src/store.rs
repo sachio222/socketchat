@@ -591,6 +591,31 @@ impl Store {
         Ok(row.and_then(|(v, s)| s.try_into().ok().map(|s| (v, s))))
     }
 
+    pub fn add_file(&self, g: &GroupId, offer: &crate::files::FileOffer) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO files (id, group_id, offer) VALUES (?1, ?2, ?3)",
+            params![
+                offer.id.0.as_slice(),
+                g.0.as_slice(),
+                postcard::to_stdvec(offer)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Files offered in a group, oldest first.
+    pub fn files(&self, g: &GroupId) -> Result<Vec<crate::files::FileOffer>, CoreError> {
+        let mut st = self
+            .conn
+            .prepare("SELECT offer FROM files WHERE group_id = ?1 ORDER BY rowid")?;
+        let rows = st.query_map([g.0.as_slice()], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = vec![];
+        for b in rows {
+            out.push(postcard::from_bytes(&b?)?);
+        }
+        Ok(out)
+    }
+
     pub fn save_pending_join(&self, p: &PendingJoin) -> Result<(), CoreError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO pending_joins (token, server_id, link, group_key, lodged_unix)

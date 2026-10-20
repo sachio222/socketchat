@@ -29,6 +29,22 @@ use crate::CoreError;
 pub mod kind {
     pub const TEXT: i64 = 0;
     pub const NOTICE: i64 = 1;
+    pub const FILE: i64 = 2;
+}
+
+/// "12 KB", "3.4 MB": sizes for people.
+pub fn human_size(n: u64) -> String {
+    const K: f64 = 1000.0;
+    let f = n as f64;
+    if f < K {
+        format!("{n} bytes")
+    } else if f < K * K {
+        format!("{:.0} KB", f / K)
+    } else if f < K * K * K {
+        format!("{:.1} MB", f / (K * K))
+    } else {
+        format!("{:.1} GB", f / (K * K * K))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +114,10 @@ pub enum Event {
     },
     Left {
         group: GroupId,
+    },
+    FileOffered {
+        group: GroupId,
+        file: crate::files::FileOffer,
     },
     Warning(String),
     Disconnected,
@@ -1237,6 +1257,20 @@ impl Client {
                     )?;
                 }
             }
+            AppMsg::File(offer) => {
+                let mut offer = offer;
+                offer.name = crate::files::safe_name(&offer.name);
+                self.store.add_file(&gid, &offer)?;
+                let now = self.now();
+                let who = self.name_for(&gid, &sender);
+                let text = format!("{who} sent {} ({})", offer.name, human_size(offer.size));
+                self.store
+                    .add_message(&gid, seq, Some(&sender), kind::FILE, &text, now)?;
+                self.emit(Event::FileOffered {
+                    group: gid,
+                    file: offer,
+                });
+            }
             AppMsg::IsDm => {
                 self.store.set_is_dm(&gid)?;
                 if let Some(l) = self.groups.get_mut(&gid) {
@@ -1762,5 +1796,199 @@ impl Client {
             self.emit(Event::MembersChanged { group });
         }
         Ok(())
+    }
+
+    // ---------- files ----------
+
+    /// Files offered in a group, oldest first.
+    pub fn files(&self, gid: GroupId) -> Vec<crate::files::FileOffer> {
+        self.store.files(&gid).unwrap_or_default()
+    }
+
+    /// Sends a file, photo or video to a group. Photos lose their location
+    /// and device data first. A video keeps its own, so it needs
+    /// `video_ok`.
+    pub async fn send_file(
+        &mut self,
+        gid: GroupId,
+        path: &Path,
+        video_ok: bool,
+    ) -> Result<socketchat_proto::msg::FileId, CoreError> {
+        use crate::files::*;
+        let server_id = self.server_of(&gid)?;
+        let mut head = [0u8; 16];
+        let n = fill(&mut std::fs::File::open(path)?, &mut head)?;
+        let kind = sniff(&head[..n]);
+        if kind == Kind::Video && !video_ok {
+            return Err(CoreError::VideoNeedsConfirm);
+        }
+        let name = safe_name(
+            &path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        );
+        // Photos are small enough to clean in memory; everything else
+        // streams from disk a chunk at a time.
+        let (mut source, size): (Box<dyn std::io::Read + Send>, u64) = match kind {
+            Kind::Jpeg | Kind::Png | Kind::WebP => {
+                let bytes = strip_image(kind, std::fs::read(path)?)?;
+                let len = bytes.len() as u64;
+                (Box::new(std::io::Cursor::new(bytes)), len)
+            }
+            _ => (
+                Box::new(std::fs::File::open(path)?),
+                std::fs::metadata(path)?.len(),
+            ),
+        };
+        let Response::File(id) = self
+            .request(server_id, Request::FileBegin { group: gid, size })
+            .await?
+        else {
+            return Err(CoreError::Net(NetError::Unexpected("no file ID".into())));
+        };
+        let mut key = [0u8; 32];
+        let mut prefix = [0u8; 19];
+        OsRng.fill_bytes(&mut key);
+        OsRng.fill_bytes(&mut prefix);
+        let mut enc = Some(encryptor(&key, &prefix));
+        let mut hash = sha2::Sha256::default();
+        let total = chunk_count(size);
+        let mut cur = vec![0u8; CHUNK];
+        for index in 0..total {
+            let len = fill(&mut source, &mut cur)?;
+            let last = index + 1 == total;
+            sha2::Digest::update(&mut hash, &cur[..len]);
+            let sealed = if last {
+                enc.take()
+                    .expect("one last chunk")
+                    .encrypt_last(&cur[..len])
+            } else {
+                enc.as_mut()
+                    .expect("before the last chunk")
+                    .encrypt_next(&cur[..len])
+            }
+            .map_err(|_| CoreError::Other("could not encrypt the file".into()))?;
+            self.request(
+                server_id,
+                Request::FileChunk {
+                    file: id,
+                    index,
+                    data: sealed,
+                },
+            )
+            .await?;
+        }
+        self.request(server_id, Request::FileEnd { file: id })
+            .await?;
+        let offer = FileOffer {
+            id,
+            name,
+            size,
+            mime: mime(kind).into(),
+            sha256: sha2::Digest::finalize(hash).into(),
+            key,
+            nonce_prefix: prefix,
+        };
+        let seq = self.send_app(gid, &AppMsg::File(offer.clone())).await?;
+        self.store.add_file(&gid, &offer)?;
+        let me = self.my_group_key(gid);
+        let text = format!("You sent {} ({})", offer.name, human_size(size));
+        let now = self.now();
+        self.store
+            .add_message(&gid, seq, me.as_ref(), kind::FILE, &text, now)?;
+        Ok(id)
+    }
+
+    /// Downloads, opens and checks a file, then saves it in `dir` under a
+    /// name that never replaces an existing file.
+    pub async fn save_file(
+        &mut self,
+        gid: GroupId,
+        id: socketchat_proto::msg::FileId,
+        dir: &Path,
+    ) -> Result<std::path::PathBuf, CoreError> {
+        use crate::files::*;
+        use std::io::Write;
+        let server_id = self.server_of(&gid)?;
+        let offer = self
+            .store
+            .files(&gid)?
+            .into_iter()
+            .find(|f| f.id == id)
+            .ok_or_else(|| CoreError::Other("no such file in this chat".into()))?;
+        std::fs::create_dir_all(dir)?;
+        let part = dir.join(format!(".socketchat-{}.part", hex(&id.0)));
+        let tampered =
+            || CoreError::Other("the file was changed on its way; nothing was saved".into());
+        let mut out = std::fs::File::create(&part)?;
+        let mut dec = Some(decryptor(&offer.key, &offer.nonce_prefix));
+        let mut hash = sha2::Sha256::default();
+        let total = chunk_count(offer.size);
+        let mut failed = None;
+        for index in 0..total {
+            let data = match self
+                .request(server_id, Request::FileGet { file: id, index })
+                .await
+            {
+                Ok(Response::Chunk(d)) => d,
+                Ok(_) => {
+                    failed = Some(CoreError::Net(NetError::Unexpected("no chunk".into())));
+                    break;
+                }
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            };
+            let plain = if index + 1 == total {
+                dec.take()
+                    .expect("one last chunk")
+                    .decrypt_last(data.as_slice())
+            } else {
+                dec.as_mut()
+                    .expect("before the last chunk")
+                    .decrypt_next(data.as_slice())
+            };
+            let Ok(plain) = plain else {
+                failed = Some(tampered());
+                break;
+            };
+            sha2::Digest::update(&mut hash, &plain);
+            if let Err(e) = out.write_all(&plain) {
+                failed = Some(e.into());
+                break;
+            }
+        }
+        if failed.is_none() && <[u8; 32]>::from(sha2::Digest::finalize(hash)) != offer.sha256 {
+            failed = Some(tampered());
+        }
+        if failed.is_none() {
+            if let Err(e) = out.sync_all() {
+                failed = Some(e.into());
+            }
+        }
+        drop(out);
+        if let Some(e) = failed {
+            let _ = std::fs::remove_file(&part);
+            return Err(e);
+        }
+        let mut k = 0;
+        let saved = loop {
+            let candidate = dir.join(numbered(&offer.name, k));
+            match std::fs::hard_link(&part, &candidate) {
+                Ok(()) => break candidate,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && k < 10_000 => k += 1,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&part);
+                    return Err(e.into());
+                }
+            }
+        };
+        std::fs::remove_file(&part)?;
+        let _ = self
+            .request(server_id, Request::FileDone { file: id })
+            .await;
+        Ok(saved)
     }
 }

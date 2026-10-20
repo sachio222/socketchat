@@ -12,6 +12,8 @@ pub enum CoreError {
     Net(#[from] crate::net::NetError),
     #[error("group encryption: {0}")]
     Mls(String),
+    #[error("videos keep their location and device data; confirm before sending")]
+    VideoNeedsConfirm,
     #[error("local storage: {0}")]
     Storage(String),
     #[error("{0}")]

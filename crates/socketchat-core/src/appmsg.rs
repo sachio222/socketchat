@@ -27,6 +27,8 @@ pub enum AppMsg {
         voucher: Voucher,
         secret: [u8; 32],
     },
+    /// A file uploaded in sealed chunks, with what it takes to open it.
+    File(crate::files::FileOffer),
     /// Marks a group as a two-person direct message.
     IsDm,
     /// Asks the member with group key `to` to open a direct message: the new
