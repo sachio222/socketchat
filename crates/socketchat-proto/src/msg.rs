@@ -1,0 +1,401 @@
+//! Messages that travel inside frames.
+//!
+//! The client sends [`ClientFrame`]s, the server sends [`ServerFrame`]s. Each
+//! is encoded with postcard. MLS messages ride inside as opaque bytes.
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
+use crate::{encode_frame, FrameError, Token};
+
+/// Random ID of a group on a server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GroupId(pub [u8; 16]);
+
+/// An Ed25519 public key: a group key, an account key, or an identity key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Key(pub [u8; 32]);
+
+/// An Ed25519 signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sig(#[serde(with = "serde_bytes")] pub [u8; 64]);
+
+/// Random ID of an uploaded file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileId(pub [u8; 16]);
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ClientFrame {
+    Hello { version: u16 },
+    Req { id: u32, body: Request },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ServerFrame {
+    HelloOk { version: u16 },
+    VersionMismatch { server: u16 },
+    Resp { id: u32, body: Response },
+    Push(Push),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Request {
+    /// Ask for a random challenge to sign for this connection.
+    Challenge,
+    /// Prove this connection holds `key`.
+    Prove {
+        key: Key,
+        sig: Sig,
+    },
+    /// Register a server account key with an invite token.
+    RegisterAccount {
+        token: Token,
+        key: Key,
+        sig: Sig,
+    },
+    /// Register a group key's mailbox. `token` is the group invite; `None`
+    /// means a new group the proven account is about to create.
+    RegisterMailbox {
+        token: Option<Token>,
+        key: Key,
+        sig: Sig,
+    },
+    CreateGroup {
+        #[serde(with = "serde_bytes")]
+        group_info: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        ratchet_tree: Vec<u8>,
+    },
+    Post {
+        group: GroupId,
+        #[serde(with = "serde_bytes")]
+        mls: Vec<u8>,
+        welcome: Option<WelcomeOut>,
+    },
+    Fetch {
+        group: GroupId,
+        after: u64,
+        limit: u16,
+    },
+    Ack {
+        group: GroupId,
+        seq: u64,
+    },
+    Members {
+        group: GroupId,
+    },
+    CreateInvite {
+        group: Option<GroupId>,
+    },
+    RedeemInvite {
+        token: Token,
+        #[serde(with = "serde_bytes")]
+        key_package: Vec<u8>,
+        mac: [u8; 32],
+    },
+    PendingJoins {
+        group: GroupId,
+    },
+    FetchWelcomes,
+    FileBegin {
+        group: GroupId,
+        size: u64,
+    },
+    FileChunk {
+        file: FileId,
+        index: u32,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    FileEnd {
+        file: FileId,
+    },
+    FileGet {
+        file: FileId,
+        index: u32,
+    },
+    FileDone {
+        file: FileId,
+    },
+}
+
+/// A Welcome for the person who redeemed `token`, with the inviter's voucher.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WelcomeOut {
+    pub token: Token,
+    #[serde(with = "serde_bytes")]
+    pub welcome: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub voucher: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Response {
+    Ok,
+    Challenge([u8; 32]),
+    Posted {
+        seq: u64,
+    },
+    /// A Commit lost the race; the group is at `epoch`.
+    Conflict {
+        epoch: u64,
+    },
+    /// The server checked the request and said no, with a reason for people.
+    Refused(String),
+    Entries(Vec<Entry>),
+    Members(Vec<MemberInfo>),
+    Invite {
+        token: Token,
+        expires_unix: u64,
+    },
+    JoinLodged,
+    Joins(Vec<JoinRequest>),
+    Welcomes(Vec<WelcomeIn>),
+    File(FileId),
+    Chunk(#[serde(with = "serde_bytes")] Vec<u8>),
+    /// Something went wrong on the server or the request made no sense.
+    Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Entry {
+    pub seq: u64,
+    #[serde(with = "serde_bytes")]
+    pub mls: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MemberInfo {
+    pub key: Key,
+    pub joined_seq: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct JoinRequest {
+    pub token: Token,
+    #[serde(with = "serde_bytes")]
+    pub key_package: Vec<u8>,
+    pub mac: [u8; 32],
+    pub lodged_unix: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WelcomeIn {
+    pub mailbox: Key,
+    #[serde(with = "serde_bytes")]
+    pub welcome: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub voucher: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Push {
+    Entry {
+        group: GroupId,
+        entry: Entry,
+    },
+    Welcome(WelcomeIn),
+    JoinRequest {
+        group: GroupId,
+        request: JoinRequest,
+    },
+}
+
+/// Encodes `v` and wraps it in a frame.
+pub fn to_frame<T: Serialize>(v: &T) -> Result<Vec<u8>, FrameError> {
+    let body = postcard::to_stdvec(v).map_err(|e| FrameError::Postcard(e.to_string()))?;
+    encode_frame(&body)
+}
+
+/// Decodes a frame body.
+pub fn from_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, FrameError> {
+    postcard::from_bytes(body).map_err(|e| FrameError::Postcard(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FrameDecoder, Token};
+
+    fn rt<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(v: T) {
+        let mut d = FrameDecoder::default();
+        d.push(&to_frame(&v).unwrap());
+        let body = d.next_frame().unwrap().unwrap();
+        assert_eq!(from_body::<T>(&body).unwrap(), v);
+    }
+
+    #[test]
+    fn every_request_roundtrips() {
+        let g = GroupId([9; 16]);
+        let k = Key([1; 32]);
+        let s = Sig([2; 64]);
+        let t = Token([3; 16]);
+        let f = FileId([4; 16]);
+        let w = WelcomeOut {
+            token: t,
+            welcome: vec![5; 10],
+            voucher: vec![6; 4],
+        };
+        for body in [
+            Request::Challenge,
+            Request::Prove { key: k, sig: s },
+            Request::RegisterAccount {
+                token: t,
+                key: k,
+                sig: s,
+            },
+            Request::RegisterMailbox {
+                token: Some(t),
+                key: k,
+                sig: s,
+            },
+            Request::RegisterMailbox {
+                token: None,
+                key: k,
+                sig: s,
+            },
+            Request::CreateGroup {
+                group_info: vec![1, 2],
+                ratchet_tree: vec![3],
+            },
+            Request::Post {
+                group: g,
+                mls: vec![7; 100],
+                welcome: Some(w.clone()),
+            },
+            Request::Post {
+                group: g,
+                mls: vec![],
+                welcome: None,
+            },
+            Request::Fetch {
+                group: g,
+                after: 5,
+                limit: 100,
+            },
+            Request::Ack { group: g, seq: 6 },
+            Request::Members { group: g },
+            Request::CreateInvite { group: Some(g) },
+            Request::CreateInvite { group: None },
+            Request::RedeemInvite {
+                token: t,
+                key_package: vec![8; 50],
+                mac: [9; 32],
+            },
+            Request::PendingJoins { group: g },
+            Request::FetchWelcomes,
+            Request::FileBegin {
+                group: g,
+                size: 1 << 33,
+            },
+            Request::FileChunk {
+                file: f,
+                index: 3,
+                data: vec![0; 65536],
+            },
+            Request::FileEnd { file: f },
+            Request::FileGet { file: f, index: 0 },
+            Request::FileDone { file: f },
+        ] {
+            rt(ClientFrame::Req { id: 42, body });
+        }
+        rt(ClientFrame::Hello {
+            version: crate::PROTOCOL_VERSION,
+        });
+    }
+
+    #[test]
+    fn every_response_and_push_roundtrips() {
+        let g = GroupId([1; 16]);
+        let entry = Entry {
+            seq: 3,
+            mls: vec![1, 2, 3],
+        };
+        let jr = JoinRequest {
+            token: Token([2; 16]),
+            key_package: vec![3],
+            mac: [4; 32],
+            lodged_unix: 99,
+        };
+        let wi = WelcomeIn {
+            mailbox: Key([5; 32]),
+            welcome: vec![6],
+            voucher: vec![7],
+        };
+        for body in [
+            Response::Ok,
+            Response::Challenge([1; 32]),
+            Response::Posted { seq: 1 },
+            Response::Conflict { epoch: 4 },
+            Response::Refused("no".into()),
+            Response::Entries(vec![entry.clone()]),
+            Response::Members(vec![MemberInfo {
+                key: Key([8; 32]),
+                joined_seq: 2,
+            }]),
+            Response::Invite {
+                token: Token([1; 16]),
+                expires_unix: 5,
+            },
+            Response::JoinLodged,
+            Response::Joins(vec![jr.clone()]),
+            Response::Welcomes(vec![wi.clone()]),
+            Response::File(FileId([3; 16])),
+            Response::Chunk(vec![1; 10]),
+            Response::Error("bad".into()),
+        ] {
+            rt(ServerFrame::Resp { id: 7, body });
+        }
+        rt(ServerFrame::HelloOk { version: 1 });
+        rt(ServerFrame::VersionMismatch { server: 2 });
+        rt(ServerFrame::Push(Push::Entry { group: g, entry }));
+        rt(ServerFrame::Push(Push::Welcome(wi)));
+        rt(ServerFrame::Push(Push::JoinRequest {
+            group: g,
+            request: jr,
+        }));
+    }
+
+    #[test]
+    fn hello_is_first_and_tiny() {
+        let f = to_frame(&ClientFrame::Hello {
+            version: crate::PROTOCOL_VERSION,
+        })
+        .unwrap();
+        assert!(f.len() < 16, "{} bytes", f.len());
+    }
+
+    #[test]
+    fn bytes_are_compact() {
+        // 64 KiB of data costs only a few bytes of overhead.
+        let f = to_frame(&ClientFrame::Req {
+            id: 1,
+            body: Request::FileChunk {
+                file: FileId([0; 16]),
+                index: 0,
+                data: vec![0; 65536],
+            },
+        })
+        .unwrap();
+        assert!(f.len() < 65536 + 40, "{} bytes", f.len());
+    }
+
+    #[test]
+    fn garbage_is_an_error() {
+        assert!(from_body::<ClientFrame>(&[0xff, 0xff, 0xff]).is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn decoder_never_panics(chunks in proptest::collection::vec(proptest::collection::vec(proptest::num::u8::ANY, 0..64), 0..16)) {
+            let mut d = FrameDecoder::default();
+            for c in chunks {
+                d.push(&c);
+                while let Ok(Some(body)) = d.next_frame() {
+                    let _ = from_body::<ClientFrame>(&body);
+                    let _ = from_body::<ServerFrame>(&body);
+                }
+            }
+        }
+    }
+}

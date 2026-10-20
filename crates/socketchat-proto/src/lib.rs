@@ -5,6 +5,7 @@
 
 pub mod frame;
 pub mod link;
+pub mod msg;
 
 pub use frame::{encode_frame, FrameDecoder, FrameError, MAX_FRAME};
 pub use link::{InviteLink, LinkError, Token};

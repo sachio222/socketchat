@@ -1,0 +1,22 @@
+[package]
+name = "socketchat-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+socketchat-proto = { path = "../crates/socketchat-proto" }
+
+[[bin]]
+name = "frame_decoder"
+path = "fuzz_targets/frame_decoder.rs"
+test = false
+doc = false
+bench = false
+
+# Kept out of the main workspace: fuzzing needs nightly.
+[workspace]
