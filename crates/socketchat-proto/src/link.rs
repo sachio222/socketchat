@@ -151,7 +151,7 @@ mod tests {
         let s = group_link().to_string();
         let cut = &s[..s.len() - 3];
         assert!(cut.parse::<InviteLink>().is_err());
-        let two_parts = format!("{}", s.rsplit_once('.').unwrap().0);
+        let two_parts = s.rsplit_once('.').unwrap().0;
         assert!(two_parts.parse::<InviteLink>().is_err());
     }
 

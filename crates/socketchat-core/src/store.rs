@@ -235,6 +235,9 @@ impl Store {
     }
 }
 
+/// A voucher's encoded bytes and the invite secret it belongs to.
+pub type StoredVoucher = (Vec<u8>, [u8; 32]);
+
 /// A server this client talks to.
 #[derive(Clone, Debug)]
 pub struct ServerRow {
@@ -575,11 +578,7 @@ impl Store {
     }
 
     /// The stored voucher bytes and invite secret for a token.
-    pub fn voucher(
-        &self,
-        g: &GroupId,
-        token: &Token,
-    ) -> Result<Option<(Vec<u8>, [u8; 32])>, CoreError> {
+    pub fn voucher(&self, g: &GroupId, token: &Token) -> Result<Option<StoredVoucher>, CoreError> {
         let row: Option<(Vec<u8>, Vec<u8>)> = self
             .conn
             .query_row(

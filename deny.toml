@@ -1,0 +1,45 @@
+# Dependency policy, checked by cargo-deny in CI.
+
+[graph]
+all-features = true
+
+[advisories]
+# Fail on any known vulnerability or unmaintained crate.
+yanked = "deny"
+ignore = [
+    # rustls 0.23.46 fixes these; it is under 30 days old, so it waits for
+    # the project's dependency-age rule. None of them applies here:
+    { id = "RUSTSEC-2026-0346", reason = "needs a custom ClientSessionStore that Debug-prints session values; socketchat has none" },
+    { id = "RUSTSEC-2026-0347", reason = "needs Encrypted Client Hello; socketchat does not use ECH" },
+    { id = "RUSTSEC-2026-0348", reason = "needs the brotli feature; it is off" },
+    { id = "RUSTSEC-2026-0349", reason = "downgrade of a hybrid TLS key exchange; socketchat's TLS uses ring with classical groups only" },
+    # Build-time macro crate under hpke-rs (libcrux hax-lib); no maintained
+    # replacement upstream yet, and it does not run in socketchat.
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro used only at build time by hpke-rs dependencies" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

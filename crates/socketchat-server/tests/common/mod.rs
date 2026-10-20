@@ -394,8 +394,9 @@ impl Person {
             if pm.epoch() < g.epoch() {
                 continue;
             }
-            match g.process_message(p, pm) {
-                Ok(m) => match m.into_content() {
+            // Our own messages do not open; skip them.
+            if let Ok(m) = g.process_message(p, pm) {
+                match m.into_content() {
                     ProcessedMessageContent::StagedCommitMessage(sc) => {
                         g.merge_staged_commit(p, *sc).unwrap()
                     }
@@ -403,8 +404,7 @@ impl Person {
                         g.store_pending_proposal(p.storage(), *qp).unwrap()
                     }
                     _ => {}
-                },
-                Err(_) => {} // own messages
+                }
             }
         }
     }

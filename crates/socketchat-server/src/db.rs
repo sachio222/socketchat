@@ -85,6 +85,5 @@ pub fn open(data_dir: &Path) -> Result<Connection, ServerError> {
     storage
         .run_migrations()
         .map_err(|e| ServerError::Db(e.to_string()))?;
-    drop(storage);
     Ok(conn)
 }

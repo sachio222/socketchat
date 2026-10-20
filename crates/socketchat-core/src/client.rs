@@ -454,10 +454,7 @@ impl Client {
         else {
             return Ok(());
         };
-        let dm_from: Option<Key> = pending
-            .link
-            .strip_prefix(DM_LINK_PREFIX)
-            .and_then(|h| hex_key(h));
+        let dm_from: Option<Key> = pending.link.strip_prefix(DM_LINK_PREFIX).and_then(hex_key);
         let link = match dm_from {
             Some(_) => None,
             None => Some(
@@ -1015,7 +1012,7 @@ impl Client {
                 join_requests.extend(js.into_iter().map(|j| (gid, j)));
             }
         }
-        let todo: Vec<DmTodo> = self.dm_todo.drain(..).collect();
+        let todo: Vec<DmTodo> = std::mem::take(&mut self.dm_todo);
         for t in todo {
             let r = match t {
                 DmTodo::Accept {

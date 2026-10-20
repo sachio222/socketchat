@@ -396,18 +396,12 @@ fn key_reader() -> mpsc::UnboundedReceiver<Option<KeyEvent>> {
                         return;
                     }
                 }
-                Ok(TermEvent::Resize(..)) => {
-                    if tx.send(None).is_err() {
-                        return;
-                    }
-                }
+                // A resize only needs a redraw.
+                Ok(TermEvent::Resize(..)) if tx.send(None).is_err() => return,
                 _ => {}
             },
-            Ok(false) => {
-                if tx.is_closed() {
-                    return;
-                }
-            }
+            Ok(false) if tx.is_closed() => return,
+            Ok(false) => {}
             Err(_) => return,
         }
     });
