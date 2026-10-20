@@ -3,11 +3,11 @@ source: crates/socketchat-tui/tests/screens.rs
 expression: "render(&app, &crew(), 80, 24)"
 ---
 ┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
-│# Book club       ││09:14 Ada: Who is bringing the book   ││✓ Ada* (you)      │
-│@ Bo             3││      list?                           ││✓ Bo              │
-│# Climbing Sat… 12││09:15 Bo: Me. Sending it now.         ││  Cy              │
-│                  ││09:15 · Bo sent books.pdf (84 KB)     ││                  │
-│                  ││09:16 Cy: Got it, thanks. Saturday    ││                  │
+│# Book club       ││09:14:05 Ada: Who is bringing the book││✓ Ada* (you)      │
+│@ Bo             3││         list?                        ││✓ Bo              │
+│# Climbing Sat… 12││09:15:12 Bo: Me. Sending it now.      ││  Cy              │
+│                  ││09:15:40 · Bo sent books.pdf (84 KB)  ││                  │
+│                  ││09:16:58 Cy: Got it, thanks. Saturday ││                  │
 │                  │┌ Switch to ───────────────────────────┐│                  │
 │                  ││> clim                                ││                  │
 │                  ││Climbing Saturdays                    ││                  │
@@ -21,8 +21,8 @@ expression: "render(&app, &crew(), 80, 24)"
 │                  ││                                      ││                  │
 │                  │└──────────────────────────────────────┘│                  │
 │                  ││                                      ││                  │
-│                  ││                                      ││                  │
-│                  ││                                      ││                  │
 └──────────────────┘└──────────────────────────────────────┘└──────────────────┘
-> type a message, or /help
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  What's on your mind, Book club?                               / for commands│
+└──────────────────────────────────────────────────────────────────────────────┘
 Type to filter · Enter open · Esc cancel

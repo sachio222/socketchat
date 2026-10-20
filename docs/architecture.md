@@ -43,7 +43,7 @@ What travels inside encrypted application messages is the `AppMsg` enum in `appm
 
 Every key is Ed25519. Each person holds:
 
-- an **identity key**, one per person, which stays on their device. Invite links carry its fingerprint and safety numbers are built from it. Its public half reaches the server in one place only, the voucher that travels with a Welcome (see "Invites");
+- an **identity key**, one per person, which stays on their device. Invite links carry its fingerprint and safety numbers are built from it. Its public half never reaches the server in readable form: it travels inside the group's encrypted messages and inside the voucher sealed for a joiner (see "Invites");
 - a **group key** for every group they join. It is their MLS credential in that group, and the group's mailbox on the server belongs to it. A `Binding`, signed by the identity key, ties the two together inside the group's encrypted messages;
 - a **server account key**, one per server, which lets them create groups.
 
@@ -72,8 +72,8 @@ An invite link holds the server address, a token the server stores, and, after t
 
 1. The inviter's app asks the server for a token, then signs a **voucher** with its identity key: the token, a SHA-256 hash of the secret, the group ID, the inviter's group key and an expiry. It sends the voucher and the secret to the group inside an encrypted message, so any member can complete the join.
 2. The joiner's app pins the server certificate, makes a fresh group key, registers a mailbox with the token, and lodges a KeyPackage for each allowed suite, with an HMAC-SHA256 tag keyed by the invite secret.
-3. The server pushes the join request to the group's online members. The inviter's app, or any admin's, checks the tag against the secret, adds the KeyPackage that matches the group's suite with a Commit, and posts the Welcome with the voucher. In v4.0 the voucher travels beside the Welcome unencrypted, so the server sees the inviter's identity key and group key; [SECURITY.md](../SECURITY.md) explains the effect.
-4. The joiner's app checks the voucher's signature against the fingerprint in the link, its token, secret and group, and that the member who added them is the voucher's inviter or an admin. Anything else shows a red warning.
+3. The server pushes the join request to the group's online members. The inviter's app, or any admin's, checks the tag against the secret, adds the KeyPackage that matches the group's suite with a Commit, and posts the Welcome with the voucher. The voucher travels beside the Welcome sealed under a key derived from the invite secret (`seal_voucher` in `keys.rs`), so the server stores and forwards it without seeing the inviter's identity key.
+4. The joiner's app opens the voucher with the secret from the link, then checks its signature against the fingerprint in the link, its token, secret and group, and that the member who added them is the voucher's inviter or an admin. Anything else shows a red warning.
 
 The token works once and expires after `invite_ttl_hours`. A lodged request waits up to 7 days. A group invite can also register a server account for the joiner when the server allows members to invite.
 

@@ -1,6 +1,6 @@
 # Protocol
 
-This document describes what socketchat v4.0 sends between app and server, for contributors and anyone writing a compatible client. The source of truth is `crates/socketchat-proto` (frames, messages, links) and `crates/socketchat-core/src/keys.rs` (signatures). [architecture.md](architecture.md) explains the terms MLS, epoch, Commit, Welcome and KeyPackage.
+This document describes what socketchat v4.0 sends between app and server, for contributors and anyone writing a compatible client. The source of truth is `crates/socketchat-proto` (frames, messages, links) and `crates/socketchat-core/src/keys.rs` (signatures and the sealed voucher). [architecture.md](architecture.md) explains the terms MLS, epoch, Commit, Welcome and KeyPackage.
 
 ## Connection and framing
 
@@ -33,7 +33,7 @@ Most requests need the connection to have signed in with a key first, through `C
 | `RegisterAccount { token, key, sig }` | Registers a server account key with an invite token, and signs in with it. |
 | `RegisterMailbox { token, key, sig }` | Registers a group key as a mailbox. `token: Some` redeems a group invite; `None` reserves a mailbox for a group the signed-in account is about to create. |
 | `CreateGroup { group_info, ratchet_tree }` | Creates a group from an MLS GroupInfo and ratchet tree. The group must hold only its creator, as its only admin. |
-| `Post { group, mls, welcome }` | Adds an MLS message to the group log. A Commit that adds someone may carry a `WelcomeOut { token, welcome, voucher }` for the joiner. |
+| `Post { group, mls, welcome }` | Adds an MLS message to the group log. A Commit that adds someone may carry a `WelcomeOut { token, welcome, voucher }` for the joiner, with `voucher` sealed as described under "Sealed voucher" below. |
 | `Fetch { group, after, limit }` | Returns log entries after sequence number `after`, at most 500 at a time. |
 | `Ack { group, seq }` | Says this mailbox has everything up to `seq`; entries every member has acknowledged are deleted. |
 | `Members { group }` | Lists the group's mailboxes and the sequence number at which each joined. |
@@ -61,10 +61,21 @@ Most requests need the connection to have signed in with a key first, through `C
 | `Invite { token, expires_unix }` | A new invite token and its expiry. |
 | `JoinLodged` | The join request is stored and online members have heard about it. |
 | `Joins(Vec<JoinRequest>)` | Pending join requests: token, KeyPackages, HMAC and the time each was lodged. |
-| `Welcomes(Vec<WelcomeIn>)` | Welcomes, each with its mailbox and voucher. |
+| `Welcomes(Vec<WelcomeIn>)` | Welcomes, each with its mailbox and sealed voucher. |
 | `File(FileId)` | The ID for a new upload. |
 | `Chunk(Vec<u8>)` | One sealed file chunk. |
 | `Error(String)` | Something failed on the server, or the request made no sense. |
+
+### Sealed voucher
+
+The `voucher` field of `WelcomeOut` and `WelcomeIn` carries the inviter's signed voucher (see "Signed byte strings") sealed for the joiner, who holds the invite secret from the link. The server stores and forwards these bytes and has no key that opens them. A direct message carries an empty `voucher`.
+
+- **Plaintext:** the postcard-encoded `Voucher` struct from `keys.rs`: token, SHA-256 of the invite secret, group ID, inviter's group key, expiry, inviter's identity key and signature.
+- **Key:** HKDF-SHA256 with no salt, the 32-byte invite secret as input key material, and info `socketchat/v1/voucher-seal`, expanded to 32 bytes.
+- **Cipher:** XChaCha20-Poly1305 with a random 24-byte nonce and `socketchat/v1/voucher-seal` as associated data.
+- **Bytes:** nonce (24) ‖ ciphertext with its 16-byte tag.
+
+The joiner's app derives the same key from the link's secret and opens the voucher. A wrong secret or any changed byte fails to open, and the app then treats the join as unverified.
 
 ## Pushes
 
@@ -113,5 +124,5 @@ Numbers in parentheses are byte lengths.
 - **KeyPackage bundle:** a postcard-encoded list of TLS-encoded KeyPackages, one per allowed suite (0x004F, then 0x0001). The member who adds the joiner picks the one matching the group's suite.
 - **Admin list:** GroupContext extension type `0xff00`, a run of entries, each a 2-byte big-endian length of 32 followed by a 32-byte Ed25519 key.
 - **Application messages:** inside MLS PrivateMessages, the postcard-encoded `AppMsg` enum from `crates/socketchat-core/src/appmsg.rs`.
-- **Voucher on the wire:** the postcard-encoded `Voucher` struct from `keys.rs`, carried in `WelcomeOut` and `WelcomeIn` as plain bytes.
+- **Voucher on the wire:** sealed for the joiner, as described under "Sealed voucher".
 - **Safety number:** built the way Signal's numeric fingerprint (version 1) builds its digits. For each of the two identity keys, start from a 2-byte zero, the key, and the key again; then 5,200 times, replace that value with SHA-512 of the value followed by the key. Read the first 30 bytes as six 5-byte big-endian numbers, each modulo 100,000 and written as 5 digits. The two 30-digit halves are sorted and joined into 60 digits, so both people see the same number.

@@ -162,7 +162,7 @@ Hiding membership from the server completely needs anonymous credentials: crypto
 | Someone steals a laptop | Local messages and keys are encrypted with a key derived from the person's passphrase. |
 | Someone records traffic today and gets a quantum computer later | The hybrid post-quantum suite protects message confidentiality. |
 | An encryption key is stolen today | MLS changes encryption keys with every group change, and the app refreshes its own on a schedule (default weekly), so a stolen encryption key stops unlocking new messages. |
-| Someone steals your signing key | They can pose as you until you reset your identity. Your contacts then see a "new key" notice and should verify you again. The signing key never decrypts messages. |
+| Someone steals your signing key | They can pose as you. v4.0 has no command yet to reset an identity; set up a fresh profile and verify your contacts again. The signing key never decrypts messages. |
 
 ### Cryptography choices
 
@@ -239,7 +239,7 @@ Redeeming an invite:
 2. It makes a fresh group key and registers a new mailbox for it using the token.
 3. It uploads a KeyPackage for that group key against the token, together with a MAC of that KeyPackage keyed by the invite secret.
 4. The server notifies the inviter's client. If the inviter is offline, any group admin who is online can act. The joiner's screen says who it is waiting for.
-5. That client finds the matching voucher, checks the MAC against the voucher's secret hash, adds the KeyPackage with a Commit, and sends the Welcome to the joiner's mailbox along with the inviter's signed voucher.
+5. That client finds the matching voucher and invite secret, which members receive together inside the group's encrypted messages. It checks the MAC with that secret, adds the KeyPackage with a Commit, and sends the Welcome to the joiner's mailbox along with the inviter's signed voucher. The voucher travels sealed under a key derived from the invite secret, so the server cannot read it.
 6. The joiner processes the Welcome and checks the voucher's signature against the identity fingerprint in the link. The join counts as verified when that signature holds and the adder is either the group key the voucher names or an admin of the group. Anything else shows the red warning.
 
 The 24-hour expiry covers redeeming the link. Once a join request is lodged, it waits up to 7 days for someone to act.

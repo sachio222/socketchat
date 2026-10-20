@@ -123,6 +123,11 @@ fn server_init_prints_aup_and_fingerprint() {
     let s = out(&o);
     assert!(o.status.success(), "{s}");
     assert!(s.contains("Acceptable use"), "{s}");
+    assert!(
+        s.lines().all(|l| !l.starts_with('#')),
+        "no Markdown heading marks: {s}"
+    );
+    assert!(!s.contains('`'), "no Markdown backticks: {s}");
     assert!(s.contains("fingerprint"), "{s}");
     assert!(
         s.contains("socketchat server run"),

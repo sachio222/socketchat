@@ -61,3 +61,7 @@ opt-level = 2
 lto = true
 strip = true
 codegen-units = 1
+
+# The profile that 'dist' builds release binaries with: the same as release.
+[profile.dist]
+inherits = "release"

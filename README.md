@@ -19,19 +19,43 @@ socketchat's server is one small program. In a release build on a Mac it used 10
 
 ## Quick start
 
-You need the Rust toolchain from [rustup.rs](https://rustup.rs). On Linux, also install the OpenSSL headers, which the encrypted local database needs:
+Install socketchat with one command. On macOS or Linux, run this in a terminal:
+
+```
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+```
+
+On Windows, run this in PowerShell:
+
+```
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.ps1 | iex"
+```
+
+The installer downloads a prebuilt `socketchat` program for your computer, puts it in `~/.local/bin`, and adds that folder to your PATH if it is missing. Open a new terminal afterwards so the PATH change takes effect. You do not need Rust or any other library, because the encryption code is built into the program.
+
+Prebuilt programs cover:
+
+- macOS on Apple silicon and on Intel.
+- Linux on Intel or AMD (x86_64) and on 64-bit ARM (aarch64), which includes a Raspberry Pi 4 or Zero 2 W running 64-bit Raspberry Pi OS. They need glibc 2.35 or newer, which Ubuntu 22.04, Debian 12 and Raspberry Pi OS 12 (Bookworm) have.
+- 64-bit Windows on Intel or AMD.
+
+**Or build from source**, for a system the prebuilt programs do not cover. You need the Rust toolchain from [rustup.rs](https://rustup.rs). On Linux, also install the OpenSSL headers, which the encrypted local database needs:
 
 ```
 sudo apt install build-essential pkg-config libssl-dev
 ```
 
-Install socketchat:
+Then install socketchat:
 
 ```
-cargo install --git https://github.com/sachio222/socketchat_v4 socketchat
+cargo install --locked --git https://github.com/sachio222/socketchat_v4 socketchat
 ```
 
-The first build compiles socketchat and all its libraries. It takes several minutes on a fast machine (about five and a half minutes in a clean arm64 Linux container on an Apple Silicon Mac) and much longer on a Raspberry Pi. Prebuilt binaries are not available yet. Once socketchat is installed, the steps below take a few minutes.
+On Windows, add `--features vendored-openssl` to that command. It builds OpenSSL from source, which needs the Visual Studio C++ build tools and [Strawberry Perl](https://strawberryperl.com).
+
+The first build compiles socketchat and all its libraries. It takes several minutes on a fast machine (about five and a half minutes in a clean arm64 Linux container on an Apple Silicon Mac) and much longer on a Raspberry Pi.
+
+Once socketchat is installed, the steps below take a few minutes.
 
 On the machine that will be the server, set it up and start it. Use the name or IP address other people will dial for `--host`:
 
@@ -103,6 +127,7 @@ The server stores and forwards encrypted data. It never sees message text, file 
 - [ACCEPTABLE_USE.md](ACCEPTABLE_USE.md): what socketchat is for.
 - [docs/files-photos-videos.md](docs/files-photos-videos.md): how sending files works and its limits, for everyone.
 - [docs/running-a-server.md](docs/running-a-server.md): a server on a Raspberry Pi or a small cloud machine.
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release.
 - [ROADMAP.md](ROADMAP.md): planned work, and where help is welcome.
 - [CONTRIBUTING.md](CONTRIBUTING.md): building, testing and reviews.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): Contributor Covenant 2.1.

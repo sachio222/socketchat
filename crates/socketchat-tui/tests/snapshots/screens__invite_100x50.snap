@@ -3,9 +3,9 @@ source: crates/socketchat-tui/tests/screens.rs
 expression: "render(&app, &crew(), 100, 50)"
 ---
 ┌ Chats ───────────┐┌ Book club ───────────────────────────────────────────────┐┌ People ──────────┐
-│# Book club       ││09:14 Ada: Who is bringing the book list?                 ││✓ Ada* (you)      │
-│@ Bo             3││09:15 Bo: Me. Sending it now.                             ││✓ Bo              │
-│# Climbing Sat… 12││09:15 · Bo sent books.pdf (84 KB)                         ││  Cy              │
+│# Book club       ││09:14:05 Ada: Who is bringing the book list?              ││✓ Ada* (you)      │
+│@ Bo             3││09:15:12 Bo: Me. Sending it now.                          ││✓ Bo              │
+│# Climbing Sat… 12││09:15:40 · Bo sent books.pdf (84 KB)                      ││  Cy              │
 │           ┌ Invite link ─────────────────────────────────────────────────────────────┐           │
 │           │Send this link to one person. It works once and expires in 2 hours. Anyone│           │
 │           │who has it can ask to join.                                               │           │
@@ -47,8 +47,8 @@ expression: "render(&app, &crew(), 100, 50)"
 │           │        ▀▀▀▀▀▀▀ ▀▀ ▀▀▀ ▀  ▀ ▀ ▀▀ ▀▀  ▀ ▀▀  ▀▀▀    ▀▀▀▀   ▀▀   ▀ ▀         │           │
 │           │                                                                          │           │
 │           │                                                                          │           │
-│           └──────────────────────────────────────────────────────────────────────────┘           │
-│                  ││                                                          ││                  │
-└──────────────────┘└──────────────────────────────────────────────────────────┘└──────────────────┘
-> type a message, or /help
+└───────────└──────────────────────────────────────────────────────────────────────────┘───────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  What's on your mind, Book club?                                                   / for commands│
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
 C copy the link · Esc close

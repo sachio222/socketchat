@@ -17,16 +17,36 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        include:
+          # Linux x86_64, against the system OpenSSL from libssl-dev.
+          - os: ubuntu-24.04
+            features: ""
+          # Apple silicon Mac. SQLCipher uses Apple's CommonCrypto here.
+          - os: macos-14
+            features: ""
+          # Intel Mac. GitHub retired macos-13; macos-15-intel replaces it.
+          - os: macos-15-intel
+            features: ""
+          # Windows has no system OpenSSL, so build it from source, as releases do.
+          - os: windows-latest
+            features: "--features socketchat/vendored-openssl"
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Keep LF line endings on Windows (snapshot tests compare text)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - name: Install OpenSSL headers (SQLCipher needs them on Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Use Strawberry Perl for the OpenSSL build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --workspace ${{ matrix.features }}
 
   lint:
     name: Format and clippy
@@ -58,6 +78,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p socketchat
       - run: cargo test --workspace --release
+
+  # Release binaries (release.yml, configured in dist-workspace.toml) build
+  # OpenSSL from source and link it in. Check that build on every push, on the
+  # Ubuntu 22.04 the release uses, with no libssl-dev installed, and check the
+  # binary loads no OpenSSL library at run time.
+  vendored:
+    name: Release-style build (no system OpenSSL)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --profile dist -p socketchat --features vendored-openssl
+      - name: Binary needs no libssl or libcrypto
+        run: |
+          ldd target/dist/socketchat
+          if ldd target/dist/socketchat | grep -E 'libssl|libcrypto'; then
+            echo "The release binary must not load a system OpenSSL."
+            exit 1
+          fi
+      - name: Binary starts and sets up a server
+        run: |
+          target/dist/socketchat --version
+          target/dist/socketchat server init --data-dir "$RUNNER_TEMP/srv" --host 127.0.0.1
 
   fuzz:
     name: Fuzz the frame decoder (60 s)

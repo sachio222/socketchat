@@ -126,6 +126,8 @@ impl App {
         if ctrl && k.code == KeyCode::Char('c') {
             return vec![Action::Quit];
         }
+        // A status message stays on the help line until the next key.
+        self.status = None;
         if let Some(m) = &self.modal {
             let yes = matches!(k.code, KeyCode::Char('y' | 'Y'));
             let act = match (m, yes) {

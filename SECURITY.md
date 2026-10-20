@@ -23,7 +23,6 @@ The server never holds a key that can read messages, files, display names or gro
 - Every group change. Commits and proposals travel signed but unencrypted, so the server can check them (see below).
 - Each person's server account key, which lets them create groups. Stored records do not connect it to any group.
 - The size and timing of every encrypted message and file, and which mailbox uploaded each file.
-- The inviter's identity key, once per completed invite. When a member adds someone through an invite link, their app sends the inviter's signed voucher next to the MLS Welcome, and v4.0 sends that voucher unencrypted. It holds the inviter's identity key and the inviter's group key in that group. The server deletes it once the joiner's app fetches it, but a server that keeps a copy can link the mailboxes of anyone who invites people into more than one group.
 - IP addresses of connected apps. An app signs in with all of its keys for a server on one connection, so an operator watching live traffic can link one person's mailboxes through their IP address and connection, even though stored records cannot.
 
 Stored rows also carry creation times. Someone holding the server database can sometimes guess a link from times alone, for example an account and a mailbox registered in the same second when a new person joins with a group invite.
@@ -32,14 +31,14 @@ Stored rows also carry creation times. Someone holding the server database can s
 
 - Message text, file contents, display names, group names.
 - Any key that can decrypt messages or files.
-- Identity keys of people who have not invited anyone, and any safety number.
+- Any identity key or safety number. The voucher an inviter sends with a Welcome holds the inviter's identity key, and it travels sealed for the joiner under a key the server does not have.
 - The secret part of an invite link. It sits after the `#`, which apps never send to the server.
 
 ## Why the server knows group membership
 
 The server delivers each encrypted message to the mailboxes in a group, so it has to know which mailboxes those are. It also checks every Commit before anyone sees it: the signature, the epoch, and that the sender may make that change. Removing someone else or changing the admin list needs an admin, and so does adding someone when the operator has turned off member invites. Without that check, a buggy or hostile app could send a change that some members accept and others reject, splitting the group in two.
 
-socketchat limits what that knowledge reveals. Group keys and mailboxes are per group, so the database shows separate groups of random keys. Names and group names travel only inside encrypted messages, and so do identity keys, apart from the voucher described above. Retention is short and set by the operator. Hiding membership from the server completely is the first item in [ROADMAP.md](ROADMAP.md).
+socketchat limits what that knowledge reveals. Group keys and mailboxes are per group, so the database shows separate groups of random keys. Names, group names and identity keys travel only inside encrypted messages or the sealed voucher. Retention is short and set by the operator. Hiding membership from the server completely is the first item in [ROADMAP.md](ROADMAP.md).
 
 ## Cryptography
 
@@ -51,7 +50,7 @@ socketchat limits what that knowledge reveals. Group keys and mailboxes are per 
 - **Signatures:** Ed25519 everywhere, which is not post-quantum. Forging one would take a quantum computer at the moment of the attack. Every socketchat signature outside MLS covers a context string first, so a signature made for one purpose never verifies for another.
 - **Connection:** TLS 1.3 through rustls 0.23.45 with the ring crypto provider. Its key exchange is classical X25519, so the connection layer is not post-quantum, while message contents inside it are. Someone who records traffic today and later breaks X25519 would learn what the server itself sees, but not message or file contents. The server makes a self-signed certificate at `init`. Invite links carry its SHA-256 fingerprint and apps pin it, so no certificate authority is involved.
 - **Files:** XChaCha20-Poly1305 in the STREAM construction, in 64 KiB chunks, with a fresh random key per file. STREAM catches chunks that were changed, dropped or reordered. The file key, name and SHA-256 hash travel inside an encrypted MLS message, and the receiving app checks the hash before saving.
-- **Invites:** the joiner sends a KeyPackage with an HMAC-SHA256 tag keyed by the invite secret, so a server without the link cannot slip in its own KeyPackage. The inviter also signs a voucher with their identity key, which the joiner checks against the fingerprint in the link.
+- **Invites:** the joiner sends a KeyPackage with an HMAC-SHA256 tag keyed by the invite secret, so a server without the link cannot slip in its own KeyPackage. The inviter also signs a voucher with their identity key, which the joiner checks against the fingerprint in the link. The voucher reaches the joiner sealed with XChaCha20-Poly1305 under a key derived from the invite secret with HKDF-SHA256, so the server stores and forwards it without being able to read it.
 - **Local data:** one SQLite file encrypted with SQLCipher, keyed by Argon2id from your passphrase at 19 MiB of memory and 2 passes (the OWASP minimum, chosen so a Raspberry Pi opens a profile quickly). The salt sits beside the file.
 - **Key refresh:** MLS changes encryption keys with every group change. Each app also refreshes its own keys in a group when they are more than a week old, so a stolen encryption key stops unlocking new messages.
 - **Randomness:** the operating system's random source, through the libraries above.
@@ -80,6 +79,4 @@ The project checks dependencies with `cargo deny check` on every change. Its `de
 
 ## Reporting a vulnerability
 
-Please report security problems privately rather than in a public issue. Say what you found, how to reproduce it, and which version or commit you tested.
-
-Contact: <to be added by the maintainer>
+Report security problems privately through GitHub's private vulnerability reporting on https://github.com/sachio222/socketchat_v4: open the Security tab and choose "Report a vulnerability". Do not open a public issue for a security problem. Say what you found, how to reproduce it, and which version or commit you tested.

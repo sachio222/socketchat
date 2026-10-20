@@ -34,8 +34,17 @@ struct Screen {
 }
 
 fn local_time(unix: u64) -> String {
+    clock_time(unix, &chrono::Local)
+}
+
+/// The time of day `unix` falls on in `tz`, as a 24-hour clock with
+/// seconds (HH:MM:SS).
+fn clock_time<Tz: chrono::TimeZone>(unix: u64, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
     chrono::DateTime::from_timestamp(unix as i64, 0)
-        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .map(|t| t.with_timezone(tz).format("%H:%M:%S").to_string())
         .unwrap_or_default()
 }
 
@@ -465,7 +474,17 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::to_base64;
+    use super::{clock_time, to_base64};
+
+    #[test]
+    fn chat_times_show_seconds_on_a_24_hour_clock() {
+        // 2026-10-19 21:04:05 UTC, shown two hours east of UTC.
+        let tz = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(clock_time(1_792_443_845, &tz), "23:04:05");
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+        assert_eq!(clock_time(1_792_443_845, &utc), "21:04:05");
+        assert_eq!(clock_time(9, &utc), "00:00:09");
+    }
 
     #[test]
     fn base64_matches_known_values() {

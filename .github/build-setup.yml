@@ -1,0 +1,10 @@
+# Steps dist runs before each release build. See dist-workspace.toml.
+#
+# Release builds compile OpenSSL from source (the vendored-openssl feature).
+# Its configure script needs a full Perl. On Windows, point it at Strawberry
+# Perl, which GitHub preinstalls, so the Git for Windows Perl is never picked.
+- name: Use Strawberry Perl for the OpenSSL build
+  if: runner.os == 'Windows'
+  shell: pwsh
+  run: |
+    "OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

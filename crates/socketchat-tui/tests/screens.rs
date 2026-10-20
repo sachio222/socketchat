@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
+use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
 use socketchat_core::keys::Key;
 use socketchat_proto::msg::GroupId;
@@ -48,10 +49,10 @@ fn crew() -> ViewModel {
             GroupView { id: g(3), name: "Climbing Saturdays".into(), unread: 12, is_dm: false },
         ],
         lines: vec![
-            LineView { time: "09:14".into(), sender: "Ada".into(), text: "Who is bringing the book list?".into(), notice: false, mine: true },
-            LineView { time: "09:15".into(), sender: "Bo".into(), text: "Me. Sending it now.".into(), notice: false, mine: false },
-            LineView { time: "09:15".into(), sender: String::new(), text: "Bo sent books.pdf (84 KB)".into(), notice: true, mine: false },
-            LineView { time: "09:16".into(), sender: "Cy".into(), text: "Got it, thanks. Saturday still works for me, and I can bring snacks for everyone.".into(), notice: false, mine: false },
+            LineView { time: "09:14:05".into(), sender: "Ada".into(), text: "Who is bringing the book list?".into(), notice: false, mine: true },
+            LineView { time: "09:15:12".into(), sender: "Bo".into(), text: "Me. Sending it now.".into(), notice: false, mine: false },
+            LineView { time: "09:15:40".into(), sender: String::new(), text: "Bo sent books.pdf (84 KB)".into(), notice: true, mine: false },
+            LineView { time: "09:16:58".into(), sender: "Cy".into(), text: "Got it, thanks. Saturday still works for me, and I can bring snacks for everyone.".into(), notice: false, mine: false },
         ],
         members: vec![
             MemberLine { key: k(1), name: "Ada".into(), verified: true, admin: true, me: true },
@@ -136,6 +137,26 @@ fn screen_group_chat_three_members_one_verified() {
 }
 
 #[test]
+fn wrapped_lines_sit_clear_of_the_time() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let s = render(&app, &crew(), 80, 24);
+    let rows: Vec<&str> = s.lines().collect();
+    let first = rows
+        .iter()
+        .position(|r| r.contains("09:16:58 Cy:"))
+        .expect("Cy's line is on screen");
+    let col = rows[first].find("09:16:58").unwrap();
+    let next = &rows[first + 1][col..];
+    let indent = next.chars().take_while(|c| *c == ' ').count();
+    assert_eq!(
+        indent,
+        "09:16:58 ".len(),
+        "continuation line: {next:?}\n{s}"
+    );
+}
+
+#[test]
 fn screen_unverified_join_warning() {
     let mut app = App::new();
     app.selected = Some(g(1));
@@ -167,6 +188,37 @@ fn screen_invite_modal_with_qr() {
         vec![Action::Copy(link.into())]
     );
     assert!(app.modal.is_some(), "copying keeps the link on screen");
+}
+
+#[test]
+fn invite_qr_is_true_black_on_white() {
+    // Named colors follow the terminal theme (gray on gray in some), so the
+    // QR must use exact RGB values for a camera to read it.
+    let link = "socketchat://chat.example.com:7444/j/AAECAwQFBgcICQoLDA0ODw#3q2-7wABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhs.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.modal = Some(Modal::Invite {
+        link: link.into(),
+        hours: 24,
+    });
+    let mut t = Terminal::new(TestBackend::new(100, 50)).unwrap();
+    t.draw(|f| draw(f, &app, &crew())).unwrap();
+    let buf = t.backend().buffer().clone();
+    let mut qr_cells = 0;
+    for y in 0..50 {
+        for x in 0..100 {
+            let cell = &buf[(x, y)];
+            if ["\u{2580}", "\u{2584}", "\u{2588}"].contains(&cell.symbol()) {
+                qr_cells += 1;
+                assert_eq!(cell.fg, Color::Rgb(0, 0, 0), "QR ink at ({x}, {y})");
+                assert_eq!(cell.bg, Color::Rgb(255, 255, 255), "QR paper at ({x}, {y})");
+            }
+        }
+    }
+    assert!(
+        qr_cells > 100,
+        "expected a QR code on screen, found {qr_cells} cells"
+    );
 }
 
 #[test]
@@ -291,4 +343,131 @@ fn status_after_sending_a_photo_says_it_was_cleaned() {
         None
     );
     assert_eq!(sent_file_status(&offer("clip.mp4", "video")), None);
+}
+
+fn buffer(app: &App, vm: &ViewModel, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| draw(f, app, vm)).unwrap();
+    t.backend().buffer().clone()
+}
+
+/// The text of row `y`, and the column where `needle` starts in it.
+fn find_in_row(buf: &ratatui::buffer::Buffer, y: u16, needle: &str) -> Option<u16> {
+    let row: Vec<&str> = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+    let text: String = row.concat();
+    let byte = text.find(needle)?;
+    Some(text[..byte].chars().count() as u16)
+}
+
+#[test]
+fn message_box_is_framed_and_names_the_group() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let buf = buffer(&app, &crew(), 80, 24);
+    let s = render(&app, &crew(), 80, 24);
+    let rows: Vec<&str> = s.lines().collect();
+    // Three rows of box across the full width, then the help line.
+    assert!(rows[20].starts_with('┌') && rows[20].ends_with('┐'), "{s}");
+    assert!(rows[22].starts_with('└') && rows[22].ends_with('┘'), "{s}");
+    assert!(rows[21].contains("What's on your mind, Book club?"), "{s}");
+    assert!(rows[21].contains("/ for commands"), "{s}");
+    // The box has focus by default, so its border uses the focused style.
+    let corner = &buf[(0, 20)];
+    assert_eq!(corner.fg, Color::Cyan);
+    assert!(corner.modifier.contains(Modifier::BOLD));
+    // The room's name stands out; the rest of the hint is dim.
+    let name_at = find_in_row(&buf, 21, "Book club").unwrap();
+    for x in name_at..name_at + "Book club".len() as u16 {
+        let c = &buf[(x, 21)];
+        assert_eq!(c.fg, Color::Cyan, "name cell {x}");
+        assert!(c.modifier.contains(Modifier::BOLD), "name cell {x}");
+    }
+    let what_at = find_in_row(&buf, 21, "What's").unwrap();
+    assert_eq!(buf[(what_at, 21)].fg, Color::DarkGray);
+    let cmd_at = find_in_row(&buf, 21, "/ for commands").unwrap();
+    assert_eq!(buf[(cmd_at, 21)].fg, Color::DarkGray);
+    insta::assert_snapshot!("message_box_group_hint", s);
+}
+
+#[test]
+fn empty_message_box_cursor_leaves_the_hint_readable() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    t.draw(|f| draw(f, &app, &crew())).unwrap();
+    let pos = t.get_cursor_position().unwrap();
+    let buf = t.backend().buffer().clone();
+    let hint_at = find_in_row(&buf, 21, "What's").unwrap();
+    assert_eq!(pos.y, 21);
+    assert!(
+        pos.x < hint_at,
+        "cursor at {} covers the hint at {hint_at}",
+        pos.x
+    );
+    assert_eq!(buf[(pos.x, pos.y)].symbol(), " ");
+}
+
+#[test]
+fn message_box_says_hi_in_a_direct_chat() {
+    let mut app = App::new();
+    app.selected = Some(g(2));
+    let buf = buffer(&app, &crew(), 80, 24);
+    let s = render(&app, &crew(), 80, 24);
+    let rows: Vec<&str> = s.lines().collect();
+    assert!(rows[21].contains("Say hi to Bo"), "{s}");
+    let bo = find_in_row(&buf, 21, "Bo").unwrap();
+    assert_eq!(buf[(bo, 21)].fg, Color::Cyan);
+    assert!(buf[(bo, 21)].modifier.contains(Modifier::BOLD));
+    insta::assert_snapshot!("message_box_dm_hint", s);
+}
+
+#[test]
+fn message_box_with_no_chat_open() {
+    let app = App::new();
+    let s = render(&app, &crew(), 80, 24);
+    let rows: Vec<&str> = s.lines().collect();
+    assert!(
+        rows[21].contains("Start a chat with /new <name>, or paste an invite with /join <link>"),
+        "{s}"
+    );
+    insta::assert_snapshot!("message_box_no_chat_hint", s);
+}
+
+#[test]
+fn message_box_shows_typing_with_the_cursor_after_it() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    for c in "hello".chars() {
+        app.handle_key(key(KeyCode::Char(c)), &crew());
+    }
+    let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    t.draw(|f| draw(f, &app, &crew())).unwrap();
+    let s = render(&app, &crew(), 80, 24);
+    let rows: Vec<&str> = s.lines().collect();
+    assert!(rows[21].starts_with("│› hello"), "{s}");
+    assert!(!rows[21].contains("What's on your mind"), "{s}");
+    let pos = t.get_cursor_position().unwrap();
+    assert_eq!((pos.x, pos.y), (1 + 2 + 5, 21));
+    insta::assert_snapshot!("message_box_typing", s);
+}
+
+#[test]
+fn status_shows_on_the_help_line_until_the_next_key() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.status = Some("Saved to ~/Downloads/books.pdf".into());
+    let buf = buffer(&app, &crew(), 80, 24);
+    let s = render(&app, &crew(), 80, 24);
+    let rows: Vec<&str> = s.lines().collect();
+    assert_eq!(rows[23], "Saved to ~/Downloads/books.pdf", "{s}");
+    assert_eq!(buf[(0, 23)].fg, Color::Yellow);
+    assert!(rows[21].contains("What's on your mind, Book club?"), "{s}");
+    insta::assert_snapshot!("message_box_status_on_help_line", s);
+    app.handle_key(key(KeyCode::Char('o')), &crew());
+    assert_eq!(app.status, None);
+    let after = render(&app, &crew(), 80, 24);
+    assert!(
+        after.lines().nth(23).unwrap().starts_with("Enter send"),
+        "{after}"
+    );
 }

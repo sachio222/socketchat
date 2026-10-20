@@ -21,8 +21,8 @@ expression: "render(&App::new(), &vm, 80, 24)"
 │                  ││                                      ││                  │
 │                  ││                                      ││                  │
 │                  ││                                      ││                  │
-│                  ││                                      ││                  │
-│                  ││                                      ││                  │
 └──────────────────┘└──────────────────────────────────────┘└──────────────────┘
-> type a message, or /help
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  Start a chat with /new <name>, or paste an invite with /join <link>         │
+└──────────────────────────────────────────────────────────────────────────────┘
 Enter send · /help commands · Tab move · Ctrl-K switch chat · Ctrl-C quit

@@ -32,6 +32,52 @@ pub use config::Config;
 /// The acceptable-use statement, printed when a server is first set up.
 pub const ACCEPTABLE_USE: &str = include_str!("../../../ACCEPTABLE_USE.md");
 
+/// The acceptable-use statement as plain terminal text, without Markdown
+/// heading marks or backticks.
+pub fn acceptable_use_text() -> String {
+    let mut out = String::new();
+    for line in ACCEPTABLE_USE.lines() {
+        let heading = line.trim_start_matches('#');
+        let line = if heading.len() < line.len() {
+            heading.trim_start()
+        } else {
+            line
+        };
+        out.push_str(&line.replace('`', ""));
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(test)]
+mod acceptable_use_tests {
+    use super::*;
+
+    #[test]
+    fn acceptable_use_text_has_no_markdown_marks() {
+        let text = acceptable_use_text();
+        assert!(text.contains("Acceptable use"), "{text}");
+        assert!(!text.contains('`'), "{text}");
+        for line in text.lines() {
+            assert!(!line.starts_with('#'), "heading mark left in: {line}");
+        }
+        assert!(text.contains("CODE_OF_CONDUCT.md"), "{text}");
+    }
+
+    #[test]
+    fn acceptable_use_text_keeps_every_bullet() {
+        let text = acceptable_use_text();
+        let bullets: Vec<&str> = ACCEPTABLE_USE
+            .lines()
+            .filter(|l| l.starts_with("- "))
+            .collect();
+        assert!(!bullets.is_empty());
+        for b in bullets {
+            assert!(text.lines().any(|l| l == b), "bullet missing: {b}");
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ServerError {
     #[error("config: {0}")]

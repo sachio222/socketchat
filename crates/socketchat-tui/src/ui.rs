@@ -1,6 +1,6 @@
 //! Drawing. Four areas: chats on the left, messages in the middle, people
-//! on the right, and the input line with a help line under it. Readable at
-//! 80 by 24.
+//! on the right, and a framed message box across the bottom with a help line
+//! under it. Readable at 80 by 24.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -130,7 +130,7 @@ pub fn draw(f: &mut Frame, app: &App, vm: &ViewModel) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
-            Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Length(1),
         ])
         .split(area);
@@ -147,49 +147,101 @@ pub fn draw(f: &mut Frame, app: &App, vm: &ViewModel) {
     draw_messages(f, app, vm, cols[1]);
     draw_members(f, app, vm, cols[2]);
 
-    let input = if app.input.is_empty() {
-        match &app.status {
-            Some(s) => Line::from(Span::styled(
-                fit(s, area.width as usize),
-                Style::default().fg(Color::Yellow),
-            )),
-            None => Line::from(Span::styled(
-                "> type a message, or /help",
-                Style::default().fg(Color::DarkGray),
-            )),
-        }
-    } else {
-        let w = area.width.saturating_sub(2) as usize;
-        let shown: String = {
-            let n = app.input.chars().count();
-            app.input.chars().skip(n.saturating_sub(w)).collect()
-        };
-        Line::from(vec![Span::raw("> "), Span::raw(shown)])
-    };
-    f.render_widget(Paragraph::new(input), rows[1]);
-    if app.modal.is_none() && app.switcher.is_none() {
-        let x = rows[1].x
-            + 2
-            + app
-                .input
-                .chars()
-                .count()
-                .min(area.width.saturating_sub(3) as usize) as u16;
-        f.set_cursor_position((x, rows[1].y));
-    }
-    f.render_widget(
-        Paragraph::new(Span::styled(
+    draw_input(f, app, vm, rows[1]);
+    // A status message replaces the help line until the next key, so it is
+    // seen without covering what the person types.
+    let help = match &app.status {
+        Some(st) => Span::styled(
+            fit(st, area.width as usize),
+            Style::default().fg(Color::Yellow),
+        ),
+        None => Span::styled(
             fit(help_line(app), area.width as usize),
             Style::default().fg(Color::DarkGray),
-        )),
-        rows[2],
-    );
+        ),
+    };
+    f.render_widget(Paragraph::new(help), rows[2]);
 
     if app.switcher.is_some() {
         draw_switcher(f, app, vm, area);
     }
     if let Some(m) = &app.modal {
         draw_modal(f, m, area);
+    }
+}
+
+/// Shown in the empty message box.
+const COMMANDS_HINT: &str = "/ for commands";
+
+/// The framed message box: a hint naming the open chat while it is empty,
+/// and what the person types once they start.
+fn draw_input(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border(app.focus == Focus::Input));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let w = inner.width as usize;
+    // Typed text and the hint both start after the "› " prompt's width.
+    let start = 2.min(w);
+    let line = if app.input.is_empty() {
+        let dim = Style::default().fg(Color::DarkGray);
+        let room = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let avail = w - start;
+        let open = vm.groups.iter().find(|g| Some(g.id) == app.selected);
+        let mut spans: Vec<Span> = match open {
+            Some(g) if g.is_dm => {
+                let before = "Say hi to ";
+                vec![
+                    Span::styled(before, dim),
+                    Span::styled(fit(&g.name, avail.saturating_sub(before.len())), room),
+                ]
+            }
+            Some(g) => {
+                let (before, after) = ("What's on your mind, ", "?");
+                vec![
+                    Span::styled(before, dim),
+                    Span::styled(
+                        fit(&g.name, avail.saturating_sub(before.len() + after.len())),
+                        room,
+                    ),
+                    Span::styled(after, dim),
+                ]
+            }
+            None => vec![Span::styled(
+                fit(
+                    "Start a chat with /new <name>, or paste an invite with /join <link>",
+                    avail,
+                ),
+                dim,
+            )],
+        };
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let cmd = COMMANDS_HINT.chars().count();
+        if used + 2 + cmd <= avail {
+            spans.push(Span::raw(" ".repeat(avail - used - cmd)));
+            spans.push(Span::styled(COMMANDS_HINT, dim));
+        }
+        spans.insert(0, Span::raw(" ".repeat(start)));
+        Line::from(spans)
+    } else {
+        let room = w.saturating_sub(start + 1);
+        let n = app.input.chars().count();
+        let shown: String = app.input.chars().skip(n.saturating_sub(room)).collect();
+        Line::from(vec![Span::raw("› "), Span::raw(shown)])
+    };
+    f.render_widget(Paragraph::new(line), inner);
+    if app.modal.is_none() && app.switcher.is_none() {
+        // While empty, the cursor waits in the gap before the hint so it
+        // never hides a letter; once typing starts it follows the text.
+        let x = if app.input.is_empty() {
+            start.saturating_sub(1)
+        } else {
+            start + app.input.chars().count().min(w.saturating_sub(start + 1))
+        };
+        f.set_cursor_position((inner.x + x as u16, inner.y));
     }
 }
 
@@ -280,17 +332,18 @@ fn draw_messages(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
             )
         };
         let full = format!("{head}{}", l.text);
-        // Continuation lines sit under the text, clear of the time.
-        const INDENT: usize = 6;
+        // Continuation lines sit under the text, clear of the time and the
+        // space after it.
+        let indent = l.time.chars().count() + 1;
         let first = wrap(&full, w);
         let pieces: Vec<String> = match first.split_first() {
-            Some((head_line, _)) if w > INDENT * 2 => {
+            Some((head_line, _)) if w > indent * 2 => {
                 let used = head_line.chars().count();
                 let rest: String = full.chars().skip(used).collect();
                 let mut v = vec![head_line.clone()];
-                for p in wrap(rest.trim_start(), w - INDENT) {
+                for p in wrap(rest.trim_start(), w - indent) {
                     if !p.is_empty() {
-                        v.push(format!("{}{p}", " ".repeat(INDENT)));
+                        v.push(format!("{}{p}", " ".repeat(indent)));
                     }
                 }
                 v
@@ -485,8 +538,11 @@ fn with_qr(
     lines.push(Line::from(""));
     if fits {
         let pad = " ".repeat((inner_w - qr_w) / 2);
-        // Black on white whatever the terminal theme, so cameras read it.
-        let ink = Style::default().fg(Color::Black).bg(Color::White);
+        // Exact RGB black on white: themes remap the named Black and White
+        // (some to gray on gray), and cameras then fail to read the code.
+        let ink = Style::default()
+            .fg(Color::Rgb(0, 0, 0))
+            .bg(Color::Rgb(255, 255, 255));
         for row in qr {
             lines.push(Line::from(vec![
                 Span::raw(pad.clone()),

@@ -21,7 +21,9 @@ Sleep 1s
 Show
 
 Type "socketchat server init --data-dir /tmp/sc-demo/server --host 127.0.0.1 --listen 127.0.0.1:17444" Enter
-Sleep 1s
+# Wait for the prompt so the next command is not typed into init's output.
+Wait@30s /\$\s*$/
+Sleep 500ms
 Type "socketchat server run --data-dir /tmp/sc-demo/server" Enter
 Sleep 2s
 Screenshot "docs/images/server.png"

@@ -16,9 +16,9 @@ This is the work planned after socketchat v4.0. One small item comes first; the 
 
 **Why it is not in v4.0.** Anonymous credentials are not part of the MLS standard (Messaging Layer Security, RFC 9420). Signal's implementation is licensed under the AGPL and published for Signal's own use. Writing our own would break the project's rule against home-made cryptography. We will adopt it when a reviewed specification with a permissively licensed implementation exists, for example if IETF work on private MLS delivery becomes a standard.
 
-**What v4.0 already does.** Each person makes a fresh group key and mailbox for every group they join, so the server's records show separate groups of random keys. Names and group names travel only inside encrypted messages. Identity keys do too, with one gap: when someone is added through an invite, the inviter's signed voucher travels unencrypted next to the Welcome, the MLS message that lets the joiner in, so the server briefly holds the inviter's identity key (see [SECURITY.md](SECURITY.md)). Encrypting that voucher for the joiner is a smaller step that does not wait on new standards.
+**What v4.0 already does.** Each person makes a fresh group key and mailbox for every group they join, so the server's records show separate groups of random keys. Names, group names and identity keys travel only inside encrypted messages. When someone joins through an invite, the inviter's signed voucher travels next to the Welcome, the MLS message that lets the joiner in, sealed under a key derived from the invite secret, so the server never sees the inviter's identity key (see [SECURITY.md](SECURITY.md)).
 
-**How to help.** Follow the IETF MLS working group and report specifications or implementations that fit. If you know anonymous credential systems, review designs that could sit beside MLS. Help with the voucher fix is welcome now.
+**How to help.** Follow the IETF MLS working group and report specifications or implementations that fit. If you know anonymous credential systems, review designs that could sit beside MLS.
 
 ## 2. Post-quantum protection for the connection
 

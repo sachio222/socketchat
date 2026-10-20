@@ -3,15 +3,13 @@ source: crates/socketchat-tui/tests/screens.rs
 expression: s
 ---
 ┌ Chats ───────────┐┌ An extremely long group n… ──────────┐┌ People ──────────┐
-│# An extremely lo…││09:14 Ada: Who is bringing the book   ││✓ Ada* (you)      │
-│@ Bo             3││      list?                           ││✓ Bo              │
-│# Climbing Sat… 12││09:15 Bo[31m: Me. Sending it now.     ││  Cyrus Alexander…│
-│                  ││09:15 · Bo sent books.pdf (84 KB)     ││                  │
-│                  ││09:16 Cy: Got it, thanks. Saturday    ││                  │
-│                  ││      still works for me, and I can   ││                  │
-│                  ││      bring snacks for everyone.      ││                  │
-│                  ││                                      ││                  │
-│                  ││                                      ││                  │
+│# An extremely lo…││09:14:05 Ada: Who is bringing the book││✓ Ada* (you)      │
+│@ Bo             3││         list?                        ││✓ Bo              │
+│# Climbing Sat… 12││09:15:12 Bo[31m: Me. Sending it now.  ││  Cyrus Alexander…│
+│                  ││09:15:40 · Bo sent books.pdf (84 KB)  ││                  │
+│                  ││09:16:58 Cy: Got it, thanks. Saturday ││                  │
+│                  ││         still works for me, and I can││                  │
+│                  ││         bring snacks for everyone.   ││                  │
 │                  ││                                      ││                  │
 │                  ││                                      ││                  │
 │                  ││                                      ││                  │
@@ -24,5 +22,7 @@ expression: s
 │                  ││                                      ││                  │
 │                  ││                                      ││                  │
 └──────────────────┘└──────────────────────────────────────┘└──────────────────┘
-> type a message, or /help
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  What's on your mind, An extremely long group name that never ends?          │
+└──────────────────────────────────────────────────────────────────────────────┘
 Enter send · /help commands · Tab move · Ctrl-K switch chat · Ctrl-C quit

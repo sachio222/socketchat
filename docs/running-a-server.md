@@ -11,7 +11,19 @@ A socketchat server stores and forwards encrypted messages and files. It never h
 
 ## Install
 
-The first build compiles socketchat and all its libraries. It takes several minutes on a fast machine and much longer on a Raspberry Pi. Prebuilt binaries are not available yet.
+On the server, run the installer:
+
+```
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+```
+
+It downloads a prebuilt `socketchat` program and puts it in `~/.local/bin/socketchat`. The program has its encryption libraries built in, so the server needs no Rust, no OpenSSL and no other package.
+
+The Linux programs cover Intel or AMD (x86_64) and 64-bit ARM (aarch64). They need glibc 2.35 or newer, which Ubuntu 22.04, Debian 12 and Raspberry Pi OS 12 (Bookworm) have. A Raspberry Pi 4 or Zero 2 W running 64-bit Raspberry Pi OS uses the aarch64 program. 32-bit Raspberry Pi OS is not covered; install the 64-bit edition instead.
+
+### Build from source
+
+Build from source on a system the prebuilt programs do not cover. The first build compiles socketchat and all its libraries. It takes several minutes on a fast machine and much longer on a Raspberry Pi.
 
 On the machine itself, install Rust from [rustup.rs](https://rustup.rs) and the build tools:
 
@@ -37,8 +49,10 @@ Create a user for the server and put the binary where systemd can find it:
 ```
 sudo useradd --system --home-dir /var/lib/socketchat --shell /usr/sbin/nologin socketchat
 sudo install -d -o socketchat -g socketchat -m 700 /var/lib/socketchat
-sudo install -m 755 ~/.cargo/bin/socketchat /usr/local/bin/socketchat
+sudo install -m 755 ~/.local/bin/socketchat /usr/local/bin/socketchat
 ```
+
+If you built from source, copy `~/.cargo/bin/socketchat` instead.
 
 Run `init` as that user:
 
@@ -139,9 +153,9 @@ If you restore to a different path, change `data_dir` in `socketchat-server.toml
 
 ## Upgrade
 
-1. Build or copy the new binary, as in "Install".
+1. Run the installer again to get the newest release, or rebuild from source, as in "Install".
 2. Back up the data directory, as above.
-3. `sudo systemctl stop socketchat`, then `sudo install -m 755 ~/.cargo/bin/socketchat /usr/local/bin/socketchat`, then `sudo systemctl start socketchat`.
+3. `sudo systemctl stop socketchat`, then `sudo install -m 755 ~/.local/bin/socketchat /usr/local/bin/socketchat` (or `~/.cargo/bin/socketchat` after a source build), then `sudo systemctl start socketchat`.
 
 Apps and servers send a protocol number when they connect (1 in v4.0). If a new release changes it, apps and servers with different numbers refuse to talk, so tell your members to upgrade too.
 

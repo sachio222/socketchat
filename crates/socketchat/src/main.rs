@@ -11,7 +11,7 @@ use socketchat_core::invite::hours_text;
 use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
 use socketchat_proto::InviteLink;
-use socketchat_server::{init, make_server_invite, Config, Server, ACCEPTABLE_USE};
+use socketchat_server::{acceptable_use_text, init, make_server_invite, Config, Server};
 
 #[derive(Parser)]
 #[command(
@@ -266,7 +266,7 @@ async fn server(cmd: ServerCmd) -> Result<(), Fail> {
                 cfg.save()?;
             }
             let cfg = Config::load(&dir)?;
-            println!("{ACCEPTABLE_USE}");
+            println!("{}", acceptable_use_text());
             println!("---\n");
             println!("Server set up in {}.", cfg.data_dir.display());
             println!(
