@@ -38,6 +38,14 @@ const ARGON_LANES: u32 = 1;
 const KDF_MAGIC: &[u8; 6] = b"sckdf\x01";
 const SALT_LEN: usize = 16;
 
+/// The most a salt file may ask for: 1 GiB of memory, 16 passes, 8 lanes.
+/// Anything above, or less than 8 KiB of memory per lane (Argon2's own
+/// floor), means the file was damaged or tampered with, and opening the
+/// profile with it could take hours.
+const MAX_MEM_KIB: u32 = 1 << 20;
+const MAX_PASSES: u32 = 16;
+const MAX_LANES: u32 = 8;
+
 /// Argon2id settings and salt for one profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Kdf {
@@ -87,10 +95,17 @@ impl Kdf {
             return Err(bad());
         }
         let n = |i: usize| u32::from_be_bytes(rest[i..i + 4].try_into().expect("4 bytes"));
+        let (mem_kib, passes, lanes) = (n(0), n(4), n(8));
+        let sane = (1..=MAX_PASSES).contains(&passes)
+            && (1..=MAX_LANES).contains(&lanes)
+            && (8 * lanes..=MAX_MEM_KIB).contains(&mem_kib);
+        if !sane {
+            return Err(bad());
+        }
         Ok(Kdf {
-            mem_kib: n(0),
-            passes: n(4),
-            lanes: n(8),
+            mem_kib,
+            passes,
+            lanes,
             salt: rest[12..].try_into().map_err(|_| bad())?,
         })
     }
@@ -169,6 +184,12 @@ CREATE TABLE IF NOT EXISTS expected_joiners (
     group_key BLOB NOT NULL,
     PRIMARY KEY (group_id, group_key)
 );
+CREATE TABLE IF NOT EXISTS owed_proofs (
+    group_id BLOB NOT NULL,
+    token BLOB NOT NULL,
+    proof BLOB NOT NULL,
+    PRIMARY KEY (group_id, token)
+);
 ";
 
 /// Who this person is on this device.
@@ -223,6 +244,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("vouchers", "mine", "INTEGER NOT NULL DEFAULT 0"),
     ("vouchers", "mac_key", "BLOB"),
     ("vouchers", "seal_key", "BLOB"),
+    ("vouchers", "request_key", "BLOB"),
 ];
 
 fn migrate(conn: &Connection) -> Result<(), CoreError> {
@@ -356,8 +378,8 @@ impl Store {
 pub struct StoredVoucher {
     /// The voucher, postcard-encoded.
     pub voucher: Vec<u8>,
-    /// Checks a join request's MAC.
-    pub mac_key: [u8; 32],
+    /// Checks a join request's signature (see `keys::join_request_ok`).
+    pub request_key: Key,
     /// Seals the voucher for the joiner.
     pub seal_key: [u8; 32],
     /// The invite secret itself: only on the link maker's own rows.
@@ -726,7 +748,7 @@ impl Store {
         v: &StoredVoucher,
     ) -> Result<(), CoreError> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO vouchers (group_id, token, voucher, secret, mine, mac_key, seal_key)
+            "INSERT OR IGNORE INTO vouchers (group_id, token, voucher, secret, mine, request_key, seal_key)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 g.0.as_slice(),
@@ -734,7 +756,7 @@ impl Store {
                 v.voucher,
                 v.secret.as_ref().map(|s| s.as_slice()),
                 v.secret.is_some(),
-                v.mac_key.as_slice(),
+                v.request_key.0.as_slice(),
                 v.seal_key.as_slice()
             ],
         )?;
@@ -743,7 +765,9 @@ impl Store {
 
     /// The stored voucher for a token. Rows from before the keys were split
     /// out hold only the secret; their keys are derived from it, and they
-    /// never count as this client's own.
+    /// never count as this client's own. A member's row from before join
+    /// requests were signed holds no key to check them with, so it reads as
+    /// no voucher.
     pub fn voucher(&self, g: &GroupId, token: &Token) -> Result<Option<StoredVoucher>, CoreError> {
         type Row = (
             Vec<u8>,
@@ -755,28 +779,28 @@ impl Store {
         let row: Option<Row> = self
             .conn
             .query_row(
-                "SELECT voucher, secret, mine, mac_key, seal_key FROM vouchers
+                "SELECT voucher, secret, mine, request_key, seal_key FROM vouchers
                  WHERE group_id = ?1 AND token = ?2",
                 params![g.0.as_slice(), token.0.as_slice()],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let Some((voucher, secret, mine, mac_key, seal_key)) = row else {
+        let Some((voucher, secret, mine, request_key, seal_key)) = row else {
             return Ok(None);
         };
         let b32 = |b: Option<Vec<u8>>| b.and_then(|b| <[u8; 32]>::try_from(b).ok());
         let secret = b32(secret);
-        let (mac_key, seal_key) = match (b32(mac_key), b32(seal_key), secret) {
-            (Some(m), Some(s), _) => (m, s),
+        let (request_key, seal_key) = match (b32(request_key), b32(seal_key), secret) {
+            (Some(r), Some(s), _) => (Key(r), s),
             (_, _, Some(sec)) => (
-                crate::keys::invite_mac_key(&sec),
+                crate::keys::invite_signing_key(&sec).public(),
                 crate::keys::voucher_seal_key(&sec),
             ),
             _ => return Ok(None),
         };
         Ok(Some(StoredVoucher {
             voucher,
-            mac_key,
+            request_key,
             seal_key,
             secret: if mine { secret } else { None },
         }))
@@ -854,6 +878,66 @@ impl Store {
         self.conn.execute(
             "INSERT OR IGNORE INTO expected_joiners (group_id, group_key) VALUES (?1, ?2)",
             params![g.0.as_slice(), key.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Remembers an invite proof this member owes a group, until it is sent.
+    pub fn owe_proof(&self, g: &GroupId, token: &Token, proof: &[u8; 32]) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO owed_proofs (group_id, token, proof) VALUES (?1, ?2, ?3)",
+            params![g.0.as_slice(), token.0.as_slice(), proof.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Invite proofs this member still owes a group.
+    pub fn owed_proofs(&self, g: &GroupId) -> Result<Vec<(Token, [u8; 32])>, CoreError> {
+        let mut st = self
+            .conn
+            .prepare("SELECT token, proof FROM owed_proofs WHERE group_id = ?1")?;
+        let rows = st.query_map([g.0.as_slice()], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (t, p) = row?;
+            if let (Ok(t), Ok(p)) = (t.try_into(), p.try_into()) {
+                out.push((Token(t), p));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Groups this member owes an invite proof.
+    pub fn groups_owing_proofs(&self) -> Result<Vec<GroupId>, CoreError> {
+        let mut st = self
+            .conn
+            .prepare("SELECT DISTINCT group_id FROM owed_proofs")?;
+        let rows = st.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for g in rows {
+            if let Ok(g) = g?.try_into() {
+                out.push(GroupId(g));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Marks an owed invite proof as sent.
+    pub fn paid_proof(&self, g: &GroupId, token: &Token) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM owed_proofs WHERE group_id = ?1 AND token = ?2",
+            params![g.0.as_slice(), token.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Drops every proof owed to a group this member is no longer in.
+    pub fn forget_proofs(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM owed_proofs WHERE group_id = ?1",
+            [g.0.as_slice()],
         )?;
         Ok(())
     }
@@ -1024,6 +1108,36 @@ mod tests {
             .execute_batch(SCHEMA)
             .unwrap();
         assert!(Store::open(d.path(), "k").is_ok());
+    }
+
+    #[test]
+    fn salt_file_asking_too_much_is_damaged() {
+        let file = |m: u32, t: u32, p: u32| {
+            let mut f = KDF_MAGIC.to_vec();
+            for v in [m, t, p] {
+                f.extend_from_slice(&v.to_be_bytes());
+            }
+            f.extend_from_slice(&[1; SALT_LEN]);
+            f
+        };
+        assert!(Kdf::decode(&file(MAX_MEM_KIB, MAX_PASSES, MAX_LANES)).is_ok());
+        assert!(Kdf::decode(&file(64, 1, 8)).is_ok());
+        for (m, t, p) in [
+            (MAX_MEM_KIB + 1, 2, 1),
+            (19 * 1024, MAX_PASSES + 1, 1),
+            (19 * 1024, u32::MAX, 1),
+            (19 * 1024, 2, MAX_LANES + 1),
+            (63, 2, 8),
+            (19 * 1024, 0, 1),
+            (19 * 1024, 2, 0),
+        ] {
+            let err = Kdf::decode(&file(m, t, p)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "local storage: the profile's salt file is damaged",
+                "m={m} t={t} p={p}"
+            );
+        }
     }
 
     #[test]

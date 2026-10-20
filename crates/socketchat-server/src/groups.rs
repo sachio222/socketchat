@@ -44,6 +44,9 @@ const ENTRY_OVERHEAD: usize = 16;
 /// Server invites one account may make in a window of `quota_window` days.
 const SERVER_INVITE_QUOTA: i64 = 5;
 
+/// Unused, unexpired invite links one member may hold in a group.
+pub(crate) const OPEN_INVITES: i64 = 20;
+
 fn refused(why: &str) -> Response {
     Response::Refused(why.to_string())
 }
@@ -155,8 +158,9 @@ pub fn register_mailbox(
                 return refused("this invite link was already used");
             }
             let ok = db.unchecked_transaction().and_then(|t| {
+                // A used link no longer names who made it.
                 t.execute(
-                    "UPDATE invites SET uses_left = uses_left - 1 WHERE token = ?1",
+                    "UPDATE invites SET uses_left = uses_left - 1, maker = NULL WHERE token = ?1",
                     [token.0.as_slice()],
                 )?;
                 t.execute(
@@ -678,10 +682,24 @@ pub fn create_invite(state: &State, cs: &ConnState, group: Option<Gid>) -> Respo
                     return refused("on this server only admins can make invite links");
                 }
             }
+            let open: i64 = match db.query_row(
+                "SELECT COUNT(*) FROM invites
+                     WHERE maker = ?1 AND group_id = ?2 AND uses_left > 0 AND expires_unix >= ?3",
+                params![me.0.as_slice(), g.0.as_slice(), now as i64],
+                |r| r.get(0),
+            ) {
+                Ok(n) => n,
+                Err(_) => return Response::Error("could not save the invite".into()),
+            };
+            if open >= OPEN_INVITES {
+                return Response::Refused(format!(
+                    "you have {OPEN_INVITES} open invite links in this group; wait for some to be used or expire"
+                ));
+            }
             if db
                 .execute(
-                    "INSERT INTO invites (token, group_id, expires_unix, uses_left) VALUES (?1, ?2, ?3, 1)",
-                    params![token.0.as_slice(), g.0.as_slice(), expires as i64],
+                    "INSERT INTO invites (token, group_id, expires_unix, uses_left, maker) VALUES (?1, ?2, ?3, 1, ?4)",
+                    params![token.0.as_slice(), g.0.as_slice(), expires as i64, me.0.as_slice()],
                 )
                 .is_err()
             {

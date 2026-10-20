@@ -106,24 +106,33 @@ pub fn redeem(
     Response::JoinLodged
 }
 
-pub fn pending(state: &State, cs: &ConnState, group: Gid) -> Response {
+/// Join requests waiting in `group`, ordered by (lodged time, token), as
+/// many as fit one reply. With `after`, the list starts strictly after that
+/// position, so a client pages past requests nobody completes.
+pub fn pending(state: &State, cs: &ConnState, group: Gid, after: Option<(u64, Token)>) -> Response {
     let now = state.now();
     let db = state.db();
     if member_key(&db, cs, &group).is_none() {
         return Response::Refused("you are not a member of this group".into());
     }
-    // Oldest first, as many as fit one reply. Requests leave the list when
-    // a member adds the person or when they expire, and the next call
-    // returns the ones after them.
+    // Before every real request when no position is given. SQLite compares
+    // the token blobs byte by byte, the same order as the Rust arrays.
+    let (after_at, after_token) = match after {
+        Some((at, t)) => (at.min(i64::MAX as u64) as i64, t.0.to_vec()),
+        None => (i64::MIN, Vec::new()),
+    };
     let read = || -> rusqlite::Result<Vec<JoinRequest>> {
         let mut st = db.prepare(
             "SELECT token, key_package, mac, lodged_unix FROM joins
              WHERE group_id = ?1 AND key_package IS NOT NULL AND lodged_unix > ?2
+               AND (lodged_unix > ?3 OR (lodged_unix = ?3 AND token > ?4))
              ORDER BY lodged_unix, token",
         )?;
         let mut rows = st.query(params![
             group.0.as_slice(),
-            now.saturating_sub(JOIN_WAIT_SECS) as i64
+            now.saturating_sub(JOIN_WAIT_SECS) as i64,
+            after_at,
+            after_token
         ])?;
         let mut out = Vec::new();
         let mut bytes = 0;

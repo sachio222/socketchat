@@ -28,6 +28,7 @@ use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
 pub use config::Config;
+pub use conn::QUEUE_BYTES;
 
 /// The acceptable-use statement, printed when a server is first set up.
 pub const ACCEPTABLE_USE: &str = include_str!("../../../ACCEPTABLE_USE.md");
@@ -166,8 +167,9 @@ pub(crate) struct State {
     clock_offset: AtomicU64,
     pub conns: AtomicUsize,
     pub online: conn::Online,
+    pub per_ip: conn::PerIp,
     /// Replies and pushes waiting to be written, over every connection.
-    pub queued: Arc<AtomicUsize>,
+    pub queued: Arc<conn::Queued>,
 }
 
 /// Locks `m` even when a thread panicked while holding it. Requests that
@@ -226,7 +228,8 @@ impl Server {
             clock_offset: AtomicU64::new(0),
             conns: AtomicUsize::new(0),
             online: Default::default(),
-            queued: Arc::new(AtomicUsize::new(0)),
+            per_ip: Default::default(),
+            queued: Default::default(),
         });
         let (stop, stop_rx) = watch::channel(false);
         let sweeper = state.clone();
@@ -248,9 +251,13 @@ impl Server {
                 tokio::select! {
                     _ = stop_rx2.changed() => break,
                     acc = listener.accept() => {
-                        let Ok((tcp, _)) = acc else { continue };
+                        let Ok((tcp, peer)) = acc else { continue };
+                        // An address over its share is dropped before TLS.
+                        let Some(slot) = conn::PerIp::take(&st, peer.ip(), st.cfg.max_per_ip) else {
+                            continue;
+                        };
                         let _ = tcp.set_nodelay(true);
-                        tokio::spawn(conn::serve(st.clone(), acceptor.clone(), tcp, stop_rx.clone()));
+                        tokio::spawn(conn::serve(st.clone(), acceptor.clone(), tcp, stop_rx.clone(), slot));
                     }
                 }
             }
@@ -288,7 +295,13 @@ impl ServerHandle {
     /// Frames waiting to be written, over every connection. For tests.
     #[doc(hidden)]
     pub fn queued_frames(&self) -> usize {
-        self.state.queued.load(Ordering::Relaxed)
+        self.state.queued.frames.load(Ordering::Relaxed)
+    }
+
+    /// Bytes waiting to be written, over every connection. For tests.
+    #[doc(hidden)]
+    pub fn queued_bytes(&self) -> usize {
+        self.state.queued.bytes.load(Ordering::Relaxed)
     }
 }
 

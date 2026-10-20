@@ -93,8 +93,12 @@ pub enum Request {
         key_package: Vec<u8>,
         mac: [u8; 32],
     },
+    /// Join requests waiting in `group`, oldest first, as many as fit one
+    /// reply. `after` is the (lodged time, token) of the last request the
+    /// client already has; the reply starts strictly after it.
     PendingJoins {
         group: GroupId,
+        after: Option<(u64, Token)>,
     },
     FetchWelcomes,
     FileBegin {
@@ -284,7 +288,14 @@ mod tests {
                 key_package: vec![8; 50],
                 mac: [9; 32],
             },
-            Request::PendingJoins { group: g },
+            Request::PendingJoins {
+                group: g,
+                after: None,
+            },
+            Request::PendingJoins {
+                group: g,
+                after: Some((99, Token([2; 16]))),
+            },
             Request::FetchWelcomes,
             Request::FileBegin {
                 group: g,

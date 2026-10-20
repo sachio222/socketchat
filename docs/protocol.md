@@ -16,7 +16,7 @@ The first frame from the app must be `Hello { version }`. The protocol number in
 - `HelloOk { version }`: the server speaks this version; requests may follow.
 - `VersionMismatch { server }`: the server speaks another version and closes the connection.
 
-The server also closes the connection, without a reply, when the first frame is anything else, when no Hello arrives within 10 seconds, or when it already serves `max_connections` connections. Later it closes a connection that sends nothing for 5 minutes, or one that stops reading while 64 replies and pushes wait for it. Apps reconnect when they next need the server and fetch what they missed.
+The server also closes the connection, without a reply, when the first frame is anything else, when no Hello arrives within 10 seconds, or when it already serves `max_connections` connections. It drops a new connection before TLS when that address already holds 32 (an IPv6 address counts by its /64 network). Later it closes a connection that sends nothing for 5 minutes. Each connection may have at most 2 MiB of replies and pushes waiting to be written. The server handles the next request only once there is room for the largest reply, and closes the connection when a push would not fit. A write that makes no progress for 30 seconds also closes it, so a client that stops reading frees its slot. Apps reconnect when they next need the server and fetch what they missed.
 
 ## Requests and responses
 
@@ -38,8 +38,8 @@ Most requests need the connection to have signed in with a key first, through `C
 | `Ack { group, seq }` | Says this mailbox has everything up to `seq`; entries every member has acknowledged are deleted. |
 | `Members { group }` | Lists the group's mailboxes and the sequence number at which each joined. |
 | `CreateInvite { group }` | Makes an invite token: for a group (`Some`), or for the server (`None`). An account can make 5 server invites per window (the link lifetime rounded up to days, plus a day). |
-| `RedeemInvite { token, key_package, mac }` | Lodges a join request: a postcard list of one or two KeyPackages, at most 8 KiB in all, each signed by the mailbox that redeemed the token, and their HMAC. |
-| `PendingJoins { group }` | Lists join requests for a group that are less than 7 days old, oldest first, as many as fit about 900 KiB. A request leaves the list when its Welcome is posted or it expires. |
+| `RedeemInvite { token, key_package, mac }` | Lodges a join request: a postcard list of one or two KeyPackages, at most 8 KiB in all, each signed by the mailbox that redeemed the token. Each KeyPackage carries the joiner's signature on the request (see "Other formats"). Apps send `mac` as 32 zero bytes, and nothing reads it. |
+| `PendingJoins { group, after }` | Lists join requests for a group that are less than 7 days old, ordered by when they were lodged and then by token, starting strictly after `after` (the `(lodged_unix, token)` of the last request the client already has; none starts from the oldest). Each reply holds as many as fit about 900 KiB, and at least one; an empty reply means the end. A request leaves the list when its Welcome is posted or it expires. |
 | `FetchWelcomes` | Returns and deletes Welcomes waiting for this connection's mailboxes. |
 | `FileBegin { group, size }` | Starts an upload and returns a file ID. Refused if `size` is over the server's limit. |
 | `FileChunk { file, index, data }` | Uploads one sealed chunk (at most 64 KiB plus a 16-byte tag), in order, from the sender only. |
@@ -60,7 +60,7 @@ Most requests need the connection to have signed in with a key first, through `C
 | `Members(Vec<MemberInfo>)` | Mailbox keys and the sequence number at which each joined. |
 | `Invite { token, expires_unix }` | A new invite token and its expiry. |
 | `JoinLodged` | The join request is stored and online members have heard about it. |
-| `Joins(Vec<JoinRequest>)` | Pending join requests: token, KeyPackages, HMAC and the time each was lodged. |
+| `Joins(Vec<JoinRequest>)` | Pending join requests: token, KeyPackages, the unused `mac` field and the time each was lodged. |
 | `Welcomes(Vec<WelcomeIn>)` | Welcomes, each with its mailbox and sealed voucher. |
 | `File(FileId)` | The ID for a new upload. |
 | `Chunk(Vec<u8>)` | One sealed file chunk. |
@@ -115,13 +115,14 @@ Verification uses Ed25519's strict mode. The context strings are:
 | `socketchat/v1/auth` | challenge (32) ‖ public key (32) | Signing in, and registering accounts and mailboxes. |
 | `socketchat/v1/group-key-binding` | group ID (16) ‖ group key (32) | An identity key vouching for its owner's key in one group. Sent only inside encrypted messages. |
 | `socketchat/v1/voucher` | token (16) ‖ SHA-256 of invite secret (32) ‖ group ID (16) ‖ inviter's group key (32) ‖ expiry as big-endian u64 (8) | An inviter vouching for a link they made. |
+| `socketchat/v1/join-request` | token (16) ‖ joiner's new mailbox key (32) | A joiner asking to join through a link, signed with the request key derived from the link's secret. |
 
 Numbers in parentheses are byte lengths.
 
 ## Other formats
 
-- **Keys derived from the invite secret:** HKDF-SHA256 with no salt and the 32-byte secret as input key material, expanded to 32 bytes, with info `socketchat/v1/invite-mac` (the MAC key), `socketchat/v1/voucher-seal` (the seal key) or `socketchat/v1/invite-proof` (the proof key). The inviter sends members the MAC and seal keys; the proof key never leaves the inviter and the joiner.
-- **Invite MAC:** HMAC-SHA256 under the MAC key, over the KeyPackage bytes the joiner lodges.
+- **Keys derived from the invite secret:** HKDF-SHA256 with no salt and the 32-byte secret as input key material, expanded to 32 bytes, with info `socketchat/v1/invite-sign` (the seed of the Ed25519 request key), `socketchat/v1/voucher-seal` (the seal key) or `socketchat/v1/invite-proof` (the proof key). The inviter sends members the request key's public half and the seal key. The request key's private half and the proof key never leave the inviter and the joiner.
+- **Join request signature:** Ed25519 under the request key, with context `socketchat/v1/join-request` (see "Signed byte strings"). Each KeyPackage the joiner lodges holds it in a KeyPackage extension of type `0xff01`, as the 64 signature bytes, so the KeyPackage's own signature by the mailbox key covers it. The member who adds the joiner checks it against the public key from the inviter's `AppMsg::Voucher` and ignores a request that fails.
 - **Invite proof:** HMAC-SHA256 under the proof key, over group ID (16) ‖ the joiner's group key (32). The joiner posts it in the group as `AppMsg::InviteProof`; the inviter's app checks it before marking the joiner verified.
 - **KeyPackage bundle:** a postcard-encoded list of TLS-encoded KeyPackages, one per allowed suite (0x004F, then 0x0001). The member who adds the joiner picks the one matching the group's suite.
 - **Admin list:** GroupContext extension type `0xff00`, a run of entries, each a 2-byte big-endian length of 32 followed by a 32-byte Ed25519 key.

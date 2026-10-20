@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use socketchat_core::client::{Client, Event, JoinStatus, Verification};
 use socketchat_core::invite::hours_text;
+use socketchat_core::keys::fingerprint_text;
 use socketchat_core::sanitize::{clean_name, clean_text};
 use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
@@ -34,7 +35,14 @@ enum Cmd {
         cmd: ServerCmd,
     },
     /// Use an invite link. The first time, this also sets up your profile.
-    Join { link: String },
+    Join {
+        link: String,
+        /// Trust the server certificate in this link in place of the one
+        /// socketchat already trusts for that server, after its operator set
+        /// it up again.
+        #[arg(long)]
+        new_certificate: bool,
+    },
     /// Start a new group chat.
     New { name: String },
     /// Print an invite link on one line.
@@ -255,13 +263,6 @@ fn report_warnings(c: &mut Client) {
     }
 }
 
-fn fingerprint_text(f: &[u8; 32]) -> String {
-    f.chunks(2)
-        .map(|c| format!("{:02x}{:02x}", c[0], c[1]))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 async fn server(cmd: ServerCmd) -> Result<(), Fail> {
     match cmd {
         ServerCmd::Init {
@@ -328,12 +329,20 @@ async fn server(cmd: ServerCmd) -> Result<(), Fail> {
 async fn main_inner(cli: Cli) -> Result<(), Fail> {
     match cli.cmd {
         Some(Cmd::Server { cmd }) => server(cmd).await,
-        Some(Cmd::Join { link }) => {
+        Some(Cmd::Join {
+            link,
+            new_certificate,
+        }) => {
             let link: InviteLink = link.trim().parse().map_err(|e| {
                 Fail(1, format!("That is not a socketchat invite link ({e}). Links start with socketchat://"))
             })?;
             let mut c = open_or_create().await?;
-            match c.join(&link).await? {
+            let joined = if new_certificate {
+                c.join_new_certificate(&link).await?
+            } else {
+                c.join(&link).await?
+            };
+            match joined {
                 JoinStatus::Registered => {
                     report_warnings(&mut c);
                     println!(

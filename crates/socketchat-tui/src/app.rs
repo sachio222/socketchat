@@ -62,6 +62,14 @@ pub enum Modal {
     ConfirmVideo {
         path: String,
     },
+    /// A link names a server already in use, with a different certificate.
+    /// Fingerprints are shown as text, ready to compare.
+    NewCertificate {
+        link: String,
+        host: String,
+        pinned: String,
+        offered: String,
+    },
     Help,
 }
 
@@ -71,6 +79,8 @@ pub enum Action {
     Command(Command),
     Select(GroupId),
     ConfirmVideo(String),
+    /// Join with this link, trusting the certificate it names.
+    AcceptCertificate(String),
     MarkVerified(Key),
     /// Put this text on the terminal's clipboard.
     Copy(String),
@@ -133,6 +143,9 @@ impl App {
             let act = match (m, yes) {
                 (Modal::Verify { key, .. }, true) => Some(Action::MarkVerified(*key)),
                 (Modal::ConfirmVideo { path }, true) => Some(Action::ConfirmVideo(path.clone())),
+                (Modal::NewCertificate { link, .. }, true) => {
+                    Some(Action::AcceptCertificate(link.clone()))
+                }
                 (Modal::Invite { link, .. }, _) if matches!(k.code, KeyCode::Char('c' | 'C')) => {
                     self.status =
                         Some("Link copied. Paste it to the person you are inviting.".into());

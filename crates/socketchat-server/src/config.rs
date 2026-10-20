@@ -31,12 +31,21 @@ pub struct Config {
     pub require_standard_suite: bool,
     /// Most connections served at once.
     pub max_connections: usize,
+    /// Most connections from one address at once. Not read from the file;
+    /// tests lower it.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub max_per_ip: usize,
     /// How long a connection may wait before Hello and between requests.
     /// Not read from the file; tests shorten it.
     #[serde(skip)]
     #[doc(hidden)]
     pub timing: Timing,
 }
+
+/// Most connections one address may hold at once. An IPv6 address counts
+/// by its /64 network, which one host usually holds whole.
+pub const MAX_PER_IP: usize = 32;
 
 /// Seconds a client gets to say Hello once TLS is up.
 pub const HELLO_DEADLINE: Duration = Duration::from_secs(10);
@@ -72,6 +81,7 @@ impl Default for Config {
             members_can_invite: true,
             require_standard_suite: false,
             max_connections: 1000,
+            max_per_ip: MAX_PER_IP,
             timing: Timing::default(),
         }
     }

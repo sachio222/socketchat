@@ -1,7 +1,11 @@
-//! Cleans text from other people before it reaches a terminal: no control
-//! characters that could move the cursor or recolor the screen, no
-//! direction overrides that could disguise a name, no invisible characters
-//! that make two different names look the same, and a size cap.
+//! Cleans text from other people before it reaches a terminal.
+//!
+//! Names get the strict filter: no control characters that could move the
+//! cursor or recolor the screen, no direction overrides that could disguise
+//! a name, no invisible characters that make two different names look the
+//! same, and a size cap. Message text drops only control characters and
+//! direction controls, so emoji sequences, flags and scripts that need
+//! joiners (Persian, Hindi and others) arrive intact.
 
 /// Longest display name, in characters.
 pub const MAX_NAME_CHARS: usize = 64;
@@ -45,22 +49,37 @@ fn hangul_filler(c: char) -> bool {
     matches!(c, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}')
 }
 
-fn unsafe_char(c: char, keep_newline: bool) -> bool {
-    if keep_newline && c == '\n' {
-        return false;
-    }
+/// Characters that change the direction text runs in: the marks, the
+/// embeddings and overrides, and the isolates. One of these can make
+/// `exe.txt` show as `txt.exe`.
+fn direction_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+fn unsafe_in_name(c: char) -> bool {
     c.is_control() || format_char(c) || hangul_filler(c)
+}
+
+/// In message text: C0 and C1 control characters except the newline, and
+/// direction controls. Joiners (U+200C, U+200D) and tag characters stay,
+/// because emoji sequences, subdivision flags and many scripts need them.
+fn unsafe_in_text(c: char) -> bool {
+    (c.is_control() && c != '\n') || direction_char(c)
 }
 
 /// A display name with unsafe characters removed, trimmed and capped.
 pub fn clean_name(s: &str) -> String {
-    let cleaned: String = s.chars().filter(|c| !unsafe_char(*c, false)).collect();
+    let cleaned: String = s.chars().filter(|c| !unsafe_in_name(*c)).collect();
     cleaned.trim().chars().take(MAX_NAME_CHARS).collect()
 }
 
-/// Message text with unsafe characters removed (newlines kept), capped.
+/// Message text with control characters and direction controls removed
+/// (newlines kept), capped.
 pub fn clean_text(s: &str) -> String {
-    let cleaned: String = s.chars().filter(|c| !unsafe_char(*c, true)).collect();
+    let cleaned: String = s.chars().filter(|c| !unsafe_in_text(*c)).collect();
     if cleaned.len() <= MAX_TEXT_BYTES {
         return cleaned;
     }
@@ -79,6 +98,7 @@ mod tests {
     fn strips_escape_sequences() {
         assert_eq!(clean_name("\x1b[31mAda\x1b[0m"), "[31mAda[0m");
         assert_eq!(clean_text("hi\x07\x1b]0;title\x07"), "hi]0;title");
+        assert_eq!(clean_text("a\u{0085}b\u{009B}31m"), "ab31m", "C1 controls");
     }
 
     #[test]
@@ -94,14 +114,32 @@ mod tests {
         assert_eq!(clean_name("Cy\u{E0041}\u{E007F}"), "Cy");
         assert_eq!(clean_name("soft\u{00AD}ware"), "software");
         assert_eq!(clean_name("x\u{2064}\u{206F}\u{FFF9}y"), "xy");
-        assert_eq!(clean_text("hi\u{200B}there\u{FEFF}"), "hithere");
+    }
+
+    #[test]
+    fn text_strips_direction_controls() {
+        assert_eq!(clean_text("a\u{202E}b\u{2066}c\u{2069}"), "abc");
+        assert_eq!(clean_text("\u{200E}x\u{200F}y\u{061C}"), "xy");
+        assert_eq!(
+            clean_text("a\u{202A}\u{202B}\u{202C}\u{202D}b\u{2067}\u{2068}"),
+            "ab"
+        );
+    }
+
+    #[test]
+    fn text_keeps_joiners_and_tags() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let persian = "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}";
+        let scotland = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}";
+        for t in [family, persian, scotland] {
+            assert_eq!(clean_text(t), t);
+        }
     }
 
     #[test]
     fn strips_hangul_fillers() {
         assert_eq!(clean_name("\u{3164}"), "");
         assert_eq!(clean_name("D\u{115F}\u{1160}a\u{FFA0}n"), "Dan");
-        assert_eq!(clean_text("a\u{3164}b"), "ab");
     }
 
     #[test]

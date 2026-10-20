@@ -26,6 +26,9 @@ pub const CTX_AUTH: &[u8] = b"socketchat/v1/auth";
 pub const CTX_BINDING: &[u8] = b"socketchat/v1/group-key-binding";
 /// An inviter vouching for an invite link they made.
 pub const CTX_VOUCHER: &[u8] = b"socketchat/v1/voucher";
+/// A joiner's request to join through an invite link: the message is
+/// `token || mailbox key`.
+pub const CTX_JOIN_REQUEST: &[u8] = b"socketchat/v1/join-request";
 
 /// An Ed25519 key pair. The private half is wiped from memory on drop.
 #[derive(Clone)]
@@ -74,6 +77,13 @@ impl KeyPair {
         }
     }
 
+    /// The key pair whose Ed25519 seed is `seed`.
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        KeyPair {
+            sk: SigningKey::from_bytes(seed),
+        }
+    }
+
     pub fn public(&self) -> Key {
         Key(self.sk.verifying_key().to_bytes())
     }
@@ -116,6 +126,15 @@ pub fn verify(key: &Key, ctx: &[u8], msg: &[u8], sig: &Sig) -> bool {
 /// SHA-256 of the public key. Invite links carry this.
 pub fn fingerprint(key: &Key) -> [u8; 32] {
     Sha256::digest(key.0).into()
+}
+
+/// A certificate or key fingerprint for people to compare: hex in groups of
+/// four, such as `9f2c 41d0 ...`.
+pub fn fingerprint_text(f: &[u8; 32]) -> String {
+    f.chunks(2)
+        .map(|c| format!("{:02x}{:02x}", c[0], c[1]))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Thirty digits for one key, built the way Signal's numeric fingerprint
@@ -279,8 +298,8 @@ impl Voucher {
 const VOUCHER_SEAL: &[u8] = b"socketchat/v1/voucher-seal";
 const SEAL_NONCE_LEN: usize = 24;
 
-/// Labels the key members check a join request's MAC with.
-const INVITE_MAC: &[u8] = b"socketchat/v1/invite-mac";
+/// Labels the seed of the key a joiner signs their join request with.
+const INVITE_SIGN: &[u8] = b"socketchat/v1/invite-sign";
 /// Labels the key a joiner proves they hold the link with.
 const INVITE_PROOF: &[u8] = b"socketchat/v1/invite-proof";
 
@@ -299,12 +318,36 @@ pub fn voucher_seal_key(secret: &[u8; 32]) -> [u8; 32] {
     derive(secret, VOUCHER_SEAL)
 }
 
-/// The key a join request's MAC is made with: HKDF-SHA256 of the invite
-/// secret, no salt, info `socketchat/v1/invite-mac`. Members get this key,
-/// never the secret, so they can check a request but cannot make the
-/// [`invite_proof`] that only the link's holder can make.
-pub fn invite_mac_key(secret: &[u8; 32]) -> [u8; 32] {
-    derive(secret, INVITE_MAC)
+/// The key a joiner signs their join request with: an Ed25519 key whose
+/// seed is HKDF-SHA256 of the invite secret, no salt, info
+/// `socketchat/v1/invite-sign`. Members get only its public half, so they
+/// can check a request but cannot make one, and cannot make the
+/// [`invite_proof`] that only the link's holder can make either.
+pub fn invite_signing_key(secret: &[u8; 32]) -> KeyPair {
+    let seed = Zeroizing::new(derive(secret, INVITE_SIGN));
+    KeyPair::from_seed(&seed)
+}
+
+fn join_request_msg(token: &Token, mailbox: &Key) -> Vec<u8> {
+    [token.0.as_slice(), &mailbox.0].concat()
+}
+
+/// A joiner's signature on their request: the token they redeemed and
+/// their new mailbox, which is the key their KeyPackage is made for. The
+/// KeyPackage's own signature, by that mailbox key, ties it to this.
+pub fn sign_join_request(signing: &KeyPair, token: &Token, mailbox: &Key) -> Sig {
+    signing.sign(CTX_JOIN_REQUEST, &join_request_msg(token, mailbox))
+}
+
+/// Checks a [`sign_join_request`] signature against the public key members
+/// received with the voucher.
+pub fn join_request_ok(request_key: &Key, token: &Token, mailbox: &Key, sig: &Sig) -> bool {
+    verify(
+        request_key,
+        CTX_JOIN_REQUEST,
+        &join_request_msg(token, mailbox),
+        sig,
+    )
 }
 
 fn voucher_seal_cipher(seal_key: &[u8; 32]) -> XChaCha20Poly1305 {
@@ -355,22 +398,6 @@ pub fn open_voucher(seal_key: &[u8; 32], sealed: &[u8]) -> Option<Voucher> {
 }
 
 type HmacSha256 = Hmac<Sha256>;
-
-/// MAC of a KeyPackage under [`invite_mac_key`]. Only someone holding the
-/// link or a member of the group can make it, so a server cannot slip in
-/// its own KeyPackage.
-pub fn invite_mac(mac_key: &[u8; 32], key_package: &[u8]) -> [u8; 32] {
-    let mut m = HmacSha256::new_from_slice(mac_key).expect("any key length works");
-    m.update(key_package);
-    m.finalize().into_bytes().into()
-}
-
-/// Constant-time check of [`invite_mac`].
-pub fn mac_matches(mac_key: &[u8; 32], key_package: &[u8], mac: &[u8; 32]) -> bool {
-    let mut m = HmacSha256::new_from_slice(mac_key).expect("any key length works");
-    m.update(key_package);
-    m.verify_slice(mac).is_ok()
-}
 
 fn proof_mac(secret: &[u8; 32], group: &GroupId, group_key: &Key) -> HmacSha256 {
     let mut m =
@@ -580,11 +607,35 @@ mod tests {
     }
 
     #[test]
-    fn mac_differs_per_secret() {
-        assert_ne!(invite_mac(&[1; 32], b"kp"), invite_mac(&[2; 32], b"kp"));
-        assert_eq!(invite_mac(&[1; 32], b"kp"), invite_mac(&[1; 32], b"kp"));
-        assert!(mac_matches(&[1; 32], b"kp", &invite_mac(&[1; 32], b"kp")));
-        assert!(!mac_matches(&[1; 32], b"kq", &invite_mac(&[1; 32], b"kp")));
+    fn join_request_signature_needs_the_secret() {
+        let secret = [3u8; 32];
+        let (t, mailbox) = (Token([1; 16]), KeyPair::generate().public());
+        let signing = invite_signing_key(&secret);
+        let public = signing.public();
+        assert_eq!(
+            invite_signing_key(&secret).public(),
+            public,
+            "same secret, same key"
+        );
+        assert_ne!(invite_signing_key(&[4; 32]).public(), public);
+        let sig = sign_join_request(&signing, &t, &mailbox);
+        assert!(join_request_ok(&public, &t, &mailbox, &sig));
+        assert!(!join_request_ok(&public, &Token([2; 16]), &mailbox, &sig));
+        assert!(!join_request_ok(
+            &public,
+            &t,
+            &KeyPair::generate().public(),
+            &sig
+        ));
+        // What a member holds: the public key and the seal key. Neither
+        // signs a request that checks.
+        for seed in [public.0, voucher_seal_key(&secret)] {
+            let forged = sign_join_request(&KeyPair::from_seed(&seed), &t, &mailbox);
+            assert!(!join_request_ok(&public, &t, &mailbox, &forged));
+        }
+        // A signature for another purpose does not pass as a request.
+        let other = signing.sign(CTX_VOUCHER, &[t.0.as_slice(), &mailbox.0].concat());
+        assert!(!join_request_ok(&public, &t, &mailbox, &other));
     }
 
     #[test]
@@ -600,7 +651,8 @@ mod tests {
             &KeyPair::generate().public(),
             &proof
         ));
-        for member_key in [invite_mac_key(&secret), voucher_seal_key(&secret)] {
+        let request_key = invite_signing_key(&secret).public().0;
+        for member_key in [request_key, voucher_seal_key(&secret)] {
             assert!(!proof_matches(
                 &secret,
                 &g,
@@ -609,6 +661,6 @@ mod tests {
             ));
             assert_ne!(member_key, secret);
         }
-        assert_ne!(invite_mac_key(&secret), voucher_seal_key(&secret));
+        assert_ne!(request_key, voucher_seal_key(&secret));
     }
 }

@@ -21,13 +21,14 @@ pub enum AppMsg {
     GroupName {
         name: String,
     },
-    /// An invite link's signed voucher and two keys derived from the link's
-    /// secret: one to check the joiner's request, one to seal the voucher
-    /// for them. Any admin can complete the join with these. The secret
+    /// An invite link's signed voucher, the public key that checks the
+    /// joiner's signed request, and a key derived from the link's secret
+    /// that seals the voucher for them. Any admin can complete the join with
+    /// these, and no member can make a request of their own. The secret
     /// itself stays with the link's maker and the joiner.
     Voucher {
         voucher: Voucher,
-        mac_key: [u8; 32],
+        request_key: Key,
         seal_key: [u8; 32],
     },
     /// A file uploaded in sealed chunks, with what it takes to open it.

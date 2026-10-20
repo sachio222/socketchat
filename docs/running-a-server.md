@@ -156,7 +156,7 @@ The data directory holds everything: `server.db` and its `-wal` and `-shm` files
 2. Copy the whole data directory somewhere safe.
 3. Start the server again: `sudo systemctl start socketchat`.
 
-Keep `cert.der` and `key.der` above all. Every invite link and every member's app pins this certificate's fingerprint. If you lose it, every app refuses to connect and everyone has to join again. `key.der` is the certificate's private key, so store backups where only you can read them.
+Keep `cert.der` and `key.der` above all. Every invite link and every member's app pins this certificate's fingerprint. If you lose it, every app refuses to connect and everyone has to join again. Their apps show the old and new fingerprints and change nothing until each person accepts the new certificate, with `socketchat join --new-certificate <link>` or with Y in the chat screen, so tell them to expect it. `key.der` is the certificate's private key, so store backups where only you can read them.
 
 If you restore to a different path, change `data_dir` in `socketchat-server.toml` to match.
 

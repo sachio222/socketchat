@@ -15,10 +15,10 @@ use socketchat_proto::msg::{Entry, Push, Request, Response, WelcomeIn, WelcomeOu
 use socketchat_proto::{InviteLink, Token};
 
 use crate::appmsg::AppMsg;
-use crate::invite::{key_package_blob, pick_key_package};
+use crate::invite::{join_sig, key_package_blob, pick_key_package, signed_key_package_blob};
 use crate::keys::{
-    fingerprint, invite_mac, invite_mac_key, invite_proof, mac_matches, open_voucher,
-    proof_matches, seal_voucher, voucher_seal_key, Binding, GroupId, Key, KeyPair, Voucher,
+    fingerprint, invite_proof, invite_signing_key, join_request_ok, open_voucher, proof_matches,
+    seal_voucher, sign_join_request, voucher_seal_key, Binding, GroupId, Key, KeyPair, Voucher,
 };
 use crate::net::{Conn, NetError};
 use crate::provider::Provider;
@@ -189,6 +189,13 @@ pub struct Client {
     dm_todo: Vec<DmTodo>,
     /// Groups already reported as out of step since this client opened.
     drifted: HashSet<GroupId>,
+    /// Join requests already reported as failing their check since this
+    /// client opened.
+    bad_requests: HashSet<Token>,
+    /// Groups whose commit was posted but timed out: the server may still
+    /// be working on it, so it stays staged through one more sync round
+    /// even when the log ends without it.
+    commit_grace: HashSet<GroupId>,
     #[cfg(feature = "test-hooks")]
     hooks: Hooks,
 }
@@ -203,6 +210,9 @@ struct Hooks {
     refuse_fetch: HashMap<GroupId, String>,
     /// KeyPackages seen in direct-message answers meant for someone else.
     dm_accepts_seen: Vec<Vec<u8>>,
+    /// Groups whose fetches come back as the same old page again and again,
+    /// as a hostile server could send them.
+    stale_pages: HashSet<GroupId>,
 }
 
 enum DmTodo {
@@ -218,6 +228,28 @@ enum DmTodo {
         token: Token,
         key_packages: Vec<u8>,
     },
+}
+
+/// The keys a staged commit adds and removes, read before it is merged.
+fn commit_changes(mls: &MlsGroup, sc: &StagedCommit) -> (Vec<Key>, Vec<Key>) {
+    let added = sc
+        .add_proposals()
+        .filter_map(|a| {
+            key_of(
+                a.add_proposal()
+                    .key_package()
+                    .leaf_node()
+                    .signature_key()
+                    .as_slice(),
+            )
+        })
+        .collect();
+    let removed = sc
+        .remove_proposals()
+        .filter_map(|r| mls.member_at(r.remove_proposal().removed()))
+        .filter_map(|m| key_of(&m.signature_key))
+        .collect();
+    (added, removed)
 }
 
 fn mls_gid(g: &GroupId) -> openmls::group::GroupId {
@@ -342,6 +374,8 @@ impl Client {
             dm_offers: HashMap::new(),
             dm_todo: Vec::new(),
             drifted: HashSet::new(),
+            bad_requests: HashSet::new(),
+            commit_grace: HashSet::new(),
             #[cfg(feature = "test-hooks")]
             hooks: Hooks::default(),
         })
@@ -477,43 +511,81 @@ impl Client {
     // ---------- joining ----------
 
     /// Redeems an invite link: a server invite registers an account, a group
-    /// invite lodges a join request.
+    /// invite lodges a join request. A link that names a server this profile
+    /// already uses with a different certificate is refused with
+    /// [`CoreError::NewCertificate`]; see [`Client::join_new_certificate`].
     pub async fn join(&mut self, link: &InviteLink) -> Result<JoinStatus, CoreError> {
-        self.join_with(link, None).await
+        self.join_with(link, None, false).await
     }
 
-    /// [`Client::join`], with the join request's MAC made under `mac_key`
-    /// instead of the key the link gives, when one is passed.
+    /// [`Client::join`] for a link whose server certificate differs from the
+    /// one this profile trusts, after the person accepted the new one. The
+    /// new certificate replaces the old only once a connection to it and the
+    /// redeem have both worked.
+    pub async fn join_new_certificate(
+        &mut self,
+        link: &InviteLink,
+    ) -> Result<JoinStatus, CoreError> {
+        self.join_with(link, None, true).await
+    }
+
+    /// [`Client::join`], with the join request signed by `signer` instead of
+    /// the key the link gives, when one is passed.
     async fn join_with(
         &mut self,
         link: &InviteLink,
-        mac_key: Option<[u8; 32]>,
+        signer: Option<KeyPair>,
+        new_certificate: bool,
     ) -> Result<JoinStatus, CoreError> {
-        // The person chose to trust this link, so its certificate wins over
-        // an older pin for the same address, for example after the operator
-        // set the server up again.
-        if let Some(old) = self.store.server_pin(&link.host, link.port)? {
-            if old != link.cert_fpr {
+        // A link with another certificate for a known server comes from an
+        // operator who set the server up again, or from someone who wants
+        // this person cut off from every chat there. Only the person decides.
+        let repin = match self.store.server_pin(&link.host, link.port)? {
+            Some(old) if old != link.cert_fpr => {
+                if !new_certificate {
+                    return Err(CoreError::NewCertificate {
+                        host: link.host.clone(),
+                        port: link.port,
+                        pinned: old,
+                        offered: link.cert_fpr,
+                    });
+                }
+                true
+            }
+            _ => false,
+        };
+        let server_id = self
+            .store
+            .add_server(&link.host, link.port, &link.cert_fpr)?;
+        if repin {
+            // The redeem uses a connection made under the link's certificate;
+            // the old pin stays until it succeeds.
+            let c = Conn::connect(&link.host, link.port, link.cert_fpr).await?;
+            self.conns.insert(server_id, c);
+        }
+        let r = self.redeem(link, server_id, signer).await;
+        if repin {
+            // That connection signed in with the new keys only. The next
+            // request reconnects and signs in with every key.
+            self.conns.remove(&server_id);
+            if r.is_ok() {
                 self.store
                     .set_server_pin(&link.host, link.port, &link.cert_fpr)?;
-                if let Some(id) = self
-                    .store
-                    .servers()?
-                    .iter()
-                    .find(|s| s.host == link.host && s.port == link.port)
-                    .map(|s| s.id)
-                {
-                    self.conns.remove(&id);
-                }
                 self.emit(Event::Warning(format!(
-                    "The server at {} has a new certificate. socketchat now trusts the one in this link.",
+                    "socketchat now trusts the new certificate for {}.",
                     crate::sanitize::clean_name(&link.host)
                 )));
             }
         }
-        let server_id = self
-            .store
-            .add_server(&link.host, link.port, &link.cert_fpr)?;
+        r
+    }
+
+    async fn redeem(
+        &mut self,
+        link: &InviteLink,
+        server_id: i64,
+        signer: Option<KeyPair>,
+    ) -> Result<JoinStatus, CoreError> {
         let has_account = self
             .store
             .servers()?
@@ -534,8 +606,11 @@ impl Client {
                 self.store.set_account(server_id, &account)?;
             }
         }
-        let blob = key_package_blob(&self.prov, &key)?;
-        let mac = invite_mac(&mac_key.unwrap_or_else(|| invite_mac_key(&secret)), &blob);
+        // Signed with a key only the link's holder can derive. Members hold
+        // its public half, so they can check this request but not make one.
+        let signer = signer.unwrap_or_else(|| invite_signing_key(&secret));
+        let sig = sign_join_request(&signer, &link.token, &key.public());
+        let blob = signed_key_package_blob(&self.prov, &key, Some(&sig))?;
         self.store.save_pending_join(&PendingJoin {
             token: link.token,
             server_id,
@@ -548,7 +623,8 @@ impl Client {
             .request(Request::RedeemInvite {
                 token: link.token,
                 key_package: blob,
-                mac,
+                // Unused: the signature rides inside the KeyPackages.
+                mac: [0; 32],
             })
             .await?
         {
@@ -672,26 +748,34 @@ impl Client {
             self.store
                 .set_member_profile(&gid, &v.inviter_group_key, &v.inviter_identity, "")?;
         }
-        self.store.delete_pending_join(&pending.token)?;
-        self.groups.insert(gid, Live { row, mls });
-        self.post_profile(gid).await?;
-        // Tell the link's maker this member holds the link itself, which no
-        // other member can claim, so the maker can mark them verified.
+        // The proof tells the link's maker this member holds the link
+        // itself, which no other member can claim, so the maker can mark them
+        // verified. It is owed from here on: a connection that drops before
+        // it goes out sends it on a later sync.
         if let Some(secret) = link_secret {
             let proof = invite_proof(&secret, &gid, &pending.key.public());
-            self.send_app(
-                gid,
-                &AppMsg::InviteProof {
-                    token: pending.token,
-                    proof,
-                },
-            )
-            .await?;
+            self.store.owe_proof(&gid, &pending.token, &proof)?;
         }
+        self.store.delete_pending_join(&pending.token)?;
+        self.groups.insert(gid, Live { row, mls });
         self.emit(Event::Joined {
             group: gid,
             verification,
         });
+        // The profile is owed the same way until it goes out.
+        self.repost.insert(gid);
+        self.post_profile(gid).await?;
+        self.repost.remove(&gid);
+        self.send_owed_proofs(gid).await
+    }
+
+    /// Posts the invite proofs this member still owes in a group.
+    async fn send_owed_proofs(&mut self, gid: GroupId) -> Result<(), CoreError> {
+        for (token, proof) in self.store.owed_proofs(&gid)? {
+            self.send_app(gid, &AppMsg::InviteProof { token, proof })
+                .await?;
+            self.store.paid_proof(&gid, &token)?;
+        }
         Ok(())
     }
 
@@ -871,7 +955,14 @@ impl Client {
                 e @ (NetError::Disconnected | NetError::Timeout | NetError::Io(_)),
             )) => {
                 // The server may have taken it. It stays staged, on disk too,
-                // until the log shows whether it landed.
+                // until the log shows whether it landed. After a timeout the
+                // server may still be working on it: this connection closes,
+                // and the commit stays staged through one more sync round
+                // even if the log ends without it.
+                if matches!(e, NetError::Timeout) {
+                    self.conns.remove(&server_id);
+                    self.commit_grace.insert(gid);
+                }
                 Err(CoreError::Net(e))
             }
             Ok(Response::Conflict { .. }) => {
@@ -986,25 +1077,27 @@ impl Client {
                 my_key,
                 expires_unix,
             );
-            let (mac_key, seal_key) = (invite_mac_key(&secret), voucher_seal_key(&secret));
+            let request_key = invite_signing_key(&secret).public();
+            let seal_key = voucher_seal_key(&secret);
             self.store.save_voucher(
                 &gid,
                 &token,
                 &StoredVoucher {
                     voucher: postcard::to_stdvec(&voucher)?,
-                    mac_key,
+                    request_key,
                     seal_key,
                     secret: Some(secret),
                 },
             )?;
-            // Members get keys derived from the secret, never the secret: they
-            // can check and complete the join, but only the person holding
-            // the link can prove it to this client.
+            // Members get a public key and a key derived from the secret,
+            // never the secret: they can check and complete the join, but
+            // only the person holding the link can sign a request or prove
+            // it to this client.
             self.send_app(
                 gid,
                 &AppMsg::Voucher {
                     voucher,
-                    mac_key,
+                    request_key,
                     seal_key,
                 },
             )
@@ -1026,24 +1119,33 @@ impl Client {
         gid: GroupId,
         token: Token,
         blob: Vec<u8>,
-        mac: [u8; 32],
     ) -> Result<(), CoreError> {
         let Some(stored) = self.store.voucher(&gid, &token)? else {
             return Ok(());
         };
-        if !mac_matches(&stored.mac_key, &blob, &mac) {
-            self.emit(Event::Warning(
-                "A request to join one of your groups failed its check and was ignored.".into(),
-            ));
+        let Some(suite) = self.groups.get(&gid).map(|l| l.mls.ciphersuite()) else {
             return Ok(());
-        }
+        };
+        // The request must be signed, with the key only the link's holder
+        // can derive, over this token and the mailbox the KeyPackage is for.
+        let checked = pick_key_package(&self.prov, &blob, suite).and_then(|kp| {
+            let joiner = key_of(kp.leaf_node().signature_key().as_slice())?;
+            let sig = join_sig(&kp)?;
+            join_request_ok(&stored.request_key, &token, &joiner, &sig).then_some((kp, joiner))
+        });
+        let Some((kp, joiner)) = checked else {
+            if self.bad_requests.insert(token) {
+                self.emit(Event::Warning(
+                    "A request to join one of your groups failed its check and was ignored.".into(),
+                ));
+            }
+            return Ok(());
+        };
         let Ok(voucher) = postcard::from_bytes::<Voucher>(&stored.voucher) else {
             return Ok(());
         };
         // The verified mark for the joiner comes later, from their proof
-        // that they hold the link itself (see `AppMsg::InviteProof`): every
-        // member can make this request's MAC, so it proves nothing about who
-        // sent it.
+        // that they hold the link itself (see `AppMsg::InviteProof`).
         let mine = stored.secret.is_some();
         self.settle_sent(gid).await?;
         for _ in 0..3 {
@@ -1056,18 +1158,12 @@ impl Client {
             if !is_admin && !mine {
                 return Ok(());
             }
-            let Some(kp) = pick_key_package(&self.prov, &blob, live.mls.ciphersuite()) else {
-                return Ok(());
-            };
-            let Some(joiner) = key_of(kp.leaf_node().signature_key().as_slice()) else {
-                return Ok(());
-            };
             if live.mls.members().any(|m| m.signature_key == joiner.0) {
                 return Ok(());
             }
             let (commit, welcome, _) = live
                 .mls
-                .add_members(&self.prov, &live.row.key, &[kp])
+                .add_members(&self.prov, &live.row.key, std::slice::from_ref(&kp))
                 .map_err(mls_err)?;
             let welcome = WelcomeOut {
                 token,
@@ -1159,6 +1255,34 @@ impl Client {
     }
 
     async fn sync_server(&mut self, server_id: i64) -> Result<(), CoreError> {
+        // Commits that timed out before this round stay staged through it;
+        // the round after this one drops them if the log still ends without.
+        let graced: Vec<GroupId> = self
+            .commit_grace
+            .iter()
+            .filter(|g| {
+                self.groups
+                    .get(g)
+                    .is_some_and(|l| l.row.server_id == server_id)
+            })
+            .copied()
+            .collect();
+        self.sync_server_round(server_id).await?;
+        for g in graced {
+            self.commit_grace.remove(&g);
+        }
+        Ok(())
+    }
+
+    /// Whether a commit of this client's own is still staged in a group,
+    /// which holds back any new commit there.
+    fn holds_commit(&self, gid: &GroupId) -> bool {
+        self.groups
+            .get(gid)
+            .is_some_and(|g| g.mls.pending_commit().is_some())
+    }
+
+    async fn sync_server_round(&mut self, server_id: i64) -> Result<(), CoreError> {
         let mut pushed: Vec<(GroupId, socketchat_proto::msg::JoinRequest)> = Vec::new();
         {
             let c = self.conn(server_id).await?;
@@ -1211,6 +1335,10 @@ impl Client {
         }
         let leaving: Vec<GroupId> = self.leaves.drain().collect();
         for gid in leaving {
+            if self.holds_commit(&gid) {
+                self.leaves.insert(gid);
+                continue;
+            }
             if self.groups.contains_key(&gid) {
                 let r = self.commit_leaves(gid).await;
                 let what = format!("Could not let someone leave {}", self.label(&gid));
@@ -1223,6 +1351,7 @@ impl Client {
             .values()
             .filter(|g| g.row.server_id == server_id)
             .filter(|g| now.saturating_sub(g.row.last_update_unix) > KEY_REFRESH_SECS)
+            .filter(|g| g.mls.pending_commit().is_none())
             .map(|g| g.row.id)
             .collect();
         for gid in stale {
@@ -1230,12 +1359,36 @@ impl Client {
             let what = format!("Could not refresh your keys in {}", self.label(&gid));
             self.group_step(r, &what)?;
         }
+        // Someone joined, or this client's own add went through without a
+        // reply: the newcomer needs this member's name, and the chat's name
+        // and kind.
         let owed: Vec<GroupId> = self.repost.drain().collect();
         for gid in owed {
-            if self.groups.contains_key(&gid) {
-                let r = self.post_profile(gid).await;
+            if self
+                .groups
+                .get(&gid)
+                .is_some_and(|g| g.row.server_id == server_id)
+            {
+                self.repost.insert(gid);
+                let r = self.after_add(gid).await;
+                if r.is_ok() {
+                    self.repost.remove(&gid);
+                }
                 let what = format!("Could not share your name in {}", self.label(&gid));
                 self.group_step(r, &what)?;
+            } else if self.groups.contains_key(&gid) {
+                self.repost.insert(gid);
+            }
+        }
+        for gid in self.store.groups_owing_proofs()? {
+            match self.groups.get(&gid) {
+                None => self.store.forget_proofs(&gid)?,
+                Some(l) if l.row.server_id == server_id => {
+                    let r = self.send_owed_proofs(gid).await;
+                    let what = format!("Could not confirm your invite in {}", self.label(&gid));
+                    self.group_step(r, &what)?;
+                }
+                Some(_) => {}
             }
         }
         // Join requests: the ones pushed live, then each group's waiting
@@ -1244,14 +1397,18 @@ impl Client {
         // per sync and a page with nothing new ends the loop.
         let mut seen = HashSet::new();
         for (gid, j) in pushed {
+            if self.holds_commit(&gid) {
+                continue;
+            }
             if seen.insert(j.token) && self.groups.contains_key(&gid) {
-                let r = self
-                    .handle_join_request(gid, j.token, j.key_package, j.mac)
-                    .await;
+                let r = self.handle_join_request(gid, j.token, j.key_package).await;
                 self.group_step(r, "Could not let someone in")?;
             }
         }
         for gid in gids {
+            if self.holds_commit(&gid) {
+                continue;
+            }
             let r = self.handle_waiting_joins(server_id, gid, &mut seen).await;
             let what = format!(
                 "Could not check who is waiting to join {}",
@@ -1262,7 +1419,8 @@ impl Client {
         Ok(())
     }
 
-    /// Works through a group's waiting join requests, a page at a time.
+    /// Works through a group's waiting join requests, a page at a time,
+    /// each page starting after the last request of the one before.
     async fn handle_waiting_joins(
         &mut self,
         server_id: i64,
@@ -1271,27 +1429,34 @@ impl Client {
     ) -> Result<(), CoreError> {
         /// More pages than this in one sync wait for the next one.
         const MAX_PAGES: usize = 20;
+        let mut after: Option<(u64, Token)> = None;
         for _ in 0..MAX_PAGES {
             if !self.groups.contains_key(&gid) {
                 return Ok(());
             }
             let Response::Joins(js) = self
-                .request(server_id, Request::PendingJoins { group: gid })
+                .request(server_id, Request::PendingJoins { group: gid, after })
                 .await?
             else {
                 return Ok(());
             };
-            let fresh: Vec<_> = js.into_iter().filter(|j| seen.insert(j.token)).collect();
-            if fresh.is_empty() {
+            let Some(last) = js.last().map(|j| (j.lodged_unix, j.token)) else {
+                return Ok(());
+            };
+            // A page that does not move forward would repeat forever.
+            let pos = |c: &(u64, Token)| (c.0, c.1 .0);
+            if after.is_some_and(|a| pos(&last) <= pos(&a)) {
                 return Ok(());
             }
-            for j in fresh {
+            after = Some(last);
+            for j in js {
                 if !self.groups.contains_key(&gid) {
                     return Ok(());
                 }
-                let r = self
-                    .handle_join_request(gid, j.token, j.key_package, j.mac)
-                    .await;
+                if !seen.insert(j.token) {
+                    continue;
+                }
+                let r = self.handle_join_request(gid, j.token, j.key_package).await;
                 self.group_step(r, "Could not let someone in")?;
             }
         }
@@ -1309,8 +1474,16 @@ impl Client {
             let fault = self.hooks.fetch_fault(gid);
             #[cfg(not(feature = "test-hooks"))]
             let fault: Option<CoreError> = None;
+            #[cfg(feature = "test-hooks")]
+            let stale = self.hooks.stale_pages.contains(&gid);
+            #[cfg(not(feature = "test-hooks"))]
+            let stale = false;
             let fetched = match fault {
                 Some(e) => Err(e),
+                None if stale => Ok(Response::Entries(vec![Entry {
+                    seq: after,
+                    mls: vec![],
+                }])),
                 None => {
                     self.request(
                         server_id,
@@ -1339,14 +1512,22 @@ impl Client {
                 Err(e) => return Err(e),
             };
             let Some(last) = es.last().map(|e| e.seq) else {
+                // The log ends here. A commit still staged never reached the
+                // server, unless its post timed out this round or the last.
+                let keep = self.commit_grace.contains(&gid);
                 let live = self.groups.get_mut(&gid).expect("caller checked");
-                if live.mls.pending_commit().is_some() {
+                if live.mls.pending_commit().is_some() && !keep {
                     live.mls
                         .clear_pending_commit(self.prov.storage())
                         .map_err(mls_err)?;
                 }
                 return Ok(());
             };
+            // A page that ends at or before where it started would come back
+            // the same forever: a broken or hostile server.
+            if last <= after {
+                return Ok(());
+            }
             for e in es {
                 self.apply_entry(gid, e).await?;
                 if !self.groups.contains_key(&gid) {
@@ -1420,10 +1601,19 @@ impl Client {
                 self.apply_commit(gid, e.seq, *sc).await?;
             }
             ProcessedMessageContent::OwnPendingCommit => {
-                // This client's own commit, whose reply never came.
+                // This client's own commit, whose reply never came. It gets
+                // the same bookkeeping as anyone else's, and a newcomer it
+                // added still gets this member's name and the chat's.
+                let (added, removed) = live
+                    .mls
+                    .pending_commit()
+                    .map(|sc| commit_changes(&live.mls, sc))
+                    .unwrap_or_default();
                 live.mls.merge_pending_commit(&self.prov).map_err(mls_err)?;
                 live.row.last_update_unix = now;
                 self.store.set_last_update(&gid, now)?;
+                self.commit_grace.remove(&gid);
+                self.record_changes(gid, e.seq, &added, &removed)?;
             }
             _ => {}
         }
@@ -1452,34 +1642,15 @@ impl Client {
         sc: StagedCommit,
     ) -> Result<(), CoreError> {
         let live = self.groups.get_mut(&gid).expect("caller checked");
-        let added: Vec<Key> = sc
-            .add_proposals()
-            .filter_map(|a| {
-                key_of(
-                    a.add_proposal()
-                        .key_package()
-                        .leaf_node()
-                        .signature_key()
-                        .as_slice(),
-                )
-            })
-            .collect();
-        let removed: Vec<Key> = sc
-            .remove_proposals()
-            .filter_map(|r| live.mls.member_at(r.remove_proposal().removed()))
-            .filter_map(|m| key_of(&m.signature_key))
-            .collect();
+        let (added, removed) = commit_changes(&live.mls, &sc);
         let me_out = sc.self_removed();
         live.mls
             .merge_staged_commit(&self.prov, sc)
             .map_err(mls_err)?;
-        for k in &added {
-            self.store.upsert_member(&gid, k, Some(seq))?;
-        }
-        for k in &removed {
-            self.store.remove_member(&gid, k)?;
-        }
         if me_out {
+            for k in &removed {
+                self.store.remove_member(&gid, k)?;
+            }
             self.store.set_left(&gid)?;
             let live = self.groups.remove(&gid).expect("present");
             if let Some(c) = self.conns.get(&live.row.server_id) {
@@ -1487,6 +1658,24 @@ impl Client {
             }
             self.emit(Event::Left { group: gid });
             return Ok(());
+        }
+        self.record_changes(gid, seq, &added, &removed)
+    }
+
+    /// Records who a merged commit added and removed. Each newcomer is owed
+    /// this member's profile, and the chat's name and kind.
+    fn record_changes(
+        &mut self,
+        gid: GroupId,
+        seq: u64,
+        added: &[Key],
+        removed: &[Key],
+    ) -> Result<(), CoreError> {
+        for k in added {
+            self.store.upsert_member(&gid, k, Some(seq))?;
+        }
+        for k in removed {
+            self.store.remove_member(&gid, k)?;
         }
         if !added.is_empty() || !removed.is_empty() {
             self.emit(Event::MembersChanged { group: gid });
@@ -1556,7 +1745,7 @@ impl Client {
             }
             AppMsg::Voucher {
                 voucher,
-                mac_key,
+                request_key,
                 seal_key,
             } => {
                 // Only the inviter can post their own voucher: it must be
@@ -1580,7 +1769,7 @@ impl Client {
                         &voucher.token,
                         &StoredVoucher {
                             voucher: postcard::to_stdvec(&voucher)?,
-                            mac_key,
+                            request_key,
                             seal_key,
                             secret: None,
                         },
@@ -1780,7 +1969,10 @@ impl Client {
         if text.trim().is_empty() {
             return Ok(());
         }
-        self.settle_sent(gid).await?;
+        // A message can go out while a commit waits to be confirmed.
+        if self.holds_commit(&gid) {
+            self.resolve_pending(gid).await?;
+        }
         let seq = self
             .send_app(gid, &AppMsg::Text { body: text.clone() })
             .await?;
@@ -1864,15 +2056,18 @@ impl Client {
         self.fetch_group(gid).await
     }
 
-    /// Settles any commit still staged before making or sending anything
-    /// new in the group.
+    /// Settles any commit still staged before making a new one in the
+    /// group. One whose post timed out may stay staged for a sync round
+    /// while the server finishes with it; until then no new commit can go.
     async fn settle_sent(&mut self, gid: GroupId) -> Result<(), CoreError> {
-        if self
-            .groups
-            .get(&gid)
-            .is_some_and(|g| g.mls.pending_commit().is_some())
-        {
+        if self.holds_commit(&gid) {
             self.resolve_pending(gid).await?;
+        }
+        if self.holds_commit(&gid) {
+            return Err(CoreError::Other(format!(
+                "a change you made in {} is not confirmed yet; try again in a moment",
+                self.label(&gid)
+            )));
         }
         Ok(())
     }
@@ -2378,22 +2573,30 @@ impl Client {
         self.send_app(gid, msg).await
     }
 
-    /// The key this client checks join requests for `token` with.
-    pub fn test_invite_mac_key(&self, gid: GroupId, token: Token) -> Option<[u8; 32]> {
+    /// The public key this client checks join requests for `token` with.
+    pub fn test_invite_request_key(&self, gid: GroupId, token: Token) -> Option<Key> {
         self.store
             .voucher(&gid, &token)
             .ok()
             .flatten()
-            .map(|v| v.mac_key)
+            .map(|v| v.request_key)
     }
 
-    /// Joins with a group link, making the request's MAC under `mac_key`.
-    pub async fn test_join_with_mac_key(
+    /// Joins with a group link, signing the request with the key whose seed
+    /// is `seed` instead of the one the link gives.
+    pub async fn test_join_signing_with(
         &mut self,
         link: &InviteLink,
-        mac_key: [u8; 32],
+        seed: [u8; 32],
     ) -> Result<JoinStatus, CoreError> {
-        self.join_with(link, Some(mac_key)).await
+        self.join_with(link, Some(KeyPair::from_seed(&seed)), false)
+            .await
+    }
+
+    /// Makes every fetch of this group come back as one page that ends where
+    /// it started, as a hostile server could answer.
+    pub fn test_serve_stale_pages(&mut self, gid: GroupId) {
+        self.hooks.stale_pages.insert(gid);
     }
 
     /// Forgets a staged commit without looking at the log, the way an old

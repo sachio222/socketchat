@@ -235,6 +235,30 @@ fn wrong_passphrase_exits_2_with_plain_message() {
     assert!(out(&o).contains("passphrase"), "{}", out(&o));
 }
 
+/// A link that names a known server with another certificate changes
+/// nothing until the person accepts it, and accepting a certificate the
+/// server does not have changes nothing either.
+#[test]
+fn join_with_a_different_certificate_asks_first() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    let mut bogus: socketchat_proto::InviteLink = server_invite(&s).parse().unwrap();
+    bogus.cert_fpr = [7; 32];
+    let bogus = bogus.to_string();
+    let o = run(&ada, &["join", &bogus]);
+    let said = out(&o);
+    assert_eq!(o.status.code(), Some(1), "{said}");
+    assert!(said.contains("0707 0707 0707"), "{said}");
+    assert!(said.contains("socketchat join --new-certificate"), "{said}");
+    let o = run(&ada, &["join", "--new-certificate", &bogus]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(out(&o).contains("does not match"), "{}", out(&o));
+    let o = run(&ada, &["new", "Still here"]);
+    assert!(o.status.success(), "{}", out(&o));
+}
+
 #[test]
 fn two_people_chat_through_binary() {
     let s = server();

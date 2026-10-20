@@ -242,7 +242,13 @@ async fn many_pending_joins_come_back_in_pages() {
     let mut seen: HashSet<Token> = HashSet::new();
     let mut pages = 0;
     loop {
-        let r = a.conn.req(Request::PendingJoins { group: gid }).await;
+        let r = a
+            .conn
+            .req(Request::PendingJoins {
+                group: gid,
+                after: None,
+            })
+            .await;
         let Response::Joins(js) = r else {
             panic!("{r:?}")
         };

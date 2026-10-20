@@ -3,7 +3,8 @@
 
 use socketchat_core::appmsg::AppMsg;
 use socketchat_core::client::{Client, Event, Verification};
-use socketchat_core::keys::{invite_mac_key, voucher_seal_key, KeyPair, Voucher};
+use socketchat_core::keys::{invite_signing_key, voucher_seal_key, KeyPair, Voucher};
+use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
 use socketchat_testkit::{drain, passphrase, settle, CutProxy, TestClient, TestServer};
 
@@ -71,7 +72,7 @@ async fn forged_voucher_makes_admin_verify_stranger() {
         g,
         &AppMsg::Voucher {
             voucher: forged,
-            mac_key: invite_mac_key(&secret),
+            request_key: invite_signing_key(&secret).public(),
             seal_key: voucher_seal_key(&secret),
         },
     )
@@ -90,7 +91,8 @@ async fn forged_voucher_makes_admin_verify_stranger() {
 }
 
 /// A member races the real invitee with a puppet, using what every member
-/// learns about Ada's link.
+/// learns about Ada's link. The puppet's request cannot pass Ada's check,
+/// so the puppet is never added, let alone verified.
 #[tokio::test]
 async fn member_racing_the_invitee_earns_no_verified_mark() {
     let s = TestServer::start().await;
@@ -103,23 +105,26 @@ async fn member_racing_the_invitee_earns_no_verified_mark() {
     settle(&mut [&mut a, &mut m]).await;
     let (link, _) = a.invite(Some(g), false).await.unwrap();
     settle(&mut [&mut a, &mut m]).await;
-    let mac_key = m
-        .test_invite_mac_key(g, link.token)
+    let request_key = m
+        .test_invite_request_key(g, link.token)
         .expect("members can check join requests for Ada's link");
-    // The puppet holds the token but not the link's secret.
+    // The puppet holds the token but not the link's secret, and signs with
+    // what members hold.
     let mut puppet_link = link.clone();
     puppet_link.secret = Some([9; 32]);
     let mut p = TestClient::profile_only("Pup").await;
-    p.test_join_with_mac_key(&puppet_link, mac_key)
+    p.test_join_signing_with(&puppet_link, request_key.0)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut m, &mut p]).await;
     let am = a.members(g);
-    assert!(am.iter().any(|x| x.name == "Pup"), "Pup was added: {am:?}");
     assert!(
-        !am.iter().any(|x| x.name == "Pup" && x.verified),
-        "Ada marks the puppet verified: {am:?}"
+        !am.iter()
+            .any(|x| x.name == "Pup" || x.name.starts_with("someone")),
+        "Ada added the puppet: {am:?}"
     );
+    assert_eq!(a.epoch(g), m.epoch(g));
+    assert_eq!(am.len(), 2, "{am:?}");
 }
 
 /// A member who saw Bo's answer to Ada's direct-message request adds Bo to
@@ -406,15 +411,56 @@ async fn second_open_of_one_profile_is_refused() {
 }
 
 /// The operator set the server up again: same address, new certificate. A
-/// new link from it works, and the app says it now trusts the new one.
+/// plain join with a new link is refused and shows both fingerprints; once
+/// Ada accepts the new certificate the link works, and the app says it now
+/// trusts the new one.
 #[tokio::test]
-async fn new_certificate_in_a_link_replaces_the_old_pin() {
+async fn new_certificate_in_a_link_replaces_the_old_pin_once_accepted() {
+    use socketchat_core::keys::fingerprint_text;
     let s = TestServer::start().await;
+    let old = s.fpr();
     let mut a = TestClient::new(&s, "Ada").await;
     let s = s.replace_with_fresh().await;
     drain(&mut a).await;
-    a.join(&s.server_invite()).await.unwrap();
+    let link = s.server_invite();
+    let err = a.join(&link).await.unwrap_err();
+    assert!(
+        matches!(err, CoreError::NewCertificate { pinned, offered, .. } if pinned == old && offered == s.fpr()),
+        "{err:?}"
+    );
+    let said = err.to_string();
+    assert!(said.contains(&fingerprint_text(&old)), "{said}");
+    assert!(said.contains(&fingerprint_text(&s.fpr())), "{said}");
+    assert!(said.contains("socketchat join --new-certificate"), "{said}");
+    a.join_new_certificate(&link).await.unwrap();
     a.create_group("Again").await.unwrap();
     let w = warnings(&drain(&mut a).await);
     assert!(w.iter().any(|w| w.contains("new certificate")), "{w:?}");
+}
+
+/// Accepting the certificate in a bogus link changes nothing when the
+/// server does not have that certificate: Ada keeps her chat.
+#[tokio::test]
+async fn accepting_a_bogus_certificate_keeps_the_old_pin() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let mut bogus = s.server_invite();
+    bogus.cert_fpr = [7; 32];
+    let err = a.join_new_certificate(&bogus).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CoreError::Net(socketchat_core::net::NetError::CertMismatch { .. })
+        ),
+        "{err:?}"
+    );
+    a.send_text(g, "still here").await.unwrap();
+    a.sync().await.unwrap();
+    assert!(
+        !warnings(&drain(&mut a).await)
+            .iter()
+            .any(|w| w.contains("new certificate")),
+        "the pin changed"
+    );
 }

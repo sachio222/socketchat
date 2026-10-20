@@ -6,17 +6,37 @@ use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::*;
 use openmls_traits::OpenMlsProvider;
 
-use crate::keys::KeyPair;
-use crate::suite::{capabilities, FALLBACK_SUITE, SUITE};
+use crate::keys::{KeyPair, Sig};
+use crate::suite::{capabilities, FALLBACK_SUITE, JOIN_SIG_EXT, SUITE};
 use crate::CoreError;
 
 /// KeyPackages for `key`, one per allowed suite, encoded as one blob. The
 /// private parts land in the provider's storage.
 pub fn key_package_blob(prov: &impl OpenMlsProvider, key: &KeyPair) -> Result<Vec<u8>, CoreError> {
+    signed_key_package_blob(prov, key, None)
+}
+
+/// [`key_package_blob`] for a join request.
+///
+/// `join_sig` is the joiner's signature on their join request (see
+/// `keys::sign_join_request`). It rides inside each KeyPackage as a
+/// KeyPackage extension of type [`JOIN_SIG_EXT`], so the blob stays the
+/// plain list of KeyPackages the server checks, and the KeyPackage's own
+/// signature covers it.
+pub fn signed_key_package_blob(
+    prov: &impl OpenMlsProvider,
+    key: &KeyPair,
+    join_sig: Option<&Sig>,
+) -> Result<Vec<u8>, CoreError> {
     let mut kps = Vec::new();
     for suite in [SUITE, FALLBACK_SUITE] {
-        let bundle = KeyPackage::builder()
-            .leaf_node_capabilities(capabilities())
+        let mut builder = KeyPackage::builder().leaf_node_capabilities(capabilities());
+        if let Some(sig) = join_sig {
+            let ext = Extension::Unknown(JOIN_SIG_EXT, UnknownExtension(sig.0.to_vec()));
+            let exts = Extensions::single(ext).map_err(|e| CoreError::Mls(e.to_string()))?;
+            builder = builder.key_package_extensions(exts);
+        }
+        let bundle = builder
             .build(suite, prov, key, key.credential())
             .map_err(|e| CoreError::Mls(e.to_string()))?;
         kps.push(
@@ -27,6 +47,16 @@ pub fn key_package_blob(prov: &impl OpenMlsProvider, key: &KeyPair) -> Result<Ve
         );
     }
     Ok(postcard::to_stdvec(&kps)?)
+}
+
+/// The join-request signature a KeyPackage carries, if any.
+pub fn join_sig(kp: &KeyPackage) -> Option<Sig> {
+    kp.extensions().iter().find_map(|e| match e {
+        Extension::Unknown(t, UnknownExtension(b)) if *t == JOIN_SIG_EXT => {
+            <[u8; 64]>::try_from(b.as_slice()).ok().map(Sig)
+        }
+        _ => None,
+    })
 }
 
 /// The KeyPackage in `blob` for `suite`, checked.

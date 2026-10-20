@@ -471,3 +471,38 @@ fn status_shows_on_the_help_line_until_the_next_key() {
         "{after}"
     );
 }
+
+fn new_certificate_modal() -> Modal {
+    Modal::NewCertificate {
+        link: "socketchat://chat.example.com:7444/j/abc#def".into(),
+        host: "chat.example.com".into(),
+        pinned: "9f2c 41d0 77aa 0b13 5e6f 8812 c3d4 e5f6 0718 293a 4b5c 6d7e 8f90 a1b2 c3d4 e5f6"
+            .into(),
+        offered: "0707 0707 0707 0707 0707 0707 0707 0707 0707 0707 0707 0707 0707 0707 0707 0707"
+            .into(),
+    }
+}
+
+#[test]
+fn screen_new_certificate_modal() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.modal = Some(new_certificate_modal());
+    insta::assert_snapshot!(render(&app, &crew(), 80, 24));
+}
+
+#[test]
+fn new_certificate_modal_y_trusts_it_and_n_keeps_the_old_one() {
+    let mut app = App::new();
+    app.modal = Some(new_certificate_modal());
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('y')), &crew()),
+        vec![Action::AcceptCertificate(
+            "socketchat://chat.example.com:7444/j/abc#def".into()
+        )]
+    );
+    assert!(app.modal.is_none());
+    app.modal = Some(new_certificate_modal());
+    assert!(app.handle_key(key(KeyCode::Char('n')), &crew()).is_empty());
+    assert!(app.modal.is_none());
+}

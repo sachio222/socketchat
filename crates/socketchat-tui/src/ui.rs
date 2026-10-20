@@ -109,6 +109,7 @@ fn help_line(app: &App) -> &'static str {
         return match m {
             Modal::Verify { .. } => "Y they match · Esc close",
             Modal::ConfirmVideo { .. } => "Y send it · N cancel",
+            Modal::NewCertificate { .. } => "Y trust the new certificate · N keep the old one",
             Modal::Invite { .. } => "C copy the link · Esc close",
             _ => "Esc close",
         };
@@ -500,6 +501,39 @@ fn draw_modal(f: &mut Frame, m: &Modal, area: Rect) {
             .map(Line::from)
             .collect(),
         ),
+        Modal::NewCertificate {
+            host,
+            pinned,
+            offered,
+            ..
+        } => {
+            let mut v: Vec<Line> = wrap(
+                &format!(
+                    "This link names a different certificate for {} from the one socketchat trusts. That happens when the server's operator sets it up again, and when someone sends a fake link.",
+                    fit(host, 40)
+                ),
+                inner_w,
+            )
+            .into_iter()
+            .map(Line::from)
+            .collect();
+            v.push(Line::from(""));
+            let bold = Style::default().add_modifier(Modifier::BOLD);
+            for (label, fpr) in [("Trusted now", pinned), ("In the link", offered)] {
+                v.push(Line::from(label.to_string()));
+                for l in wrap(fpr, inner_w) {
+                    v.push(Line::from(Span::styled(l, bold)));
+                }
+            }
+            v.push(Line::from(""));
+            for l in wrap(
+                "Press Y only if the operator told you they set the server up again. Nothing changes unless the new certificate works.",
+                inner_w,
+            ) {
+                v.push(Line::from(l));
+            }
+            (" New server certificate ".into(), v)
+        }
         Modal::Help => (
             " Commands ".into(),
             HELP.iter()

@@ -70,6 +70,18 @@ pub struct Raw {
 
 impl Raw {
     pub async fn connect(addr: SocketAddr, fpr: [u8; 32]) -> Raw {
+        Self::over(TcpStream::connect(addr).await.unwrap(), fpr).await
+    }
+
+    /// Connects with a small socket receive buffer, so the server's writes
+    /// fill it quickly when this side reads slowly.
+    pub async fn connect_small(addr: SocketAddr, fpr: [u8; 32], rcvbuf: u32) -> Raw {
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        sock.set_recv_buffer_size(rcvbuf).unwrap();
+        Self::over(sock.connect(addr).await.unwrap(), fpr).await
+    }
+
+    async fn over(tcp: TcpStream, fpr: [u8; 32]) -> Raw {
         let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
@@ -78,7 +90,6 @@ impl Raw {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Pinned(fpr)))
         .with_no_client_auth();
-        let tcp = TcpStream::connect(addr).await.unwrap();
         let s = TlsConnector::from(Arc::new(cfg))
             .connect(ServerName::try_from("socketchat").unwrap(), tcp)
             .await
@@ -108,6 +119,36 @@ impl Raw {
                 return Some(from_body(&b).unwrap());
             }
             let mut buf = [0u8; 8192];
+            let n = match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.s.read(&mut buf),
+            )
+            .await
+            .expect("server stalled")
+            {
+                Ok(n) => n,
+                Err(_) => return None,
+            };
+            if n == 0 {
+                return None;
+            }
+            self.d.push(&buf[..n]);
+        }
+    }
+
+    /// Like `recv`, but reads `chunk` bytes at a time and pauses between
+    /// reads, as a slow reader on a busy link would.
+    pub async fn recv_slowly(
+        &mut self,
+        chunk: usize,
+        pause: std::time::Duration,
+    ) -> Option<ServerFrame> {
+        let mut buf = vec![0u8; chunk];
+        loop {
+            if let Some(b) = self.d.next_frame().unwrap() {
+                return Some(from_body(&b).unwrap());
+            }
+            tokio::time::sleep(pause).await;
             let n = match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 self.s.read(&mut buf),

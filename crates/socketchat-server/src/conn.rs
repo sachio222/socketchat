@@ -1,13 +1,18 @@
 //! One task per connection: TLS, the Hello exchange, then requests in and
 //! responses and pushes out.
 //!
-//! Each connection has a short queue of frames waiting to be written. The
-//! reader waits for room in it before it handles the next request, so a
-//! client that never reads stalls only itself. A push that finds the queue
-//! full closes that connection; the client fetches what it missed when it
-//! reconnects.
+//! Each connection has a short queue of encoded frames waiting to be
+//! written, bounded in frames and in bytes. The reader waits for room for
+//! the largest reply before it handles the next request, so a client that
+//! never reads stalls only itself. A push that does not fit closes that
+//! connection; the client fetches what it missed when it reconnects.
+//!
+//! A write that makes no progress for `WRITE_LIMIT` ends the connection,
+//! and once the reader stops, the writer gets `WRITER_GRACE` to finish
+//! before it is stopped, so a peer that stopped reading frees its slot.
 
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,8 +20,8 @@ use std::time::Duration;
 use socketchat_proto::msg::{
     from_body, to_frame, ClientFrame, Key, Request, Response, ServerFrame,
 };
-use socketchat_proto::{FrameDecoder, PROTOCOL_VERSION};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use socketchat_proto::{FrameDecoder, MAX_FRAME, PROTOCOL_VERSION};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::Instant;
@@ -27,25 +32,109 @@ use crate::{auth, files, groups, invites, relock, State};
 /// Frames one connection may have waiting to be written.
 pub const QUEUE_FRAMES: usize = 64;
 
+/// Bytes one connection may have waiting to be written, a reply being
+/// worked on included. Room for about two of the largest frames.
+pub const QUEUE_BYTES: usize = 2 * 1024 * 1024;
+
+/// The largest frame on the wire: a full body and its length.
+const MAX_WIRE: usize = MAX_FRAME + 4;
+
+/// Longest one frame's write may take before the connection is dropped.
+const WRITE_LIMIT: Duration = Duration::from_secs(30);
+
+/// How long the writer may go on after the reader stops.
+const WRITER_GRACE: Duration = Duration::from_secs(10);
+
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+
+/// What waits to be written over every connection, for tests and limits.
+#[derive(Default)]
+pub struct Queued {
+    pub frames: AtomicUsize,
+    pub bytes: AtomicUsize,
+}
+
+/// One connection's count of bytes waiting to be written.
+struct Account {
+    bytes: AtomicUsize,
+    /// Wakes the reader when bytes leave the queue.
+    drained: Notify,
+    all: Arc<Queued>,
+}
+
+impl Account {
+    /// Counts `n` more bytes if they fit under `limit`.
+    fn take(&self, n: usize, limit: usize) -> bool {
+        self.bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |b| {
+                (b + n <= limit).then_some(b + n)
+            })
+            .is_ok()
+    }
+
+    fn give(&self, n: usize) {
+        self.bytes.fetch_sub(n, Ordering::AcqRel);
+        self.drained.notify_one();
+    }
+}
+
+/// One encoded frame in a connection's queue. Its bytes count until it is
+/// written or thrown away; it counts as a queued frame until the writer
+/// takes it.
+struct Frame {
+    bytes: Arc<Vec<u8>>,
+    acct: Arc<Account>,
+    queued: bool,
+}
+
+impl Frame {
+    /// Wraps `bytes`, already counted on `acct`.
+    fn new(bytes: Arc<Vec<u8>>, acct: &Arc<Account>) -> Frame {
+        acct.all.frames.fetch_add(1, Ordering::Relaxed);
+        acct.all.bytes.fetch_add(bytes.len(), Ordering::Relaxed);
+        Frame {
+            bytes,
+            acct: acct.clone(),
+            queued: true,
+        }
+    }
+
+    /// The writer has it now.
+    fn taken(&mut self) {
+        if std::mem::take(&mut self.queued) {
+            self.acct.all.frames.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for Frame {
+    fn drop(&mut self) {
+        self.taken();
+        let n = self.bytes.len();
+        self.acct.all.bytes.fetch_sub(n, Ordering::Relaxed);
+        self.acct.give(n);
+    }
+}
 
 /// The sending side of one connection's queue.
 #[derive(Clone)]
 pub struct Tx {
-    inner: mpsc::Sender<ServerFrame>,
+    inner: mpsc::Sender<Frame>,
     /// Wakes the connection's reader to close it.
     close: Arc<Notify>,
-    queued: Arc<AtomicUsize>,
+    acct: Arc<Account>,
 }
 
 impl Tx {
-    /// Queues `frame` if there is room. A full queue closes the connection.
-    fn push(&self, frame: ServerFrame) -> bool {
-        match self.inner.try_send(frame) {
-            Ok(()) => {
-                self.queued.fetch_add(1, Ordering::Relaxed);
-                true
-            }
+    /// Queues `bytes` if there is room in frames and in bytes. A push that
+    /// does not fit closes the connection.
+    fn push(&self, bytes: &Arc<Vec<u8>>) -> bool {
+        if !self.acct.take(bytes.len(), QUEUE_BYTES) {
+            self.close.notify_one();
+            return false;
+        }
+        match self.inner.try_send(Frame::new(bytes.clone(), &self.acct)) {
+            Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.close.notify_one();
                 false
@@ -54,9 +143,29 @@ impl Tx {
         }
     }
 
-    fn send(&self, permit: mpsc::Permit<'_, ServerFrame>, frame: ServerFrame) {
-        self.queued.fetch_add(1, Ordering::Relaxed);
-        permit.send(frame);
+    /// Queues the encoded `frame`, for frames the server makes itself.
+    fn push_frame(&self, frame: &ServerFrame) -> bool {
+        encode(frame).is_some_and(|b| self.push(&Arc::new(b)))
+    }
+}
+
+/// Room held for a reply while the request is handled.
+struct Reserved(Arc<Account>);
+
+impl Reserved {
+    /// Waits until the largest reply fits in the queue's bytes, then holds
+    /// that room.
+    async fn wait(acct: &Arc<Account>) -> Reserved {
+        while !acct.take(MAX_WIRE, QUEUE_BYTES) {
+            acct.drained.notified().await;
+        }
+        Reserved(acct.clone())
+    }
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        self.0.give(MAX_WIRE);
     }
 }
 
@@ -87,12 +196,16 @@ impl Online {
     /// `skip`. A connection holding several of the keys gets it once. A
     /// connection whose queue is full is dropped from the list and closed.
     pub fn push_many(&self, keys: &[Key], frame: &ServerFrame, skip: Option<u64>) {
+        // Encoded once, shared by every queue it goes to.
+        let Some(bytes) = encode(frame).map(Arc::new) else {
+            return;
+        };
         let mut m = relock(&self.inner);
         let mut sent: HashSet<u64> = skip.into_iter().collect();
         let mut full = Vec::new();
         for k in keys {
             for (c, tx) in m.get(k).into_iter().flatten() {
-                if sent.insert(*c) && !tx.push(frame.clone()) {
+                if sent.insert(*c) && !tx.push(&bytes) {
                     full.push(*c);
                 }
             }
@@ -133,6 +246,53 @@ impl Drop for OnlineGuard {
     }
 }
 
+/// Open connections per address.
+#[derive(Default)]
+pub struct PerIp {
+    inner: Mutex<HashMap<IpAddr, usize>>,
+}
+
+/// The address a connection counts against: IPv4 as is, IPv6 by its /64.
+fn source(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
+        v4 => v4,
+    }
+}
+
+/// One connection's place in its address's count, given back on drop.
+pub struct IpSlot(Arc<State>, IpAddr);
+
+impl PerIp {
+    /// A slot for a connection from `ip`, or None when that address holds
+    /// `max` already.
+    pub fn take(state: &Arc<State>, ip: IpAddr, max: usize) -> Option<IpSlot> {
+        let ip = source(ip);
+        let mut m = relock(&state.per_ip.inner);
+        let n = m.entry(ip).or_default();
+        if *n >= max {
+            return None;
+        }
+        *n += 1;
+        Some(IpSlot(state.clone(), ip))
+    }
+}
+
+impl Drop for IpSlot {
+    fn drop(&mut self) {
+        let mut m = relock(&self.0.per_ip.inner);
+        if let Some(n) = m.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.1);
+            }
+        }
+    }
+}
+
 /// The bytes for `f`. A reply too large for one frame becomes an error reply
 /// to the same request; a push that large is skipped.
 fn encode(f: &ServerFrame) -> Option<Vec<u8>> {
@@ -149,11 +309,40 @@ fn encode(f: &ServerFrame) -> Option<Vec<u8>> {
     }
 }
 
+/// Writes queued frames until the queue closes, a write fails, or a frame
+/// takes longer than `limit`.
+async fn write_frames<W: AsyncWrite + Unpin>(
+    mut rx: mpsc::Receiver<Frame>,
+    mut wr: W,
+    close: Arc<Notify>,
+    limit: Duration,
+) {
+    while let Some(mut f) = rx.recv().await {
+        f.taken();
+        // Flush every frame. When the socket is full, a TLS stream keeps the
+        // last records of a write in its own buffer and sends them only on
+        // the next write or a flush; a reply with nothing after it would
+        // never arrive whole.
+        let sent = tokio::time::timeout(limit, async {
+            wr.write_all(&f.bytes).await?;
+            wr.flush().await
+        })
+        .await;
+        drop(f);
+        if !matches!(sent, Ok(Ok(()))) {
+            close.notify_one();
+            return;
+        }
+    }
+    let _ = tokio::time::timeout(limit, wr.shutdown()).await;
+}
+
 pub async fn serve(
     state: Arc<State>,
     acceptor: TlsAcceptor,
     tcp: TcpStream,
     mut stop: watch::Receiver<bool>,
+    _slot: IpSlot,
 ) {
     let count = state.conns.fetch_add(1, Ordering::Relaxed) + 1;
     let _guard = CountGuard(state.clone());
@@ -162,27 +351,20 @@ pub async fn serve(
         _ => return,
     };
     let timing = state.cfg.timing;
-    let (mut rd, mut wr) = tokio::io::split(tls);
-    let (stx, mut rx) = mpsc::channel::<ServerFrame>(QUEUE_FRAMES);
+    let (mut rd, wr) = tokio::io::split(tls);
+    let (stx, rx) = mpsc::channel::<Frame>(QUEUE_FRAMES);
     let close = Arc::new(Notify::new());
+    let acct = Arc::new(Account {
+        bytes: AtomicUsize::new(0),
+        drained: Notify::new(),
+        all: state.queued.clone(),
+    });
     let tx = Tx {
         inner: stx,
         close: close.clone(),
-        queued: state.queued.clone(),
+        acct: acct.clone(),
     };
-    let queued = state.queued.clone();
-    let writer_close = close.clone();
-    let writer = tokio::spawn(async move {
-        while let Some(f) = rx.recv().await {
-            queued.fetch_sub(1, Ordering::Relaxed);
-            let Some(bytes) = encode(&f) else { continue };
-            if wr.write_all(&bytes).await.is_err() {
-                writer_close.notify_one();
-                return;
-            }
-        }
-        let _ = wr.shutdown().await;
-    });
+    let mut writer = tokio::spawn(write_frames(rx, wr, close.clone(), WRITE_LIMIT));
 
     let mut cs = ConnState {
         id: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
@@ -214,19 +396,26 @@ pub async fn serve(
                         break 'conn;
                     }
                     if version != PROTOCOL_VERSION {
-                        tx.push(ServerFrame::VersionMismatch {
+                        tx.push_frame(&ServerFrame::VersionMismatch {
                             server: PROTOCOL_VERSION,
                         });
                         break 'conn;
                     }
                     greeted = true;
-                    tx.push(ServerFrame::HelloOk {
+                    tx.push_frame(&ServerFrame::HelloOk {
                         version: PROTOCOL_VERSION,
                     });
                     deadline = Instant::now() + timing.idle;
                 }
                 ClientFrame::Req { id, body } if greeted => {
-                    // Wait for room for the reply before doing the work.
+                    // Wait for room for the reply, in bytes and in frames,
+                    // before doing the work.
+                    let reserved = tokio::select! {
+                        r = Reserved::wait(&acct) => r,
+                        _ = stop.changed() => break 'conn,
+                        _ = close.notified() => break 'conn,
+                        _ = tokio::time::sleep_until(deadline) => break 'conn,
+                    };
                     let permit = tokio::select! {
                         p = tx.inner.reserve() => match p {
                             Ok(p) => p,
@@ -237,7 +426,12 @@ pub async fn serve(
                         _ = tokio::time::sleep_until(deadline) => break 'conn,
                     };
                     let resp = handle(&state, &mut cs, body).await;
-                    tx.send(permit, ServerFrame::Resp { id, body: resp });
+                    if let Some(b) = encode(&ServerFrame::Resp { id, body: resp }) {
+                        // Fits: it is no larger than the room held for it.
+                        acct.take(b.len(), usize::MAX);
+                        permit.send(Frame::new(Arc::new(b), &acct));
+                    }
+                    drop(reserved);
                     deadline = Instant::now() + timing.idle;
                 }
                 _ => break 'conn,
@@ -257,7 +451,14 @@ pub async fn serve(
     state.online.remove_conn(cs.id);
     drop(cs);
     drop(tx);
-    let _ = writer.await;
+    // The writer sends what is queued, but a peer that stopped reading must
+    // not hold the connection's slot.
+    if tokio::time::timeout(WRITER_GRACE, &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+    }
 }
 
 /// Runs slow OpenMLS work off the async workers.
@@ -292,11 +493,16 @@ async fn handle(state: &Arc<State>, cs: &mut ConnState, req: Request) -> Respons
             let (state, cs) = (state.clone(), cs.clone());
             blocking(move || groups::post(&state, &cs, group, &mls, welcome)).await
         }
+        // Reads that can be large go off the async workers too, with the
+        // database lock they hold.
         Request::Fetch {
             group,
             after,
             limit,
-        } => groups::fetch(state, cs, group, after, limit),
+        } => {
+            let (state, cs) = (state.clone(), cs.clone());
+            blocking(move || groups::fetch(&state, &cs, group, after, limit)).await
+        }
         Request::Ack { group, seq } => groups::ack(state, cs, group, seq),
         Request::Members { group } => groups::members(state, cs, group),
         Request::CreateInvite { group } => groups::create_invite(state, cs, group),
@@ -306,7 +512,10 @@ async fn handle(state: &Arc<State>, cs: &mut ConnState, req: Request) -> Respons
             key_package,
             mac,
         } => invites::redeem(state, cs, token, key_package, mac),
-        Request::PendingJoins { group } => invites::pending(state, cs, group),
+        Request::PendingJoins { group, after } => {
+            let (state, cs) = (state.clone(), cs.clone());
+            blocking(move || invites::pending(&state, &cs, group, after)).await
+        }
         Request::FileBegin { group, size } => files::begin(state, cs, group, size),
         Request::FileChunk { file, index, data } => files::chunk(state, cs, file, index, &data),
         Request::FileEnd { file } => files::end(state, cs, file),
@@ -344,6 +553,101 @@ mod tests {
             ),
             "{back:?}"
         );
+    }
+
+    fn account() -> Arc<Account> {
+        Arc::new(Account {
+            bytes: AtomicUsize::new(0),
+            drained: Notify::new(),
+            all: Default::default(),
+        })
+    }
+
+    /// A writer that keeps bytes until flushed, as TLS does when the socket
+    /// is full, still delivers a lone frame: the writer flushes each one.
+    #[tokio::test]
+    async fn each_frame_is_flushed() {
+        let (near, mut far) = tokio::io::duplex(64 * 1024);
+        let buffered = tokio::io::BufWriter::new(near);
+        let (tx, rx) = mpsc::channel(4);
+        let acct = account();
+        let bytes = encode(&ServerFrame::HelloOk { version: 1 }).unwrap();
+        assert!(acct.take(bytes.len(), QUEUE_BYTES));
+        tx.send(Frame::new(Arc::new(bytes.clone()), &acct))
+            .await
+            .ok()
+            .unwrap();
+        let w = tokio::spawn(write_frames(
+            rx,
+            buffered,
+            Arc::new(Notify::new()),
+            WRITE_LIMIT,
+        ));
+        let mut got = vec![0u8; bytes.len()];
+        tokio::time::timeout(Duration::from_secs(2), far.read_exact(&mut got))
+            .await
+            .expect("the frame stayed in the writer's buffer")
+            .unwrap();
+        assert_eq!(got, bytes);
+        assert_eq!(acct.bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(acct.all.bytes.load(Ordering::Relaxed), 0);
+        drop(tx);
+        w.await.unwrap();
+    }
+
+    /// A write that makes no progress ends the writer and closes the
+    /// connection, and what was queued is no longer counted.
+    #[tokio::test]
+    async fn stuck_write_gives_up() {
+        let (near, _far) = tokio::io::duplex(16);
+        let (tx, rx) = mpsc::channel(4);
+        let acct = account();
+        for _ in 0..2 {
+            assert!(acct.take(1000, QUEUE_BYTES));
+            tx.send(Frame::new(Arc::new(vec![0; 1000]), &acct))
+                .await
+                .ok()
+                .unwrap();
+        }
+        let close = Arc::new(Notify::new());
+        let w = tokio::spawn(write_frames(
+            rx,
+            near,
+            close.clone(),
+            Duration::from_millis(200),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), close.notified())
+            .await
+            .expect("a stuck write did not close the connection");
+        w.await.unwrap();
+        assert_eq!(acct.bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(acct.all.frames.load(Ordering::Relaxed), 0);
+    }
+
+    /// A push of the largest message the log takes fits beside the room
+    /// held for a reply.
+    #[test]
+    fn largest_push_fits_beside_a_reply() {
+        let f = ServerFrame::Push(socketchat_proto::msg::Push::Entry {
+            group: socketchat_proto::msg::GroupId([0; 16]),
+            entry: Entry {
+                seq: u64::MAX,
+                mls: vec![0; crate::groups::MAX_MLS],
+            },
+        });
+        let len = encode(&f).unwrap().len();
+        assert!(MAX_WIRE + len <= QUEUE_BYTES, "{len}");
+    }
+
+    #[test]
+    fn ipv6_counts_by_its_network() {
+        let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:bbbb::9".parse().unwrap();
+        let c: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(source(a), source(b));
+        assert_ne!(source(a), source(c));
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        assert_eq!(source(mapped), "192.0.2.7".parse::<IpAddr>().unwrap());
     }
 
     #[test]

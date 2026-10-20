@@ -13,7 +13,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use socketchat_core::client::{Client, Event, Verification};
-use socketchat_core::keys::Key;
+use socketchat_core::keys::{fingerprint_text, Key};
 use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
 use socketchat_proto::InviteLink;
@@ -279,6 +279,7 @@ impl Screen {
                     .map_err(|e| e.to_string()),
                 None => Err("Open a chat first.".into()),
             },
+            Action::AcceptCertificate(link) => self.join(&link, true).await,
             Action::MarkVerified(key) => match self.app.selected {
                 Some(g) => self
                     .client
@@ -299,6 +300,54 @@ impl Screen {
         }
     }
 
+    /// Uses an invite link. A link with a new certificate for a server in
+    /// use opens a box that asks first; `new_certificate` is the answer.
+    async fn join(&mut self, link: &str, new_certificate: bool) -> Result<(), String> {
+        let parsed: InviteLink = link
+            .parse()
+            .map_err(|x: socketchat_proto::LinkError| x.to_string())?;
+        let r = if new_certificate {
+            self.client.join_new_certificate(&parsed).await
+        } else {
+            self.client.join(&parsed).await
+        };
+        let st = match r {
+            Ok(st) => st,
+            Err(CoreError::NewCertificate {
+                host,
+                pinned,
+                offered,
+                ..
+            }) => {
+                self.app.modal = Some(Modal::NewCertificate {
+                    link: link.to_string(),
+                    host: socketchat_core::sanitize::clean_name(&host),
+                    pinned: fingerprint_text(&pinned),
+                    offered: fingerprint_text(&offered),
+                });
+                return Ok(());
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut said: Vec<String> = Vec::new();
+        for ev in self.client.take_events() {
+            match ev {
+                Event::Warning(w) => said.push(w),
+                ev => self.on_event(ev),
+            }
+        }
+        said.push(match st {
+            socketchat_core::client::JoinStatus::Registered => {
+                "You are on the server. Start a chat with /new <name>.".into()
+            }
+            socketchat_core::client::JoinStatus::Waiting { for_name } => {
+                format!("Asked to join. Waiting for {for_name}.")
+            }
+        });
+        self.app.status = Some(said.join(" "));
+        Ok(())
+    }
+
     async fn command(&mut self, c: Command) -> Result<(), String> {
         let sel = self.app.selected;
         let need = || sel.ok_or_else(|| "Open a chat first.".to_string());
@@ -317,28 +366,7 @@ impl Screen {
                     hours: self.client.hours_until(expires_unix),
                 });
             }
-            Command::Join(link) => {
-                let link: InviteLink = link
-                    .parse()
-                    .map_err(|x: socketchat_proto::LinkError| x.to_string())?;
-                let st = self.client.join(&link).await.map_err(e)?;
-                let mut said: Vec<String> = Vec::new();
-                for ev in self.client.take_events() {
-                    match ev {
-                        Event::Warning(w) => said.push(w),
-                        ev => self.on_event(ev),
-                    }
-                }
-                said.push(match st {
-                    socketchat_core::client::JoinStatus::Registered => {
-                        "You are on the server. Start a chat with /new <name>.".into()
-                    }
-                    socketchat_core::client::JoinStatus::Waiting { for_name } => {
-                        format!("Asked to join. Waiting for {for_name}.")
-                    }
-                });
-                self.app.status = Some(said.join(" "));
-            }
+            Command::Join(link) => self.join(&link, false).await?,
             Command::New(name) => {
                 let g = self.client.create_group(&name).await.map_err(e)?;
                 self.select(g);

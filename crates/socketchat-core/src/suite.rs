@@ -15,6 +15,10 @@ pub const FALLBACK_SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128G
 /// range of RFC 9420).
 pub const ADMINS_EXT: u16 = 0xff00;
 
+/// KeyPackage extension that carries a joiner's signature on their join
+/// request (private-use range of RFC 9420). See `invite::key_package_blob`.
+pub const JOIN_SIG_EXT: u16 = 0xff01;
+
 /// How many old epochs a member keeps keys for, so a message sent just
 /// before a group change still opens.
 pub const MAX_PAST_EPOCHS: usize = 2;
@@ -24,7 +28,10 @@ pub fn capabilities() -> Capabilities {
     Capabilities::new(
         None,
         Some(&[SUITE, FALLBACK_SUITE]),
-        Some(&[ExtensionType::Unknown(ADMINS_EXT)]),
+        Some(&[
+            ExtensionType::Unknown(ADMINS_EXT),
+            ExtensionType::Unknown(JOIN_SIG_EXT),
+        ]),
         None,
         Some(&[CredentialType::Basic]),
     )
