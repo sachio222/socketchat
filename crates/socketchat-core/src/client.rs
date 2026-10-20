@@ -47,6 +47,14 @@ pub fn human_size(n: u64) -> String {
     }
 }
 
+/// Why [`Client::wait`] returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wake {
+    Push,
+    Dropped,
+    Timeout,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JoinStatus {
     /// A server invite: this person now has an account there.
@@ -282,6 +290,33 @@ impl Client {
     /// Events since the last call, oldest first.
     pub fn take_events(&mut self) -> Vec<Event> {
         self.events.drain(..).collect()
+    }
+
+    /// Waits up to `max` for a server to push something or drop. Safe to
+    /// cancel: it only listens. Call [`Client::sync`] afterwards to act on it.
+    pub async fn wait(&mut self, max: std::time::Duration) -> Wake {
+        if self.conns.is_empty() {
+            tokio::time::sleep(max).await;
+            return Wake::Timeout;
+        }
+        let poll = std::future::poll_fn(|cx| {
+            for c in self.conns.values_mut() {
+                match c.poll_push(cx) {
+                    std::task::Poll::Ready(Some(_)) => return std::task::Poll::Ready(Wake::Push),
+                    std::task::Poll::Ready(None) => return std::task::Poll::Ready(Wake::Dropped),
+                    std::task::Poll::Pending => {}
+                }
+            }
+            std::task::Poll::Pending
+        });
+        tokio::time::timeout(max, poll)
+            .await
+            .unwrap_or(Wake::Timeout)
+    }
+
+    /// Whether every server this client uses is connected right now.
+    pub fn connected(&self) -> bool {
+        self.conns.values().all(|c| c.is_alive())
     }
 
     fn emit(&mut self, e: Event) {

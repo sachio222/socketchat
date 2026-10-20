@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render(&app, &crew(), 80, 24)"
+---
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+│# Book club       ││09:14 Ada: Who is bringing the book   ││✓ Ada* (you)      │
+│@ Bo             3││      list?                           ││✓ Bo              │
+│# Climbing Sat… 12││09:15 Bo: Me. Sending it now.         ││  Cy              │
+│                  ││09:15 · Bo sent books.pdf (84 KB)     ││                  │
+│                  ││09:16 Cy: Got it, thanks. Saturday    ││                  │
+│                  ││      still works for me, and I can   ││                  │
+│ ┌ Check Bo ────────────────────────────────────────────────────────────────┐ │
+│ │Compare these numbers with Bo, in person or on a call. If both screens    │ │
+│ │match, nobody sits between you. Press Y if they match.                    │ │
+│ │                                                                          │ │
+│ │12345  67890  12345  67890                                                │ │
+│ │12345  67890  12345  67890                                                │ │
+│ │12345  67890  12345  67890                                                │ │
+│ │                                                                          │ │
+│ │Make the window larger to show a QR code.                                 │ │
+│ └──────────────────────────────────────────────────────────────────────────┘ │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+> type a message, or /help
+Y they match · Esc close

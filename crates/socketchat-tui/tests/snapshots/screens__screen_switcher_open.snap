@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render(&app, &crew(), 80, 24)"
+---
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+│# Book club       ││09:14 Ada: Who is bringing the book   ││✓ Ada* (you)      │
+│@ Bo             3││      list?                           ││✓ Bo              │
+│# Climbing Sat… 12││09:15 Bo: Me. Sending it now.         ││  Cy              │
+│                  ││09:15 · Bo sent books.pdf (84 KB)     ││                  │
+│                  ││09:16 Cy: Got it, thanks. Saturday    ││                  │
+│                  │┌ Switch to ───────────────────────────┐│                  │
+│                  ││> clim                                ││                  │
+│                  ││Climbing Saturdays                    ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  │└──────────────────────────────────────┘│                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+> type a message, or /help
+Type to filter · Enter open · Esc cancel

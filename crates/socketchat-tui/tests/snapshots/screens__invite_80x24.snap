@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render(&app, &crew(), 80, 24)"
+---
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+│# Book club       ││09:14 Ada: Who is bringing the book   ││✓ Ada* (you)      │
+│@ Bo             3││      list?                           ││✓ Bo              │
+│# Climbing Sat… 12││09:15 Bo: Me. Sending it now.         ││  Cy              │
+│                  ││09:15 · Bo sent books.pdf (84 KB)     ││                  │
+│                  ││09:16 Cy: Got it, thanks. Saturday    ││                  │
+│                  ││      still works for me, and I can   ││                  │
+│ ┌ Invite link ─────────────────────────────────────────────────────────────┐ │
+│ │Send this link to one person. It works once and expires in 24 hours.      │ │
+│ │Anyone who has it can ask to join.                                        │ │
+│ │                                                                          │ │
+│ │socketchat://chat.example.com:7444/j/AAECAwQFBgcICQoLDA0ODw#3q2-7wABAgMEBQ│ │
+│ │YHCAkKCwwNDg8QERITFBUWFxgZGhs.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.│ │
+│ │ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8                               │ │
+│ │                                                                          │ │
+│ │Make the window larger to show a QR code.                                 │ │
+│ └──────────────────────────────────────────────────────────────────────────┘ │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+> type a message, or /help
+C copy the link · Esc close

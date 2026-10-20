@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render(&app, &crew(), 80, 24)"
+---
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+│# Book club       ││You joined, but the invite could not  ││✓ Ada* (you)      │
+│@ Bo             3││be checked: the invite was signed by  ││✓ Bo              │
+│# Climbing Sat… 12││someone other than the person in the  ││  Cy              │
+│                  ││link. Compare safety numbers with     ││                  │
+│                  ││/verify.                              ││                  │
+│                  ││09:14 Ada: Who is bringing the book   ││                  │
+│                  ││      list?                           ││                  │
+│                  ││09:15 Bo: Me. Sending it now.         ││                  │
+│                  ││09:15 · Bo sent books.pdf (84 KB)     ││                  │
+│                  ││09:16 Cy: Got it, thanks. Saturday    ││                  │
+│                  ││      still works for me, and I can   ││                  │
+│                  ││      bring snacks for everyone.      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+> type a message, or /help
+Enter send · /help commands · Tab move · Ctrl-K switch chat · Ctrl-C quit

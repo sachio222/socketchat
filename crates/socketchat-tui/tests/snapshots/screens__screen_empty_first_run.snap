@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render(&App::new(), &vm, 80, 24)"
+---
+┌ Chats ───────────┐┌ socketchat ──────────────────────────┐┌ People ──────────┐
+│                  ││Welcome, Ada.                         ││                  │
+│                  ││                                      ││                  │
+│                  ││No chats yet.                         ││                  │
+│                  ││Start one with /new <name>,           ││                  │
+│                  ││or paste an invite with /join <link>. ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+> type a message, or /help
+Enter send · /help commands · Tab move · Ctrl-K switch chat · Ctrl-C quit

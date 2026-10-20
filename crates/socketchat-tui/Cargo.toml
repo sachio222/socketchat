@@ -1,0 +1,22 @@
+[package]
+name = "socketchat-tui"
+description = "The socketchat chat screen for the terminal."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+socketchat-core.workspace = true
+socketchat-proto.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+qrcode.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+directories.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
