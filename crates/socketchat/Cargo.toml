@@ -1,0 +1,32 @@
+[package]
+name = "socketchat"
+description = "Encrypted group chat for people who run their own server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[[bin]]
+name = "socketchat"
+path = "src/main.rs"
+
+[features]
+# Build SQLCipher's OpenSSL from source, for machines without libssl-dev.
+vendored-openssl = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+
+[dependencies]
+socketchat-core.workspace = true
+socketchat-server.workspace = true
+socketchat-tui.workspace = true
+socketchat-proto.workspace = true
+clap.workspace = true
+rpassword.workspace = true
+directories.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
