@@ -1,13 +1,14 @@
 # Running a server
 
-This guide sets up a socketchat server that runs all the time, on a Raspberry Pi at home or on a small cloud server. It covers installing, setup, configuration, opening the port, running under systemd, backups, upgrades and cleanup of old data. The server is one program, `socketchat server`, with its data in one folder.
+This guide sets up a socketchat server that runs all the time, on a cloud server, a computer at home, or a small device such as a Raspberry Pi. It covers installing, setup, configuration, opening the port, running under systemd, backups, upgrades and cleanup of old data. The server is one program, `socketchat server`, with its data in one folder.
 
 A socketchat server stores and forwards encrypted messages and files. It never holds a key that can read them. As the operator you answer for what happens on your server; read [ACCEPTABLE_USE.md](../ACCEPTABLE_USE.md), which `init` also prints.
 
 ## Pick a machine
 
-- **Raspberry Pi 4, or Raspberry Pi Zero 2 W.** Use 64-bit Raspberry Pi OS. The project builds and tests on 64-bit ARM Linux (aarch64) on every change.
-- **A small cloud server.** The smallest Linux plan most providers offer is enough to start. It needs a public IP address or a domain name.
+- **A cloud server.** The smallest Linux plan most providers offer is enough to start. It needs a public IP address or a domain name.
+- **A computer at home that stays on.** The steps below are for Linux. The `socketchat server` commands work the same on macOS and Windows.
+- **A Raspberry Pi 4 or Raspberry Pi Zero 2 W.** Use 64-bit Raspberry Pi OS. The project builds and tests on 64-bit ARM Linux (aarch64) on every change.
 
 ## Install
 
@@ -88,7 +89,7 @@ sudo -u socketchat socketchat server init --data-dir /var/lib/socketchat --host 
 
 People connect over TCP to the port in `listen`, 7444 by default. Invite links carry that same port number.
 
-- **Home network:** forward TCP port 7444 on your router to the Pi, using the same port number outside and inside. Use your public IP address or a dynamic DNS name for `--host`.
+- **Home network:** forward TCP port 7444 on your router to the server machine, using the same port number outside and inside. Use your public IP address or a dynamic DNS name for `--host`.
 - **Firewall on the machine:** for example, `sudo ufw allow 7444/tcp`.
 - **Cloud server:** also allow inbound TCP 7444 in the provider's firewall or security group.
 

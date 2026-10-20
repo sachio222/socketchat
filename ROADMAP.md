@@ -1,14 +1,6 @@
 # Roadmap
 
-This is the work planned after socketchat v4.0. One small item comes first; the numbered items are larger and in priority order. Each item says what it is, why v4.0 does not have it, and how you can help. If you want to pick one up, open an issue first so we can agree on the approach; [CONTRIBUTING.md](CONTRIBUTING.md) explains how reviews work.
-
-## Soon: prebuilt binaries
-
-**What it is.** Ready-to-run `socketchat` binaries for Linux x86_64, Linux aarch64 (Raspberry Pi) and macOS arm64, attached to each release.
-
-**Why it is not in v4.0.** Today everyone builds from source, which takes several minutes on a fast machine and much longer on a Raspberry Pi. Publishing binaries needs a release workflow the project has not set up yet.
-
-**How to help.** Propose a GitHub Actions workflow that builds each target from a tagged commit and publishes checksums beside the binaries.
+This is the work planned after socketchat v4.0, in priority order. Each item says what it is, why v4.0 does not have it, and how you can help. If you want to pick one up, open an issue first so we can agree on the approach; [CONTRIBUTING.md](CONTRIBUTING.md) explains how reviews work.
 
 ## 1. Hide group membership from the server
 
@@ -24,7 +16,7 @@ This is the work planned after socketchat v4.0. One small item comes first; the 
 
 **What it is.** The connection between an app and the server uses TLS 1.3 with classical X25519 key exchange. Message and file contents inside it already have post-quantum protection through MLS; the connection itself does not. rustls, the TLS library socketchat uses, offers the hybrid X25519MLKEM768 key exchange through its aws-lc-rs crypto provider.
 
-**Why it is not in v4.0.** socketchat uses rustls with the ring provider, which has no ML-KEM. Switching to aws-lc-rs adds a native library that must build and pass tests on every platform the project supports, including the Raspberry Pi. The move should also wait for rustls 0.23.46 or later, which fixes a downgrade problem in hybrid key exchange (RUSTSEC-2026-0349).
+**Why it is not in v4.0.** socketchat uses rustls with the ring provider, which has no ML-KEM. Switching to aws-lc-rs adds a native library that must build and pass tests on every platform the project supports: macOS, Windows, and Linux on Intel, AMD and 64-bit ARM. The move should also wait for rustls 0.23.46 or later, which fixes a downgrade problem in hybrid key exchange (RUSTSEC-2026-0349).
 
 **How to help.** Try the aws-lc-rs provider on Linux x86_64, macOS arm64 and Linux aarch64, and report build times and memory use on a Raspberry Pi.
 

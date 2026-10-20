@@ -3,13 +3,23 @@ use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_socketchat");
-const PASS: &str = "correct horse battery staple";
+
+/// The passphrase for every temporary profile in these tests: 16 random bytes
+/// in hex, made once per run so every command opens the same profiles.
+fn pass() -> &'static str {
+    static PASS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PASS.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
 
 fn run(home: &Path, args: &[&str]) -> Output {
     Command::new(BIN)
         .args(args)
         .env("SOCKETCHAT_HOME", home)
-        .env("SOCKETCHAT_PASSPHRASE", PASS)
+        .env("SOCKETCHAT_PASSPHRASE", pass())
         .env("SOCKETCHAT_NAME", home.file_name().unwrap())
         .stdin(Stdio::null())
         .output()
@@ -218,7 +228,7 @@ fn wrong_passphrase_exits_2_with_plain_message() {
     let o = Command::new(BIN)
         .args(["log", "--group", "x"])
         .env("SOCKETCHAT_HOME", &ada)
-        .env("SOCKETCHAT_PASSPHRASE", "not it")
+        .env("SOCKETCHAT_PASSPHRASE", format!("{}0", pass()))
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(2), "{}", out(&o));

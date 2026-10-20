@@ -7,6 +7,7 @@
 //! sealed chunks.
 
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::stream::{DecryptorBE32, EncryptorBE32};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
@@ -165,6 +166,64 @@ pub fn numbered(name: &str, k: u32) -> String {
     }
 }
 
+/// Moves the finished download at `part` into `dir` as `name`, or the first
+/// free numbered name, and never replaces an existing file. It hard-links
+/// the file where the folder allows that, and copies it into a new file where
+/// it does not, as on FAT32 and exFAT drives.
+pub fn publish(part: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    publish_with(part, dir, name, |from, to| std::fs::hard_link(from, to))
+}
+
+/// `publish` with the hard-link step passed in, so tests can make it fail.
+pub(crate) fn publish_with(
+    part: &Path,
+    dir: &Path,
+    name: &str,
+    link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
+    use std::io::ErrorKind::AlreadyExists;
+    let mut copy = false;
+    let mut k = 0;
+    let saved = loop {
+        let candidate = dir.join(numbered(name, k));
+        let placed = if copy {
+            copy_new(part, &candidate)
+        } else {
+            match link(part, &candidate) {
+                Err(e) if e.kind() != AlreadyExists => {
+                    copy = true;
+                    copy_new(part, &candidate)
+                }
+                r => r,
+            }
+        };
+        match placed {
+            Ok(()) => break candidate,
+            Err(e) if e.kind() == AlreadyExists && k < 10_000 => k += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    std::fs::remove_file(part)?;
+    Ok(saved)
+}
+
+/// Copies `part` into `target`, which must not exist yet.
+fn copy_new(part: &Path, target: &Path) -> std::io::Result<()> {
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    let copied = std::fs::File::open(part)
+        .and_then(|mut src| std::io::copy(&mut src, &mut out))
+        .and_then(|_| out.sync_all());
+    if let Err(e) = copied {
+        drop(out);
+        let _ = std::fs::remove_file(target);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +244,61 @@ mod tests {
         assert_eq!(chunk_count(1), 1);
         assert_eq!(chunk_count(CHUNK as u64), 1);
         assert_eq!(chunk_count(CHUNK as u64 + 1), 2);
+    }
+
+    fn part_with(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
+        let part = dir.join(".socketchat-test.part");
+        std::fs::write(&part, bytes).unwrap();
+        part
+    }
+
+    #[test]
+    fn publish_links_under_a_free_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"keep me").unwrap();
+        let part = part_with(dir.path(), b"new");
+        let saved = publish(&part, dir.path(), "a.txt").unwrap();
+        assert_eq!(saved, dir.path().join("a (1).txt"));
+        assert_eq!(std::fs::read(&saved).unwrap(), b"new");
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"keep me");
+        assert!(!part.exists());
+    }
+
+    #[test]
+    fn publish_copies_where_hard_links_fail() {
+        // FAT32 and exFAT drives have no hard links.
+        let dir = tempfile::tempdir().unwrap();
+        let part = part_with(dir.path(), b"photo bytes");
+        let no_links = |_: &std::path::Path, _: &std::path::Path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no hard links here",
+            ))
+        };
+        let saved = publish_with(&part, dir.path(), "p.jpg", no_links).unwrap();
+        assert_eq!(saved, dir.path().join("p.jpg"));
+        assert_eq!(std::fs::read(&saved).unwrap(), b"photo bytes");
+        assert!(!part.exists());
+    }
+
+    #[test]
+    fn publish_copy_never_replaces_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p.jpg"), b"old").unwrap();
+        std::fs::write(dir.path().join("p (1).jpg"), b"older").unwrap();
+        let part = part_with(dir.path(), b"new");
+        let no_links = |_: &std::path::Path, _: &std::path::Path| {
+            Err(std::io::Error::other("no hard links here"))
+        };
+        let saved = publish_with(&part, dir.path(), "p.jpg", no_links).unwrap();
+        assert_eq!(saved, dir.path().join("p (2).jpg"));
+        assert_eq!(std::fs::read(&saved).unwrap(), b"new");
+        assert_eq!(std::fs::read(dir.path().join("p.jpg")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(dir.path().join("p (1).jpg")).unwrap(),
+            b"older"
+        );
+        assert!(!part.exists());
     }
 
     #[test]

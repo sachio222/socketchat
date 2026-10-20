@@ -1,0 +1,11 @@
+version: 2
+
+secret:
+  # Tests, the screenshot tapes and the measuring scripts make temporary
+  # profiles with throwaway passphrases, made at random each run. They hold
+  # no real credentials.
+  ignored_paths:
+    - "crates/**/tests/**"
+    - "crates/socketchat-testkit/**"
+    - "docs/tapes/**"
+    - "scripts/**"

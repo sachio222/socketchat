@@ -3661,6 +3661,7 @@ version = "0.4.0"
 dependencies = [
  "clap",
  "directories",
+ "rand_core 0.6.4",
  "rpassword",
  "rusqlite",
  "socketchat-core",
@@ -3743,6 +3744,7 @@ name = "socketchat-testkit"
 version = "0.4.0"
 dependencies = [
  "openmls_rust_crypto",
+ "rand_core 0.6.4",
  "rusqlite",
  "socketchat-core",
  "socketchat-proto",

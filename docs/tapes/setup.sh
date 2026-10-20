@@ -24,12 +24,18 @@ mkdir -p "$DEMO/bin" "$DEMO/files"
 ln -s "$BIN" "$DEMO/bin/socketchat"
 export PATH="$DEMO/bin:$PATH"
 
+# A random passphrase for each demo person, in /tmp/sc-demo/<who>.pass. The
+# tapes and let-cy-in.sh read it from there.
+for who in ada bo cy; do
+  (umask 077; od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$DEMO/$who.pass")
+done
+
 # One person's commands: as ada socketchat sync
 as() {
   local who="$1"; shift
   local name; name="$(printf '%s' "${who:0:1}" | tr a-z A-Z)${who:1}"
   SOCKETCHAT_HOME="$DEMO/$who" SOCKETCHAT_NAME="$name" \
-    SOCKETCHAT_PASSPHRASE="demo-$who" "$@"
+    SOCKETCHAT_PASSPHRASE="$(cat "$DEMO/$who.pass")" "$@"
 }
 
 # Server.

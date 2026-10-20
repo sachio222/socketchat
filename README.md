@@ -1,12 +1,22 @@
 # socketchat
 
-socketchat is an encrypted group chat for people who want to run their own server. You start the server on a small machine, such as a Raspberry Pi, and invite people with a link. The server passes messages along but cannot read them: messages, files and group changes are end-to-end encrypted, which means only the people in a chat can read them. Post-quantum protection, meaning protection against a future quantum computer, is on by default.
+socketchat is a full-featured encrypted chat with a server you run yourself. The server runs anywhere, from a cloud server or a home computer down to a small device such as a Raspberry Pi, and you invite people with a link. The server passes messages along but cannot read them: messages, files and group changes are end-to-end encrypted, which means only the people in a chat can read them.
+
+What you get:
+
+- Group chats and direct messages.
+- Invite links, shown as text and as a QR code.
+- Verification with safety numbers, so you can check that nobody sits between you and a friend.
+- Files, photos and videos. Photos lose their location and device data before they leave.
+- Admins, who can remove people and make other admins.
+- Post-quantum protection, meaning protection against a future quantum computer, on by default.
+- A server that cannot read your messages.
 
 socketchat v4 is a terminal app written in Rust. Its encryption comes from a published standard and an audited library, with no home-made cryptography.
 
 ## Why it exists
 
-No other project we know of pairs a tiny self-hosted server with standard group encryption and post-quantum protection. The group encryption standard is MLS (Messaging Layer Security), published by the Internet Engineering Task Force (IETF) as RFC 9420 in 2023. In MLS a sender encrypts a message once and the server copies it to every member.
+No other project we know of pairs a light self-hosted server with standard group encryption and post-quantum protection. The group encryption standard is MLS (Messaging Layer Security), published by the Internet Engineering Task Force (IETF) as RFC 9420 in 2023. In MLS a sender encrypts a message once and the server copies it to every member.
 
 How nearby projects compare:
 
@@ -15,9 +25,11 @@ How nearby projects compare:
 - **SimpleX** is light, but in a group the sender's own device delivers every message to every member.
 - **Signal** hides group membership from its servers with anonymous credentials, which it built for its own service. That code is licensed under the AGPL and sits outside the MLS standard.
 
-socketchat's server is one small program. In a release build on a Mac it used 10 MB of memory while idle.
+socketchat's server is one program with its data in one folder. A release build on a Mac used 10 MB of memory while idle.
 
 ## Quick start
+
+The installers below go live with the first release, 0.4.0, which is in final testing. Until then, use "Or build from source" further down.
 
 Install socketchat with one command. On macOS or Linux, run this in a terminal:
 
@@ -36,7 +48,7 @@ The installer downloads a prebuilt `socketchat` program for your computer, puts 
 Prebuilt programs cover:
 
 - macOS on Apple silicon and on Intel.
-- Linux on Intel or AMD (x86_64) and on 64-bit ARM (aarch64), which includes a Raspberry Pi 4 or Zero 2 W running 64-bit Raspberry Pi OS. They need glibc 2.35 or newer, which Ubuntu 22.04, Debian 12 and Raspberry Pi OS 12 (Bookworm) have.
+- Linux on Intel or AMD (x86_64), which covers most cloud servers and desktop computers, and on 64-bit ARM (aarch64), which includes a Raspberry Pi 4 or Zero 2 W running 64-bit Raspberry Pi OS. They need glibc 2.35 or newer, which Ubuntu 22.04, Debian 12 and Raspberry Pi OS 12 (Bookworm) have.
 - 64-bit Windows on Intel or AMD.
 
 **Or build from source**, for a system the prebuilt programs do not cover. You need the Rust toolchain from [rustup.rs](https://rustup.rs). On Linux, also install the OpenSSL headers, which the encrypted local database needs:
@@ -126,7 +138,7 @@ The server stores and forwards encrypted data. It never sees message text, file 
 - [SECURITY.md](SECURITY.md): what the server sees, the cryptography, limits, and how to report a vulnerability.
 - [ACCEPTABLE_USE.md](ACCEPTABLE_USE.md): what socketchat is for.
 - [docs/files-photos-videos.md](docs/files-photos-videos.md): how sending files works and its limits, for everyone.
-- [docs/running-a-server.md](docs/running-a-server.md): a server on a Raspberry Pi or a small cloud machine.
+- [docs/running-a-server.md](docs/running-a-server.md): a server that runs all the time, on a cloud server, a home computer or a Raspberry Pi.
 - [CHANGELOG.md](CHANGELOG.md): what changed in each release.
 - [ROADMAP.md](ROADMAP.md): planned work, and where help is welcome.
 - [CONTRIBUTING.md](CONTRIBUTING.md): building, testing and reviews.

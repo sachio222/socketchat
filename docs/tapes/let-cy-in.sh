@@ -13,6 +13,6 @@ for _ in $(seq 600); do
   sleep 0.1
 done
 for _ in 1 2 3; do
-  SOCKETCHAT_HOME="$DEMO/ada" SOCKETCHAT_PASSPHRASE=demo-ada \
+  SOCKETCHAT_HOME="$DEMO/ada" SOCKETCHAT_PASSPHRASE="$(cat "$DEMO/ada.pass")" \
     "$DEMO/bin/socketchat" sync > /dev/null 2>&1
 done

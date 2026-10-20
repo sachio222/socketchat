@@ -19,7 +19,7 @@ Env BASH_SILENCE_DEPRECATION_WARNING "1"
 Hide
 Type "docs/tapes/setup.sh --no-cy && export PATH=/tmp/sc-demo/bin:$PATH" Enter
 Wait@60s /\$\s*$/
-Type `export SOCKETCHAT_HOME=/tmp/sc-demo/cy SOCKETCHAT_NAME=Cy SOCKETCHAT_PASSPHRASE=demo-cy LINK="$(cat /tmp/sc-demo/cy-invite.txt)"; PROMPT_COMMAND='echo >> /tmp/sc-demo/prompts'` Enter
+Type `export SOCKETCHAT_HOME=/tmp/sc-demo/cy SOCKETCHAT_NAME=Cy SOCKETCHAT_PASSPHRASE="$(cat /tmp/sc-demo/cy.pass)" LINK="$(cat /tmp/sc-demo/cy-invite.txt)"; PROMPT_COMMAND='echo >> /tmp/sc-demo/prompts'` Enter
 Sleep 500ms
 Type `n0=$(wc -l < /tmp/sc-demo/prompts); docs/tapes/let-cy-in.sh "$n0" & disown; clear` Enter
 Sleep 500ms

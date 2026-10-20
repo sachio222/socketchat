@@ -17,7 +17,7 @@ Env BASH_SILENCE_DEPRECATION_WARNING "1"
 Hide
 Type "docs/tapes/setup.sh && export PATH=/tmp/sc-demo/bin:$PATH" Enter
 Wait@60s /\$\s*$/
-Type "export SOCKETCHAT_HOME=/tmp/sc-demo/ada SOCKETCHAT_PASSPHRASE=demo-ada; clear" Enter
+Type `export SOCKETCHAT_HOME=/tmp/sc-demo/ada SOCKETCHAT_PASSPHRASE="$(cat /tmp/sc-demo/ada.pass)"; clear` Enter
 Sleep 500ms
 Show
 

@@ -8,7 +8,9 @@ DIR="$(mktemp -d)"
 PORT="${PORT:-17556}"
 trap 'kill "$PID" 2>/dev/null || true; rm -r "$DIR"' EXIT
 
-export SOCKETCHAT_PASSPHRASE=startup-check SOCKETCHAT_NAME=Timer SOCKETCHAT_HOME="$DIR/me"
+# A throwaway profile, so a random passphrase made for this run.
+SOCKETCHAT_PASSPHRASE="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+export SOCKETCHAT_PASSPHRASE SOCKETCHAT_NAME=Timer SOCKETCHAT_HOME="$DIR/me"
 "$BIN" server init --data-dir "$DIR/server" --host 127.0.0.1 --listen "127.0.0.1:$PORT" >/dev/null
 "$BIN" server run --data-dir "$DIR/server" >/dev/null &
 PID=$!

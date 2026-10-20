@@ -17,3 +17,4 @@ tokio.workspace = true
 tempfile.workspace = true
 rusqlite.workspace = true
 openmls_rust_crypto.workspace = true
+rand_core.workspace = true

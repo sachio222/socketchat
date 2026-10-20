@@ -79,7 +79,7 @@ The token works once and expires after `invite_ttl_hours`. A lodged request wait
 
 ## Files
 
-`files.rs` seals a file in 64 KiB chunks with XChaCha20-Poly1305 STREAM, under a fresh random key and nonce prefix, while hashing the plaintext with SHA-256. JPEG, PNG and WebP images lose their metadata first; files are recognized by their first bytes, not their names. Videos need an explicit yes. The app uploads chunks in order (`FileBegin`, `FileChunk`, `FileEnd`), then sends a `FileOffer` with the key, nonce prefix, name, size and hash inside the group. Saving downloads chunk by chunk to a temporary file, checks the hash, and links the result under a name that never replaces an existing file. Memory use stays flat however large the file is.
+`files.rs` seals a file in 64 KiB chunks with XChaCha20-Poly1305 STREAM, under a fresh random key and nonce prefix, while hashing the plaintext with SHA-256. JPEG, PNG and WebP images lose their metadata first; files are recognized by their first bytes, not their names. Videos need an explicit yes. The app uploads chunks in order (`FileBegin`, `FileChunk`, `FileEnd`), then sends a `FileOffer` with the key, nonce prefix, name, size and hash inside the group. Saving downloads chunk by chunk to a temporary file, checks the hash, and hard-links the result under a name that never replaces an existing file. On drives without hard links, such as FAT32 and exFAT, it copies the result into a new file under such a name instead. Memory use stays flat however large the file is.
 
 The server stores chunks as files under `files/` in its data directory and deletes a file once every member except the sender has reported `FileDone`, or at retention.
 

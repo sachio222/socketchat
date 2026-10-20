@@ -11,7 +11,16 @@ use socketchat_server::{init, make_server_invite, Config, Server, ServerHandle};
 
 pub type Db = rusqlite::Connection;
 
-pub const PASSPHRASE: &str = "correct horse battery staple";
+/// The passphrase for every temporary test profile: 16 random bytes in hex,
+/// made once per test run so a reopened profile gets the same one.
+pub fn passphrase() -> &'static str {
+    static PASS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PASS.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
 
 pub struct TestServer {
     pub dir: tempfile::TempDir,
@@ -87,7 +96,7 @@ impl TestClient {
     /// A profile with no server yet.
     pub async fn profile_only(name: &str) -> TestClient {
         let dir = tempfile::tempdir().expect("temp dir");
-        let client = Client::create_profile(dir.path(), PASSPHRASE, name)
+        let client = Client::create_profile(dir.path(), passphrase(), name)
             .await
             .expect("profile");
         TestClient { client, dir }
@@ -111,7 +120,9 @@ impl TestClient {
     pub async fn reopen(self) -> TestClient {
         let TestClient { client, dir } = self;
         drop(client);
-        let client = Client::open(dir.path(), PASSPHRASE).await.expect("reopen");
+        let client = Client::open(dir.path(), passphrase())
+            .await
+            .expect("reopen");
         TestClient { client, dir }
     }
 }
@@ -123,7 +134,7 @@ pub struct ClosedClient {
 
 impl ClosedClient {
     pub async fn open(self) -> TestClient {
-        let client = Client::open(self.dir.path(), PASSPHRASE)
+        let client = Client::open(self.dir.path(), passphrase())
             .await
             .expect("open");
         TestClient {
@@ -232,5 +243,18 @@ impl CutProxy {
     /// Drops the server's reply to the client's next request.
     pub fn arm(&self) {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::passphrase;
+
+    #[test]
+    fn passphrase_is_random_hex_made_once_per_run() {
+        let p = passphrase();
+        assert_eq!(p.len(), 32, "{p}");
+        assert!(p.chars().all(|c| c.is_ascii_hexdigit()), "{p}");
+        assert_eq!(p, passphrase(), "a reopened profile needs the same one");
     }
 }

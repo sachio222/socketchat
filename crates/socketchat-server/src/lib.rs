@@ -107,7 +107,9 @@ pub struct InitReport {
 /// database. Refuses to touch a directory that already has a certificate.
 pub fn init(data_dir: &Path, public_host: &str) -> Result<InitReport, ServerError> {
     std::fs::create_dir_all(data_dir)?;
-    let data_dir = data_dir.canonicalize()?;
+    // An absolute path as given, not resolved through links: canonicalize
+    // would give \\?\C:\... on Windows, which then shows up in the config.
+    let data_dir = std::path::absolute(data_dir)?;
     let cert_fpr = tls::create(&data_dir, public_host)?;
     let cfg = Config {
         public_host: public_host.to_string(),
@@ -272,5 +274,40 @@ impl ServerHandle {
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+
+    #[test]
+    fn init_stores_a_plain_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("srv");
+        init(&dir, "127.0.0.1").unwrap();
+        let cfg = Config::load(&dir).unwrap();
+        assert!(cfg.data_dir.is_absolute(), "{}", cfg.data_dir.display());
+        // canonicalize gives \\?\C:\... on Windows, which leaks into the
+        // config and into what `init` prints.
+        let shown = cfg.data_dir.display().to_string();
+        assert!(!shown.starts_with(r"\\?\"), "{shown}");
+        assert_eq!(cfg.data_dir, std::path::absolute(&dir).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_keeps_a_linked_folder_as_given() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("real")).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(tmp.path().join("real"), &link).unwrap();
+        let report = init(&link.join("srv"), "127.0.0.1").unwrap();
+        assert_eq!(
+            report.config_path,
+            link.join("srv").join(config::CONFIG_FILE)
+        );
+        let cfg = Config::load(&link.join("srv")).unwrap();
+        assert_eq!(cfg.data_dir, link.join("srv"));
     }
 }

@@ -19,7 +19,7 @@ Type "docs/tapes/setup.sh && export PATH=/tmp/sc-demo/bin:$PATH" Enter
 Wait@60s /\$\s*$/
 
 # Bo sends the reading plan from his own chat screen.
-Type "SOCKETCHAT_HOME=/tmp/sc-demo/bo SOCKETCHAT_PASSPHRASE=demo-bo socketchat" Enter
+Type `SOCKETCHAT_HOME=/tmp/sc-demo/bo SOCKETCHAT_PASSPHRASE="$(cat /tmp/sc-demo/bo.pass)" socketchat` Enter
 Sleep 2s
 Type "/send /tmp/sc-demo/files/reading-plan.txt" Enter
 Sleep 1s
@@ -27,7 +27,7 @@ Type "Here's a plan so nobody has to rush." Enter
 Sleep 1s
 Ctrl+C
 Sleep 500ms
-Type "export SOCKETCHAT_HOME=/tmp/sc-demo/ada SOCKETCHAT_PASSPHRASE=demo-ada; clear" Enter
+Type `export SOCKETCHAT_HOME=/tmp/sc-demo/ada SOCKETCHAT_PASSPHRASE="$(cat /tmp/sc-demo/ada.pass)"; clear` Enter
 Sleep 500ms
 Show
 

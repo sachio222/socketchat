@@ -2019,19 +2019,13 @@ impl Client {
             let _ = std::fs::remove_file(&part);
             return Err(e);
         }
-        let mut k = 0;
-        let saved = loop {
-            let candidate = dir.join(numbered(&offer.name, k));
-            match std::fs::hard_link(&part, &candidate) {
-                Ok(()) => break candidate,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && k < 10_000 => k += 1,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&part);
-                    return Err(e.into());
-                }
+        let saved = match publish(&part, dir, &offer.name) {
+            Ok(saved) => saved,
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(e.into());
             }
         };
-        std::fs::remove_file(&part)?;
         let _ = self
             .request(server_id, Request::FileDone { file: id })
             .await;

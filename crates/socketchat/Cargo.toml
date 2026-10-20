@@ -30,3 +30,4 @@ rusqlite.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rand_core.workspace = true
