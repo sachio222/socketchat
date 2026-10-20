@@ -100,12 +100,36 @@ impl TestClient {
         c
     }
 
+    /// Closes this client; `open` on the result brings it back from disk.
+    pub fn reopen_later(self) -> ClosedClient {
+        let TestClient { client, dir } = self;
+        drop(client);
+        ClosedClient { dir }
+    }
+
     /// Closes this client and opens its profile again from disk.
     pub async fn reopen(self) -> TestClient {
         let TestClient { client, dir } = self;
         drop(client);
         let client = Client::open(dir.path(), PASSPHRASE).await.expect("reopen");
         TestClient { client, dir }
+    }
+}
+
+/// A profile on disk whose client is closed.
+pub struct ClosedClient {
+    dir: tempfile::TempDir,
+}
+
+impl ClosedClient {
+    pub async fn open(self) -> TestClient {
+        let client = Client::open(self.dir.path(), PASSPHRASE)
+            .await
+            .expect("open");
+        TestClient {
+            client,
+            dir: self.dir,
+        }
     }
 }
 
@@ -135,4 +159,78 @@ pub async fn settle(clients: &mut [&mut TestClient]) {
 /// Events a client has queued so far.
 pub async fn drain(c: &mut TestClient) -> Vec<Event> {
     c.take_events()
+}
+
+/// A TCP relay between a client and the server that can drop one reply:
+/// once armed, it forwards the client's next bytes, discards whatever the
+/// server sends back, and closes both sides.
+pub struct CutProxy {
+    pub port: u16,
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CutProxy {
+    pub async fn start(target: SocketAddr) -> CutProxy {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let armed2 = armed.clone();
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let Ok(server) = tokio::net::TcpStream::connect(target).await else {
+                    continue;
+                };
+                let (mut cr, mut cw) = client.into_split();
+                let (mut sr, mut sw) = server.into_split();
+                let armed = armed2.clone();
+                let cut = std::sync::Arc::new(tokio::sync::Notify::new());
+                let cut2 = cut.clone();
+                let armed_up = armed.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    loop {
+                        let n = match cr.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        if sw.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                        if armed_up.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            armed_up.store(false, Ordering::SeqCst);
+                            cut2.notify_waiters();
+                            break;
+                        }
+                    }
+                });
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    loop {
+                        tokio::select! {
+                            _ = cut.notified() => break,
+                            r = sr.read(&mut buf) => {
+                                let n = match r { Ok(0) | Err(_) => break, Ok(n) => n };
+                                if armed.load(Ordering::SeqCst) {
+                                    continue;
+                                }
+                                if cw.write_all(&buf[..n]).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let _ = cw.shutdown().await;
+                });
+            }
+        });
+        CutProxy { port, armed }
+    }
+
+    /// Drops the server's reply to the client's next request.
+    pub fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }

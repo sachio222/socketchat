@@ -411,6 +411,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_is_dm(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE groups SET is_dm = 1 WHERE id = ?1",
+            [g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_left(&self, g: &GroupId) -> Result<(), CoreError> {
         self.conn.execute(
             "UPDATE groups SET left_group = 1 WHERE id = ?1",
