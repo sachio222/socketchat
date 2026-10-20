@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 use tokio_rustls::TlsAcceptor;
 
-use crate::{auth, State};
+use crate::{auth, groups, State};
 
 pub type Tx = mpsc::UnboundedSender<ServerFrame>;
 
@@ -44,11 +44,11 @@ impl Online {
         });
     }
 
-    /// Sends `frame` to every connection signed in as `key`. Connections that
-    /// share several keys get it once.
-    pub fn push_many(&self, keys: &[Key], frame: &ServerFrame) {
+    /// Sends `frame` to every connection signed in as one of `keys`, except
+    /// `skip`. A connection holding several of the keys gets it once.
+    pub fn push_many(&self, keys: &[Key], frame: &ServerFrame, skip: Option<u64>) {
         let m = self.inner.lock().unwrap();
-        let mut sent = HashSet::new();
+        let mut sent: HashSet<u64> = skip.into_iter().collect();
         for k in keys {
             for (c, tx) in m.get(k).into_iter().flatten() {
                 if sent.insert(*c) {
@@ -164,6 +164,27 @@ async fn handle(state: &State, cs: &mut ConnState, req: Request) -> Response {
         Request::RegisterAccount { token, key, sig } => {
             auth::register_account(state, cs, token, key, sig)
         }
+        Request::RegisterMailbox { token, key, sig } => {
+            groups::register_mailbox(state, cs, token, key, sig)
+        }
+        Request::CreateGroup {
+            group_info,
+            ratchet_tree,
+        } => groups::create_group(state, cs, &group_info, &ratchet_tree),
+        Request::Post {
+            group,
+            mls,
+            welcome,
+        } => groups::post(state, cs, group, &mls, welcome),
+        Request::Fetch {
+            group,
+            after,
+            limit,
+        } => groups::fetch(state, cs, group, after, limit),
+        Request::Ack { group, seq } => groups::ack(state, cs, group, seq),
+        Request::Members { group } => groups::members(state, cs, group),
+        Request::CreateInvite { group } => groups::create_invite(state, cs, group),
+        Request::FetchWelcomes => groups::fetch_welcomes(state, cs),
         _ => Response::Error("this server does not handle that request yet".into()),
     }
 }
