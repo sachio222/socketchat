@@ -1,0 +1,19 @@
+[package]
+name = "socketchat-proto"
+description = "Wire messages, framing and invite links for socketchat. No crypto, no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_bytes.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
