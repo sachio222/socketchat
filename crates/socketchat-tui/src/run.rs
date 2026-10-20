@@ -31,7 +31,14 @@ struct Screen {
     app: App,
     unread: HashMap<GroupId, u32>,
     quit: bool,
+    /// The status line says the connection dropped; the next good sync
+    /// clears it.
+    offline_note: bool,
 }
+
+/// What the status line says when an action fails because the connection
+/// dropped. The app reconnects on its own at the next sync.
+const OFFLINE_NOTE: &str = "Lost the connection to the server. socketchat is reconnecting.";
 
 fn local_time(unix: u64) -> String {
     clock_time(unix, &chrono::Local)
@@ -253,11 +260,16 @@ impl Screen {
                 copy_to_clipboard(&text);
                 Ok(())
             }
-            Action::Send(g, text) => self
-                .client
-                .send_text(g, &text)
-                .await
-                .map_err(|e| e.to_string()),
+            Action::Send(g, text) => match self.client.send_text(g, &text).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // Nothing was sent: give the words back to edit or retry.
+                    if self.app.input.is_empty() {
+                        self.app.input = text;
+                    }
+                    Err(e.to_string())
+                }
+            },
             Action::ConfirmVideo(path) => match self.app.selected {
                 Some(g) => self
                     .client
@@ -278,7 +290,12 @@ impl Screen {
             Action::Command(c) => self.command(c).await,
         };
         if let Err(e) = r {
-            self.app.status = Some(e);
+            if self.client.connected() {
+                self.app.status = Some(e);
+            } else {
+                self.app.status = Some(OFFLINE_NOTE.into());
+                self.offline_note = true;
+            }
         }
     }
 
@@ -305,7 +322,14 @@ impl Screen {
                     .parse()
                     .map_err(|x: socketchat_proto::LinkError| x.to_string())?;
                 let st = self.client.join(&link).await.map_err(e)?;
-                self.app.status = Some(match st {
+                let mut said: Vec<String> = Vec::new();
+                for ev in self.client.take_events() {
+                    match ev {
+                        Event::Warning(w) => said.push(w),
+                        ev => self.on_event(ev),
+                    }
+                }
+                said.push(match st {
                     socketchat_core::client::JoinStatus::Registered => {
                         "You are on the server. Start a chat with /new <name>.".into()
                     }
@@ -313,6 +337,7 @@ impl Screen {
                         format!("Asked to join. Waiting for {for_name}.")
                     }
                 });
+                self.app.status = Some(said.join(" "));
             }
             Command::New(name) => {
                 let g = self.client.create_group(&name).await.map_err(e)?;
@@ -388,7 +413,17 @@ impl Screen {
     }
 
     async fn sync(&mut self) {
-        if let Err(e) = self.client.sync().await {
+        let r = self.client.sync().await;
+        // A dropped connection is routine (the server closes idle ones):
+        // the header shows it, and this sync has already reconnected or
+        // will at the next one, so the note about it goes once it is back.
+        if self.offline_note && self.client.connected() {
+            self.offline_note = false;
+            if self.app.status.as_deref() == Some(OFFLINE_NOTE) {
+                self.app.status = None;
+            }
+        }
+        if let Err(e) = r {
             self.app.status = Some(e.to_string());
         }
         for ev in self.client.take_events() {
@@ -438,6 +473,7 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
         app: App::new(),
         unread: HashMap::new(),
         quit: false,
+        offline_note: false,
     };
     s.select_first();
     let exit_after_draw = std::env::var_os("SOCKETCHAT_EXIT_AFTER_DRAW").is_some();
@@ -474,7 +510,28 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clock_time, to_base64};
+    use super::{clock_time, to_base64, Action, App, HashMap, Screen};
+    use socketchat_core::client::Client;
+    use socketchat_proto::msg::GroupId;
+
+    #[tokio::test]
+    async fn text_that_fails_to_send_goes_back_in_the_box() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::create_profile(dir.path(), "test passphrase", "Ada")
+            .await
+            .unwrap();
+        let mut s = Screen {
+            client,
+            app: App::new(),
+            unread: HashMap::new(),
+            quit: false,
+            offline_note: false,
+        };
+        s.act(Action::Send(GroupId([1; 16]), "hello there".into()))
+            .await;
+        assert_eq!(s.app.input, "hello there");
+        assert!(s.app.status.is_some());
+    }
 
     #[test]
     fn chat_times_show_seconds_on_a_24_hour_clock() {

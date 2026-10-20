@@ -17,16 +17,32 @@ use socketchat_core::suite::{parse_admins, FALLBACK_SUITE, MAX_PAST_EPOCHS, SUIT
 use socketchat_proto::msg::{
     Entry, GroupId as Gid, Key, MemberInfo, Push, Response, ServerFrame, Sig, WelcomeIn, WelcomeOut,
 };
-use socketchat_proto::Token;
+use socketchat_proto::{Token, MAX_FRAME};
 
 use crate::auth::{admit, load_invite, signed};
 use crate::conn::ConnState;
-use crate::State;
+use crate::{State, DAY_SECS};
 
 type Storage<'a> = SqliteStorageProvider<JsonCodec, &'a Connection>;
 
 /// Most entries one fetch returns.
 const FETCH_LIMIT: u16 = 500;
+
+/// Bytes of entries one reply carries, at most: well under the 1 MiB frame,
+/// with room for the frame's own fields. A reply always carries at least
+/// one entry, which fits by `MAX_MLS`.
+pub(crate) const REPLY_BYTES: usize = 900 * 1024;
+
+/// Largest MLS message the log takes. Leaves room in a 1 MiB frame for the
+/// fields around one entry, so any entry can always be fetched or pushed.
+pub(crate) const MAX_MLS: usize = MAX_FRAME - 1024;
+
+/// Bytes an entry adds to a reply besides its MLS message: sequence number
+/// and length, at their largest.
+const ENTRY_OVERHEAD: usize = 16;
+
+/// Server invites one account may make in a window of `quota_window` days.
+const SERVER_INVITE_QUOTA: i64 = 5;
 
 fn refused(why: &str) -> Response {
     Response::Refused(why.to_string())
@@ -106,7 +122,7 @@ pub fn register_mailbox(
         return refused("signature check failed; ask for a new challenge");
     }
     let now = state.now();
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     if key_registered(&db, &key) {
         return refused("that key is already registered here; make a fresh one");
     }
@@ -138,23 +154,21 @@ pub fn register_mailbox(
             if inv.uses_left < 1 {
                 return refused("this invite link was already used");
             }
-            let ok = db
-                .execute(
+            let ok = db.unchecked_transaction().and_then(|t| {
+                t.execute(
                     "UPDATE invites SET uses_left = uses_left - 1 WHERE token = ?1",
                     [token.0.as_slice()],
-                )
-                .and_then(|_| {
-                    db.execute(
-                        "INSERT INTO mailboxes (key, group_id, created_unix) VALUES (?1, ?2, ?3)",
-                        params![key.0.as_slice(), group, state.today() as i64],
-                    )
-                })
-                .and_then(|_| {
-                    db.execute(
-                        "INSERT INTO joins (token, group_id, mailbox) VALUES (?1, ?2, ?3)",
-                        params![token.0.as_slice(), group, key.0.as_slice()],
-                    )
-                });
+                )?;
+                t.execute(
+                    "INSERT INTO mailboxes (key, group_id, created_unix) VALUES (?1, ?2, ?3)",
+                    params![key.0.as_slice(), group, state.today() as i64],
+                )?;
+                t.execute(
+                    "INSERT INTO joins (token, group_id, mailbox) VALUES (?1, ?2, ?3)",
+                    params![token.0.as_slice(), group, key.0.as_slice()],
+                )?;
+                t.commit()
+            });
             if ok.is_err() {
                 return Response::Error("could not save the mailbox".into());
             }
@@ -171,7 +185,12 @@ pub fn create_group(
     group_info: &[u8],
     ratchet_tree: &[u8],
 ) -> Response {
-    let db = state.db.lock().unwrap();
+    let mut guard = state.db();
+    // Everything below, the group state OpenMLS stores included, goes
+    // through this transaction: a refusal or a failed write leaves nothing.
+    let Ok(db) = guard.transaction() else {
+        return Response::Error("could not save the group".into());
+    };
     if !cs.proven.iter().any(|k| is_account(&db, k)) {
         return refused("sign in with a server account before making a group");
     }
@@ -205,7 +224,7 @@ pub fn create_group(
     if exists {
         return refused("a group with that ID already exists");
     }
-    let storage = Storage::new(&*db);
+    let storage = Storage::new(&db);
     let Ok((pg, _)) = PublicGroup::from_external(
         &RustCrypto::default(),
         &storage,
@@ -230,7 +249,6 @@ pub fn create_group(
             && parse_admins(pg.group_context()) == vec![k]
         });
     if !valid_creator {
-        let _ = PublicGroup::delete(&storage, pg.group_id());
         return refused(
             "a new group must hold only its creator, as its only admin, using a fresh mailbox",
         );
@@ -248,7 +266,8 @@ pub fn create_group(
                 "UPDATE mailboxes SET group_id = ?1, joined_seq = 0, cursor = 0 WHERE key = ?2",
                 params![gid.0.as_slice(), creator.0.as_slice()],
             )
-        });
+        })
+        .and_then(|_| db.commit());
     if ok.is_err() {
         return Response::Error("could not save the group".into());
     }
@@ -356,8 +375,17 @@ pub fn post(
     mls: &[u8],
     welcome: Option<WelcomeOut>,
 ) -> Response {
+    if mls.len() > MAX_MLS {
+        return refused("that message is too large for this server");
+    }
     let now = state.now();
-    let db = state.db.lock().unwrap();
+    let mut guard = state.db();
+    // One transaction for the whole request: the group state OpenMLS
+    // stores, the log, the epoch, the member list and the Welcome change
+    // together or not at all.
+    let Ok(db) = guard.transaction() else {
+        return Response::Error("could not store the message".into());
+    };
     if member_key(&db, cs, &group).is_none() {
         return refused("you are not a member of this group");
     }
@@ -391,10 +419,10 @@ pub fn post(
                 "that message is for an epoch this group has left; catch up and resend",
             );
         }
-        let Ok(seq) = append(&db, &group, mls, now) else {
+        let Ok(seq) = append(&db, &group, mls, now).and_then(|seq| db.commit().map(|_| seq)) else {
             return Response::Error("could not store the message".into());
         };
-        drop(db);
+        drop(guard);
         push_entry(state, cs, &group, seq, mls, &old_members);
         return Response::Posted { seq };
     }
@@ -402,7 +430,7 @@ pub fn post(
     if pm.epoch().as_u64() != epoch {
         return Response::Conflict { epoch };
     }
-    let storage = Storage::new(&*db);
+    let storage = Storage::new(&db);
     let Ok(Some(mut pg)) = PublicGroup::load(&storage, &mls_gid(&group)) else {
         return Response::Error("could not load the group".into());
     };
@@ -432,10 +460,11 @@ pub fn post(
             if pg.add_proposal(&storage, *qp).is_err() {
                 return Response::Error("could not store the proposal".into());
             }
-            let Ok(seq) = append(&db, &group, mls, now) else {
+            let Ok(seq) = append(&db, &group, mls, now).and_then(|seq| db.commit().map(|_| seq))
+            else {
                 return Response::Error("could not store the message".into());
             };
-            drop(db);
+            drop(guard);
             push_entry(state, cs, &group, seq, mls, &old_members);
             Response::Posted { seq }
         }
@@ -481,52 +510,53 @@ pub fn post(
                 .members()
                 .filter_map(|m| key_of(&m.signature_key))
                 .collect();
-            let Ok(seq) = append(&db, &group, mls, now) else {
+            let mut welcomed = None;
+            let stored = (|| -> rusqlite::Result<u64> {
+                let seq = append(&db, &group, mls, now)?;
+                db.execute(
+                    "UPDATE groups SET epoch = ?1 WHERE id = ?2",
+                    params![new_epoch as i64, group.0.as_slice()],
+                )?;
+                for k in &added {
+                    db.execute(
+                        "UPDATE mailboxes SET joined_seq = ?1, cursor = ?1 WHERE key = ?2",
+                        params![seq as i64, k.0.as_slice()],
+                    )?;
+                }
+                for k in old_members.iter().filter(|k| !new_members.contains(k)) {
+                    db.execute("DELETE FROM mailboxes WHERE key = ?1", [k.0.as_slice()])?;
+                }
+                if let Some(w) = welcome {
+                    let mailbox: Option<Vec<u8>> = db
+                        .query_row(
+                            "SELECT mailbox FROM joins WHERE token = ?1 AND group_id = ?2",
+                            params![w.token.0.as_slice(), group.0.as_slice()],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(mb) = mailbox
+                        .as_deref()
+                        .and_then(key_of)
+                        .filter(|k| added.contains(k))
+                    {
+                        db.execute(
+                            "INSERT INTO welcomes (mailbox, welcome, voucher, created_unix) VALUES (?1, ?2, ?3, ?4)",
+                            params![mb.0.as_slice(), w.welcome, w.voucher, now as i64],
+                        )?;
+                        db.execute("DELETE FROM joins WHERE token = ?1", [w.token.0.as_slice()])?;
+                        welcomed = Some(WelcomeIn {
+                            mailbox: mb,
+                            welcome: w.welcome,
+                            voucher: w.voucher,
+                        });
+                    }
+                }
+                Ok(seq)
+            })();
+            let Ok(seq) = stored.and_then(|seq| db.commit().map(|_| seq)) else {
                 return Response::Error("could not store the message".into());
             };
-            let _ = db.execute(
-                "UPDATE groups SET epoch = ?1 WHERE id = ?2",
-                params![new_epoch as i64, group.0.as_slice()],
-            );
-            for k in &added {
-                let _ = db.execute(
-                    "UPDATE mailboxes SET joined_seq = ?1, cursor = ?1 WHERE key = ?2",
-                    params![seq as i64, k.0.as_slice()],
-                );
-            }
-            for k in old_members.iter().filter(|k| !new_members.contains(k)) {
-                let _ = db.execute("DELETE FROM mailboxes WHERE key = ?1", [k.0.as_slice()]);
-            }
-            let mut welcomed = None;
-            if let Some(w) = welcome {
-                let mailbox: Option<Vec<u8>> = db
-                    .query_row(
-                        "SELECT mailbox FROM joins WHERE token = ?1 AND group_id = ?2",
-                        params![w.token.0.as_slice(), group.0.as_slice()],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten();
-                if let Some(mb) = mailbox
-                    .as_deref()
-                    .and_then(key_of)
-                    .filter(|k| added.contains(k))
-                {
-                    let _ = db.execute(
-                        "INSERT INTO welcomes (mailbox, welcome, voucher, created_unix) VALUES (?1, ?2, ?3, ?4)",
-                        params![mb.0.as_slice(), w.welcome, w.voucher, now as i64],
-                    );
-                    let _ =
-                        db.execute("DELETE FROM joins WHERE token = ?1", [w.token.0.as_slice()]);
-                    welcomed = Some(WelcomeIn {
-                        mailbox: mb,
-                        welcome: w.welcome,
-                        voucher: w.voucher,
-                    });
-                }
-            }
-            drop(db);
+            drop(guard);
             if let Some(w) = welcomed {
                 let mb = w.mailbox;
                 state
@@ -552,7 +582,7 @@ fn push_entry(state: &State, cs: &ConnState, group: &Gid, seq: u64, mls: &[u8], 
 }
 
 pub fn fetch(state: &State, cs: &ConnState, group: Gid, after: u64, limit: u16) -> Response {
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let Some(me) = member_key(&db, cs, &group) else {
         return refused("you are not a member of this group");
     };
@@ -565,26 +595,35 @@ pub fn fetch(state: &State, cs: &ConnState, group: Gid, after: u64, limit: u16) 
         .unwrap_or(0);
     let after = after.max(since as u64);
     let limit = limit.clamp(1, FETCH_LIMIT);
-    let mut st = db
-        .prepare("SELECT seq, mls FROM log WHERE group_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3")
-        .expect("static SQL");
-    let rows = st.query_map(
-        params![group.0.as_slice(), after as i64, limit as i64],
-        |r| {
-            Ok(Entry {
+    let read = || -> rusqlite::Result<Vec<Entry>> {
+        let mut st = db.prepare(
+            "SELECT seq, mls FROM log WHERE group_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+        )?;
+        let mut rows = st.query(params![group.0.as_slice(), after as i64, limit as i64])?;
+        let mut out = Vec::new();
+        let mut bytes = 0;
+        while let Some(r) = rows.next()? {
+            let mls: Vec<u8> = r.get(1)?;
+            let size = mls.len() + ENTRY_OVERHEAD;
+            if !out.is_empty() && bytes + size > REPLY_BYTES {
+                break;
+            }
+            bytes += size;
+            out.push(Entry {
                 seq: r.get::<_, i64>(0)? as u64,
-                mls: r.get(1)?,
-            })
-        },
-    );
-    match rows {
-        Ok(rows) => Response::Entries(rows.filter_map(Result::ok).collect()),
+                mls,
+            });
+        }
+        Ok(out)
+    };
+    match read() {
+        Ok(es) => Response::Entries(es),
         Err(_) => Response::Error("could not read the group log".into()),
     }
 }
 
 pub fn ack(state: &State, cs: &ConnState, group: Gid, seq: u64) -> Response {
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let Some(me) = member_key(&db, cs, &group) else {
         return refused("you are not a member of this group");
     };
@@ -607,7 +646,7 @@ pub fn ack(state: &State, cs: &ConnState, group: Gid, seq: u64) -> Response {
 }
 
 pub fn members(state: &State, cs: &ConnState, group: Gid) -> Response {
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     if member_key(&db, cs, &group).is_none() {
         return refused("you are not a member of this group");
     }
@@ -622,7 +661,7 @@ pub fn members(state: &State, cs: &ConnState, group: Gid) -> Response {
 pub fn create_invite(state: &State, cs: &ConnState, group: Option<Gid>) -> Response {
     let now = state.now();
     let expires = now + state.cfg.invite_ttl_hours as u64 * 3600;
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let token = crate::random_token();
     match group {
         Some(g) => {
@@ -650,17 +689,18 @@ pub fn create_invite(state: &State, cs: &ConnState, group: Option<Gid>) -> Respo
             }
         }
         None => {
-            if !state.cfg.members_can_invite || !cs.proven.iter().any(|k| is_account(&db, k)) {
+            let account = cs.proven.iter().copied().find(|k| is_account(&db, k));
+            let (true, Some(account)) = (state.cfg.members_can_invite, account) else {
                 return refused("on this server only the operator can invite new people");
-            }
-            if db
-                .execute(
-                    "INSERT INTO invites (token, group_id, expires_unix, uses_left) VALUES (?1, NULL, ?2, 1)",
-                    params![token.0.as_slice(), expires as i64],
-                )
-                .is_err()
-            {
-                return Response::Error("could not save the invite".into());
+            };
+            match take_server_invite(state, &db, &account, now, &token, expires) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Response::Refused(format!(
+                        "you have made {SERVER_INVITE_QUOTA} server invite links lately; try again in a day or two"
+                    ))
+                }
+                Err(_) => return Response::Error("could not save the invite".into()),
             }
         }
     }
@@ -670,15 +710,82 @@ pub fn create_invite(state: &State, cs: &ConnState, group: Option<Gid>) -> Respo
     }
 }
 
+/// Days in an account's server-invite window: long enough that every link
+/// made in one window has expired before the next starts.
+pub(crate) fn quota_window_secs(state: &State) -> u64 {
+    let ttl = state.cfg.invite_ttl_hours as u64 * 3600;
+    ttl.div_ceil(DAY_SECS) * DAY_SECS + DAY_SECS
+}
+
+/// Counts one server invite against `account` and saves it, or returns
+/// false when the account has made its share. Only a count and the day its
+/// window began are kept, never which invites the account made.
+fn take_server_invite(
+    state: &State,
+    db: &Connection,
+    account: &Key,
+    now: u64,
+    token: &Token,
+    expires: u64,
+) -> rusqlite::Result<bool> {
+    let t = db.unchecked_transaction()?;
+    let row: Option<(i64, i64)> = t
+        .query_row(
+            "SELECT since_unix, used FROM invite_quota WHERE account = ?1",
+            [account.0.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let fresh = match row {
+        Some((since, used)) if now < since as u64 + quota_window_secs(state) => {
+            if used >= SERVER_INVITE_QUOTA {
+                return Ok(false);
+            }
+            false
+        }
+        _ => true,
+    };
+    if fresh {
+        t.execute(
+            "INSERT OR REPLACE INTO invite_quota (account, since_unix, used) VALUES (?1, ?2, 1)",
+            params![account.0.as_slice(), state.today() as i64],
+        )?;
+    } else {
+        t.execute(
+            "UPDATE invite_quota SET used = used + 1 WHERE account = ?1",
+            [account.0.as_slice()],
+        )?;
+    }
+    t.execute(
+        "INSERT INTO invites (token, group_id, expires_unix, uses_left) VALUES (?1, NULL, ?2, 1)",
+        params![token.0.as_slice(), expires as i64],
+    )?;
+    t.commit()?;
+    Ok(true)
+}
+
+/// Welcomes waiting for this connection's mailboxes, as many as fit one
+/// reply. Only those sent are removed; the rest come on the next call.
 pub fn fetch_welcomes(state: &State, cs: &ConnState) -> Response {
-    let db = state.db.lock().unwrap();
-    let mut out = Vec::new();
-    for k in &cs.proven {
-        let mut st = db
-            .prepare("SELECT welcome, voucher FROM welcomes WHERE mailbox = ?1")
-            .expect("static SQL");
-        if let Ok(rows) = st.query_map([k.0.as_slice()], |r| Ok((r.get(0)?, r.get(1)?))) {
-            for (welcome, voucher) in rows.filter_map(Result::ok) {
+    let db = state.db();
+    let read = || -> rusqlite::Result<Vec<WelcomeIn>> {
+        let t = db.unchecked_transaction()?;
+        let mut out = Vec::new();
+        let mut bytes = 0;
+        let mut sent = Vec::new();
+        'keys: for k in &cs.proven {
+            let mut st =
+                t.prepare("SELECT rowid, welcome, voucher FROM welcomes WHERE mailbox = ?1")?;
+            let mut rows = st.query([k.0.as_slice()])?;
+            while let Some(r) = rows.next()? {
+                let welcome: Vec<u8> = r.get(1)?;
+                let voucher: Vec<u8> = r.get(2)?;
+                let size = welcome.len() + voucher.len() + 64;
+                if !out.is_empty() && bytes + size > REPLY_BYTES {
+                    break 'keys;
+                }
+                bytes += size;
+                sent.push(r.get::<_, i64>(0)?);
                 out.push(WelcomeIn {
                     mailbox: *k,
                     welcome,
@@ -686,7 +793,14 @@ pub fn fetch_welcomes(state: &State, cs: &ConnState) -> Response {
                 });
             }
         }
-        let _ = db.execute("DELETE FROM welcomes WHERE mailbox = ?1", [k.0.as_slice()]);
+        for id in sent {
+            t.execute("DELETE FROM welcomes WHERE rowid = ?1", [id])?;
+        }
+        t.commit()?;
+        Ok(out)
+    };
+    match read() {
+        Ok(ws) => Response::Welcomes(ws),
+        Err(_) => Response::Error("could not read welcomes".into()),
     }
-    Response::Welcomes(out)
 }

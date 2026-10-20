@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +31,33 @@ pub struct Config {
     pub require_standard_suite: bool,
     /// Most connections served at once.
     pub max_connections: usize,
+    /// How long a connection may wait before Hello and between requests.
+    /// Not read from the file; tests shorten it.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub timing: Timing,
+}
+
+/// Seconds a client gets to say Hello once TLS is up.
+pub const HELLO_DEADLINE: Duration = Duration::from_secs(10);
+
+/// A connection that sends no request for this long is closed. Clients
+/// reconnect when they next need the server.
+pub const IDLE_LIMIT: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timing {
+    pub hello: Duration,
+    pub idle: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Timing {
+            hello: HELLO_DEADLINE,
+            idle: IDLE_LIMIT,
+        }
+    }
 }
 
 impl Default for Config {
@@ -44,6 +72,7 @@ impl Default for Config {
             members_can_invite: true,
             require_standard_suite: false,
             max_connections: 1000,
+            timing: Timing::default(),
         }
     }
 }

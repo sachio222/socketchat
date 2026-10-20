@@ -37,7 +37,7 @@ pub fn prove(state: &State, cs: &mut ConnState, key: Key, sig: Sig) -> Response 
     if !signed(cs, &key, &sig) {
         return refused("signature check failed; ask for a new challenge");
     }
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let known: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE key = ?1)
@@ -91,7 +91,7 @@ pub fn register_account(
         return refused("signature check failed; ask for a new challenge");
     }
     let now = state.now();
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let Some(inv) = load_invite(&db, &token) else {
         return refused("this invite link is not valid on this server");
     };
@@ -110,9 +110,23 @@ pub fn register_account(
             )
         }
         // A group invite: registers one account when the operator allows it.
-        // The group join itself spends the invite.
+        // The group join itself spends the invite. Once a mailbox has
+        // redeemed it, only that mailbox's connection may still take the
+        // account, and only until the join completes.
         Some(_) => {
-            if !state.cfg.members_can_invite || inv.account_used {
+            let unspent = inv.uses_left >= 1;
+            let redeemer: Option<Vec<u8>> = db
+                .query_row(
+                    "SELECT mailbox FROM joins WHERE token = ?1",
+                    [token.0.as_slice()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            let holds_mailbox =
+                redeemer.is_some_and(|m| cs.proven.iter().any(|k| k.0[..] == m[..]));
+            if !state.cfg.members_can_invite || inv.account_used || !(unspent || holds_mailbox) {
                 return refused("this invite link cannot register a new account");
             }
             db.execute(

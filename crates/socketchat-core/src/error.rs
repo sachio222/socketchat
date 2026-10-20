@@ -8,6 +8,8 @@ pub enum CoreError {
     NoProfile,
     #[error("a profile already exists here")]
     ProfileExists,
+    #[error("socketchat is already open on this profile.")]
+    ProfileInUse,
     #[error(transparent)]
     Net(#[from] crate::net::NetError),
     #[error("group encryption: {0}")]

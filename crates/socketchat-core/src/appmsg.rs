@@ -21,22 +21,27 @@ pub enum AppMsg {
     GroupName {
         name: String,
     },
-    /// An invite link's voucher and secret, so any member can check the
-    /// joiner's request and an admin can complete it.
+    /// An invite link's signed voucher and two keys derived from the link's
+    /// secret: one to check the joiner's request, one to seal the voucher
+    /// for them. Any admin can complete the join with these. The secret
+    /// itself stays with the link's maker and the joiner.
     Voucher {
         voucher: Voucher,
-        secret: [u8; 32],
+        mac_key: [u8; 32],
+        seal_key: [u8; 32],
     },
     /// A file uploaded in sealed chunks, with what it takes to open it.
     File(crate::files::FileOffer),
     /// Marks a group as a two-person direct message.
     IsDm,
     /// Asks the member with group key `to` to open a direct message: the new
-    /// chat is `group`, and `token` lets them register a mailbox in it.
+    /// chat is `group`, `token` lets them register a mailbox in it, and
+    /// `dm_key` is the asker's key in the new chat, the one that will add them.
     DmRequest {
         to: Key,
         group: GroupId,
         token: Token,
+        dm_key: Key,
     },
     /// Answers a DmRequest with KeyPackages for the new chat.
     DmAccept {
@@ -45,6 +50,12 @@ pub enum AppMsg {
         token: Token,
         #[serde(with = "serde_bytes")]
         key_packages: Vec<u8>,
+    },
+    /// A joiner's proof, made from the invite secret, that they hold the
+    /// link `token` belongs to. Only the link's maker can check it.
+    InviteProof {
+        token: Token,
+        proof: [u8; 32],
     },
 }
 

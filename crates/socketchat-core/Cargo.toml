@@ -34,5 +34,10 @@ tokio-rustls.workspace = true
 img-parts.workspace = true
 chacha20poly1305.workspace = true
 
+[features]
+# Hooks that let tests act as a hostile member or break a group on purpose.
+# Only socketchat-testkit turns this on; the shipped binary never has it.
+test-hooks = []
+
 [dev-dependencies]
 tempfile.workspace = true

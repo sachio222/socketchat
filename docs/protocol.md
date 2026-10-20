@@ -16,7 +16,7 @@ The first frame from the app must be `Hello { version }`. The protocol number in
 - `HelloOk { version }`: the server speaks this version; requests may follow.
 - `VersionMismatch { server }`: the server speaks another version and closes the connection.
 
-The server also closes the connection, without a reply, when the first frame is anything else or when it already serves `max_connections` connections.
+The server also closes the connection, without a reply, when the first frame is anything else, when no Hello arrives within 10 seconds, or when it already serves `max_connections` connections. Later it closes a connection that sends nothing for 5 minutes, or one that stops reading while 64 replies and pushes wait for it. Apps reconnect when they next need the server and fetch what they missed.
 
 ## Requests and responses
 
@@ -33,13 +33,13 @@ Most requests need the connection to have signed in with a key first, through `C
 | `RegisterAccount { token, key, sig }` | Registers a server account key with an invite token, and signs in with it. |
 | `RegisterMailbox { token, key, sig }` | Registers a group key as a mailbox. `token: Some` redeems a group invite; `None` reserves a mailbox for a group the signed-in account is about to create. |
 | `CreateGroup { group_info, ratchet_tree }` | Creates a group from an MLS GroupInfo and ratchet tree. The group must hold only its creator, as its only admin. |
-| `Post { group, mls, welcome }` | Adds an MLS message to the group log. A Commit that adds someone may carry a `WelcomeOut { token, welcome, voucher }` for the joiner, with `voucher` sealed as described under "Sealed voucher" below. |
-| `Fetch { group, after, limit }` | Returns log entries after sequence number `after`, at most 500 at a time. |
+| `Post { group, mls, welcome }` | Adds an MLS message to the group log. A Commit that adds someone may carry a `WelcomeOut { token, welcome, voucher }` for the joiner, with `voucher` sealed as described under "Sealed voucher" below. An MLS message over 1,047,552 bytes is refused. |
+| `Fetch { group, after, limit }` | Returns log entries after sequence number `after`: at most 500, and no more than fit about 900 KiB, but always at least one when there is one. Fetch again until the reply is empty. |
 | `Ack { group, seq }` | Says this mailbox has everything up to `seq`; entries every member has acknowledged are deleted. |
 | `Members { group }` | Lists the group's mailboxes and the sequence number at which each joined. |
-| `CreateInvite { group }` | Makes an invite token: for a group (`Some`), or for the server (`None`). |
-| `RedeemInvite { token, key_package, mac }` | Lodges a join request: KeyPackages and their HMAC, from the mailbox that redeemed the token. |
-| `PendingJoins { group }` | Lists join requests for a group that are less than 7 days old. |
+| `CreateInvite { group }` | Makes an invite token: for a group (`Some`), or for the server (`None`). An account can make 5 server invites per window (the link lifetime rounded up to days, plus a day). |
+| `RedeemInvite { token, key_package, mac }` | Lodges a join request: a postcard list of one or two KeyPackages, at most 8 KiB in all, each signed by the mailbox that redeemed the token, and their HMAC. |
+| `PendingJoins { group }` | Lists join requests for a group that are less than 7 days old, oldest first, as many as fit about 900 KiB. A request leaves the list when its Welcome is posted or it expires. |
 | `FetchWelcomes` | Returns and deletes Welcomes waiting for this connection's mailboxes. |
 | `FileBegin { group, size }` | Starts an upload and returns a file ID. Refused if `size` is over the server's limit. |
 | `FileChunk { file, index, data }` | Uploads one sealed chunk (at most 64 KiB plus a 16-byte tag), in order, from the sender only. |
@@ -68,7 +68,7 @@ Most requests need the connection to have signed in with a key first, through `C
 
 ### Sealed voucher
 
-The `voucher` field of `WelcomeOut` and `WelcomeIn` carries the inviter's signed voucher (see "Signed byte strings") sealed for the joiner, who holds the invite secret from the link. The server stores and forwards these bytes and has no key that opens them. A direct message carries an empty `voucher`.
+The `voucher` field of `WelcomeOut` and `WelcomeIn` carries the inviter's signed voucher (see "Signed byte strings") sealed for the joiner, who holds the invite secret from the link. The server stores and forwards these bytes and has no key that opens them. A direct message carries an empty `voucher`. Members who complete a join get the seal key, not the secret, from the inviter's `AppMsg::Voucher`.
 
 - **Plaintext:** the postcard-encoded `Voucher` struct from `keys.rs`: token, SHA-256 of the invite secret, group ID, inviter's group key, expiry, inviter's identity key and signature.
 - **Key:** HKDF-SHA256 with no salt, the 32-byte invite secret as input key material, and info `socketchat/v1/voucher-seal`, expanded to 32 bytes.
@@ -120,7 +120,9 @@ Numbers in parentheses are byte lengths.
 
 ## Other formats
 
-- **Invite MAC:** HMAC-SHA256 keyed by the 32-byte invite secret, over the KeyPackage bytes the joiner lodges.
+- **Keys derived from the invite secret:** HKDF-SHA256 with no salt and the 32-byte secret as input key material, expanded to 32 bytes, with info `socketchat/v1/invite-mac` (the MAC key), `socketchat/v1/voucher-seal` (the seal key) or `socketchat/v1/invite-proof` (the proof key). The inviter sends members the MAC and seal keys; the proof key never leaves the inviter and the joiner.
+- **Invite MAC:** HMAC-SHA256 under the MAC key, over the KeyPackage bytes the joiner lodges.
+- **Invite proof:** HMAC-SHA256 under the proof key, over group ID (16) ‖ the joiner's group key (32). The joiner posts it in the group as `AppMsg::InviteProof`; the inviter's app checks it before marking the joiner verified.
 - **KeyPackage bundle:** a postcard-encoded list of TLS-encoded KeyPackages, one per allowed suite (0x004F, then 0x0001). The member who adds the joiner picks the one matching the group's suite.
 - **Admin list:** GroupContext extension type `0xff00`, a run of entries, each a 2-byte big-endian length of 32 followed by a 32-byte Ed25519 key.
 - **Application messages:** inside MLS PrivateMessages, the postcard-encoded `AppMsg` enum from `crates/socketchat-core/src/appmsg.rs`.

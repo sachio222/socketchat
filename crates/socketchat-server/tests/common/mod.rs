@@ -95,6 +95,12 @@ impl Raw {
         self.s.flush().await.unwrap();
     }
 
+    /// Writes bytes as they are, for tests that pipeline many frames.
+    pub async fn send_raw(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.s.write_all(bytes).await?;
+        self.s.flush().await
+    }
+
     /// Next frame, or None when the server closed the connection.
     pub async fn recv(&mut self) -> Option<ServerFrame> {
         loop {

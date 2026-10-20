@@ -1,7 +1,8 @@
 //! The server's SQLite database. One file, WAL mode.
 //!
 //! It holds random keys, random IDs, encrypted bytes and timestamps. Nothing
-//! here links an account to a group or to the invite that created it.
+//! here links an account to a group or to the invite that created it, or to
+//! the invites it made: `invite_quota` keeps only a count and a day.
 
 use std::path::Path;
 
@@ -67,6 +68,11 @@ CREATE TABLE IF NOT EXISTS files (
     complete INTEGER NOT NULL DEFAULT 0,
     uploader BLOB NOT NULL,
     created_unix INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invite_quota (
+    account BLOB PRIMARY KEY,
+    since_unix INTEGER NOT NULL,
+    used INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS file_done (
     file_id BLOB NOT NULL,

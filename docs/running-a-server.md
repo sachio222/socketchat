@@ -85,6 +85,14 @@ sudo -u socketchat socketchat server init --data-dir /var/lib/socketchat --host 
 
 `socketchat server invite --data-dir /var/lib/socketchat` prints a one-time link that registers one new person. It works while the server runs.
 
+### Limits set in the server
+
+These limits are not in the config file:
+
+- **Connections.** An app must say hello within 10 seconds of connecting, and the server closes a connection that sends nothing for 5 minutes. Apps reconnect on their own the next time they need the server, so people see no error.
+- **Server invites from members.** When `members_can_invite` is `true`, each account can make 5 server invite links in a window that lasts the link lifetime rounded up to whole days, plus one day: two days with the default 24 hours. The next request gets "you have made 5 server invite links lately; try again in a day or two". Links you print with `socketchat server invite` do not count.
+- **Message size.** The server refuses an encrypted message over 1,047,552 bytes, just under the 1 MiB frame limit. Files are not affected, since they travel in 64 KiB pieces.
+
 ## Open the port
 
 People connect over TCP to the port in `listen`, 7444 by default. Invite links carry that same port number.

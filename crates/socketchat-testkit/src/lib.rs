@@ -57,6 +57,29 @@ impl TestServer {
         make_server_invite(self.dir.path()).expect("invite")
     }
 
+    /// Stops the server and starts a new one on the same port with fresh
+    /// data and a new certificate, as an operator who set it up again would.
+    pub async fn replace_with_fresh(self) -> TestServer {
+        let addr = self.addr();
+        self.handle.shutdown();
+        drop(self);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        for _ in 0..50 {
+            let dir = tempfile::tempdir().expect("temp dir");
+            init(dir.path(), "127.0.0.1").expect("init");
+            let mut cfg = Config::load(dir.path()).expect("config");
+            cfg.listen = addr;
+            match Server::start(cfg.clone()).await {
+                Ok(handle) => {
+                    cfg.save().expect("save config");
+                    return TestServer { dir, handle, cfg };
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            }
+        }
+        panic!("no new server on the old port");
+    }
+
     /// Stops the server and starts it again on the same port and data.
     pub async fn restart(&mut self) {
         self.handle.shutdown();

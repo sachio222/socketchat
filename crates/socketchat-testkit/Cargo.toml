@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 socketchat-proto.workspace = true
-socketchat-core.workspace = true
+socketchat-core = { workspace = true, features = ["test-hooks"] }
 socketchat-server.workspace = true
 tokio.workspace = true
 tempfile.workspace = true

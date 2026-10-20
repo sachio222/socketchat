@@ -17,12 +17,12 @@ use socketchat_proto::{InviteLink, Token};
 use crate::appmsg::AppMsg;
 use crate::invite::{key_package_blob, pick_key_package};
 use crate::keys::{
-    fingerprint, invite_mac, mac_matches, open_voucher, seal_voucher, Binding, GroupId, Key,
-    KeyPair, Voucher,
+    fingerprint, invite_mac, invite_mac_key, invite_proof, mac_matches, open_voucher,
+    proof_matches, seal_voucher, voucher_seal_key, Binding, GroupId, Key, KeyPair, Voucher,
 };
 use crate::net::{Conn, NetError};
 use crate::provider::Provider;
-use crate::store::{GroupRow, PendingJoin, Profile, Store};
+use crate::store::{GroupRow, PendingJoin, Profile, Store, StoredVoucher};
 use crate::suite::{
     admins_from, group_context_extensions, group_create_config, group_join_config, SUITE,
 };
@@ -135,11 +135,36 @@ pub enum Event {
     Reconnected,
 }
 
+/// A group this client is in. A commit it sent whose reply never came
+/// stays staged in `mls` (OpenMLS keeps it on disk) until the log shows
+/// whether it landed.
 struct Live {
     row: GroupRow,
     mls: MlsGroup,
-    /// A commit sent whose reply never came. The log says whether it landed.
-    sent_commit: Option<Vec<u8>>,
+}
+
+/// The server's answer when a mailbox is no longer in the group: this
+/// member was removed or their leave went through.
+pub const NOT_A_MEMBER: &str = "you are not a member of this group";
+
+/// Largest MLS message the server takes, in bytes: a frame of 1 MiB less
+/// room for the request around it.
+pub const MAX_MLS_BYTES: usize = 1_047_552;
+
+/// Errors that mean the connection to a server is gone, as opposed to one
+/// group or one request going wrong.
+fn connection_lost(e: &CoreError) -> bool {
+    matches!(
+        e,
+        CoreError::Net(
+            NetError::Disconnected
+                | NetError::Io(_)
+                | NetError::Timeout
+                | NetError::Tls(_)
+                | NetError::CertMismatch { .. }
+                | NetError::Version(_)
+        )
+    )
 }
 
 /// How often a member refreshes its own encryption keys in each group.
@@ -162,6 +187,22 @@ pub struct Client {
     dm_offers: HashMap<Token, (GroupId, Key)>,
     /// Direct-message steps to take once the current fetch is done.
     dm_todo: Vec<DmTodo>,
+    /// Groups already reported as out of step since this client opened.
+    drifted: HashSet<GroupId>,
+    #[cfg(feature = "test-hooks")]
+    hooks: Hooks,
+}
+
+/// What tests ask a client to do wrong on purpose.
+#[cfg(feature = "test-hooks")]
+#[derive(Default)]
+struct Hooks {
+    /// Groups whose every fetch fails.
+    broken: HashSet<GroupId>,
+    /// Groups whose next fetch the server refuses, with the reason given.
+    refuse_fetch: HashMap<GroupId, String>,
+    /// KeyPackages seen in direct-message answers meant for someone else.
+    dm_accepts_seen: Vec<Vec<u8>>,
 }
 
 enum DmTodo {
@@ -170,6 +211,7 @@ enum DmTodo {
         from: Key,
         group: GroupId,
         token: Token,
+        dm_key: Key,
     },
     Complete {
         group: GroupId,
@@ -190,27 +232,63 @@ fn mls_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::Mls(e.to_string())
 }
 
+fn too_large() -> CoreError {
+    CoreError::Other("that message is too large to send".into())
+}
+
 fn ser(m: &MlsMessageOut) -> Result<Vec<u8>, CoreError> {
     m.tls_serialize_detached().map_err(mls_err)
 }
 
-/// Pending joins for direct messages store this prefix and the requester's
-/// identity key in hex instead of an invite link.
+/// Pending joins for direct messages store this prefix instead of an
+/// invite link, then in hex and split by `:`: the asker's identity key,
+/// their key in the new chat, and the new chat's group ID.
 const DM_LINK_PREFIX: &str = "dm:";
+
+/// Who asked for a direct message, as a pending join remembers it.
+struct DmAsk {
+    identity: Key,
+    /// The asker's key in the new chat: the one that should add this member.
+    dm_key: Key,
+    group: GroupId,
+}
+
+impl DmAsk {
+    fn to_link(&self) -> String {
+        format!(
+            "{DM_LINK_PREFIX}{}:{}:{}",
+            hex(&self.identity.0),
+            hex(&self.dm_key.0),
+            hex(&self.group.0)
+        )
+    }
+
+    /// `None` for a pending join made before the asker's chat key was
+    /// recorded; such a join cannot be checked.
+    fn parse(rest: &str) -> Option<DmAsk> {
+        let mut parts = rest.split(':');
+        let ask = DmAsk {
+            identity: Key(hex_bytes(parts.next()?)?),
+            dm_key: Key(hex_bytes(parts.next()?)?),
+            group: GroupId(hex_bytes(parts.next()?)?),
+        };
+        parts.next().is_none().then_some(ask)
+    }
+}
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn hex_key(h: &str) -> Option<Key> {
-    if h.len() != 64 {
+fn hex_bytes<const N: usize>(h: &str) -> Option<[u8; N]> {
+    if h.len() != 2 * N {
         return None;
     }
-    let mut k = [0u8; 32];
+    let mut k = [0u8; N];
     for (i, b) in k.iter_mut().enumerate() {
         *b = u8::from_str_radix(h.get(2 * i..2 * i + 2)?, 16).ok()?;
     }
-    Some(Key(k))
+    Some(k)
 }
 
 fn short(k: &Key) -> String {
@@ -248,14 +326,7 @@ impl Client {
                 continue;
             }
             if let Some(mls) = MlsGroup::load(prov.storage(), &mls_gid(&row.id)).map_err(mls_err)? {
-                groups.insert(
-                    row.id,
-                    Live {
-                        row,
-                        mls,
-                        sent_commit: None,
-                    },
-                );
+                groups.insert(row.id, Live { row, mls });
             }
         }
         Ok(Client {
@@ -270,6 +341,9 @@ impl Client {
             leaves: HashSet::new(),
             dm_offers: HashMap::new(),
             dm_todo: Vec::new(),
+            drifted: HashSet::new(),
+            #[cfg(feature = "test-hooks")]
+            hooks: Hooks::default(),
         })
     }
 
@@ -341,8 +415,14 @@ impl Client {
                 .find(|s| s.id == server_id)
                 .ok_or_else(|| CoreError::Other("unknown server".into()))?;
             let c = Conn::connect(&row.host, row.port, row.cert_fpr).await?;
+            // An account the server no longer knows (it was set up again)
+            // must not stop the connection: a new server invite replaces it.
             if let Some(a) = &row.account {
-                c.prove(a).await?;
+                if let Err(e) = c.prove(a).await {
+                    if !matches!(e, NetError::Refused(_)) {
+                        return Err(e.into());
+                    }
+                }
             }
             for g in self
                 .groups
@@ -399,6 +479,38 @@ impl Client {
     /// Redeems an invite link: a server invite registers an account, a group
     /// invite lodges a join request.
     pub async fn join(&mut self, link: &InviteLink) -> Result<JoinStatus, CoreError> {
+        self.join_with(link, None).await
+    }
+
+    /// [`Client::join`], with the join request's MAC made under `mac_key`
+    /// instead of the key the link gives, when one is passed.
+    async fn join_with(
+        &mut self,
+        link: &InviteLink,
+        mac_key: Option<[u8; 32]>,
+    ) -> Result<JoinStatus, CoreError> {
+        // The person chose to trust this link, so its certificate wins over
+        // an older pin for the same address, for example after the operator
+        // set the server up again.
+        if let Some(old) = self.store.server_pin(&link.host, link.port)? {
+            if old != link.cert_fpr {
+                self.store
+                    .set_server_pin(&link.host, link.port, &link.cert_fpr)?;
+                if let Some(id) = self
+                    .store
+                    .servers()?
+                    .iter()
+                    .find(|s| s.host == link.host && s.port == link.port)
+                    .map(|s| s.id)
+                {
+                    self.conns.remove(&id);
+                }
+                self.emit(Event::Warning(format!(
+                    "The server at {} has a new certificate. socketchat now trusts the one in this link.",
+                    crate::sanitize::clean_name(&link.host)
+                )));
+            }
+        }
         let server_id = self
             .store
             .add_server(&link.host, link.port, &link.cert_fpr)?;
@@ -423,7 +535,7 @@ impl Client {
             }
         }
         let blob = key_package_blob(&self.prov, &key)?;
-        let mac = invite_mac(&secret, &blob);
+        let mac = invite_mac(&mac_key.unwrap_or_else(|| invite_mac_key(&secret)), &blob);
         self.store.save_pending_join(&PendingJoin {
             token: link.token,
             server_id,
@@ -457,8 +569,9 @@ impl Client {
         else {
             return Ok(());
         };
-        let dm_from: Option<Key> = pending.link.strip_prefix(DM_LINK_PREFIX).and_then(hex_key);
-        let link = match dm_from {
+        let dm_rest = pending.link.strip_prefix(DM_LINK_PREFIX);
+        let dm_ask = dm_rest.and_then(DmAsk::parse);
+        let link = match dm_rest {
             Some(_) => None,
             None => Some(
                 InviteLink::from_str(&pending.link).map_err(|e| CoreError::Other(e.to_string()))?,
@@ -491,20 +604,26 @@ impl Client {
             .unwrap_or((None, None));
         // A voucher that does not open under the link's secret counts as
         // missing: the invite could not be checked.
-        let voucher: Option<Voucher> = link_secret.and_then(|s| open_voucher(&s, &w.voucher));
+        let voucher: Option<Voucher> =
+            link_secret.and_then(|s| open_voucher(&voucher_seal_key(&s), &w.voucher));
         let verification = match (&voucher, inviter_fpr, link_secret, adder) {
-            _ if dm_from.is_some() => {
+            _ if dm_rest.is_some() => match &dm_ask {
                 // A direct message offered inside a shared group: the
-                // request came from that member, encrypted end to end.
-                let id = dm_from.expect("checked");
-                if self.store.is_trusted(&id)? {
-                    Verification::Verified
-                } else {
+                // request came from that member, encrypted end to end, and
+                // named the key that would add this member to which chat.
+                Some(ask) if adder != Some(ask.dm_key) || gid != ask.group => {
                     Verification::Unverified {
-                        reason: "you have not verified this person yet".into(),
+                        reason: "you were added by someone other than the person who asked".into(),
                     }
                 }
-            }
+                Some(ask) if self.store.is_trusted(&ask.identity)? => Verification::Verified,
+                Some(_) => Verification::Unverified {
+                    reason: "you have not verified this person yet".into(),
+                },
+                None => Verification::Unverified {
+                    reason: "the request could not be checked".into(),
+                },
+            },
             (Some(v), Some(fpr), Some(secret), Some(adder)) => match v.verify(&fpr, now) {
                 Err(e) => Verification::Unverified {
                     reason: e.to_string(),
@@ -536,7 +655,7 @@ impl Client {
             server_id: pending.server_id,
             key: pending.key.clone(),
             name: String::new(),
-            is_dm: dm_from.is_some(),
+            is_dm: dm_rest.is_some(),
             left: false,
             last_seq: 0,
             last_update_unix: now,
@@ -554,15 +673,21 @@ impl Client {
                 .set_member_profile(&gid, &v.inviter_group_key, &v.inviter_identity, "")?;
         }
         self.store.delete_pending_join(&pending.token)?;
-        self.groups.insert(
-            gid,
-            Live {
-                row,
-                mls,
-                sent_commit: None,
-            },
-        );
+        self.groups.insert(gid, Live { row, mls });
         self.post_profile(gid).await?;
+        // Tell the link's maker this member holds the link itself, which no
+        // other member can claim, so the maker can mark them verified.
+        if let Some(secret) = link_secret {
+            let proof = invite_proof(&secret, &gid, &pending.key.public());
+            self.send_app(
+                gid,
+                &AppMsg::InviteProof {
+                    token: pending.token,
+                    proof,
+                },
+            )
+            .await?;
+        }
         self.emit(Event::Joined {
             group: gid,
             verification,
@@ -631,14 +756,7 @@ impl Client {
         };
         self.store.add_group(&row)?;
         self.store.upsert_member(&gid, &key.public(), Some(0))?;
-        self.groups.insert(
-            gid,
-            Live {
-                row,
-                mls,
-                sent_commit: None,
-            },
-        );
+        self.groups.insert(gid, Live { row, mls });
         self.post_profile(gid).await?;
         if !name.is_empty() {
             self.send_app(
@@ -680,6 +798,9 @@ impl Client {
                 .create_message(&self.prov, &live.row.key, &msg.encode())
                 .map_err(mls_err)?;
             let bytes = ser(&out)?;
+            if bytes.len() > MAX_MLS_BYTES {
+                return Err(too_large());
+            }
             match self
                 .request(
                     server_id,
@@ -716,12 +837,23 @@ impl Client {
     ) -> Result<Option<u64>, CoreError> {
         let server_id = self.server_of(&gid)?;
         let bytes = ser(&commit)?;
+        let too_big = bytes.len() > MAX_MLS_BYTES
+            || welcome
+                .as_ref()
+                .is_some_and(|w| w.welcome.len() + w.voucher.len() > MAX_MLS_BYTES);
+        if too_big {
+            let live = self.groups.get_mut(&gid).expect("checked by server_of");
+            live.mls
+                .clear_pending_commit(self.prov.storage())
+                .map_err(mls_err)?;
+            return Err(too_large());
+        }
         let r = self
             .request(
                 server_id,
                 Request::Post {
                     group: gid,
-                    mls: bytes.clone(),
+                    mls: bytes,
                     welcome,
                 },
             )
@@ -738,9 +870,8 @@ impl Client {
             Err(CoreError::Net(
                 e @ (NetError::Disconnected | NetError::Timeout | NetError::Io(_)),
             )) => {
-                // The server may have taken it. Keep it staged until the log
-                // shows whether it landed.
-                live.sent_commit = Some(bytes);
+                // The server may have taken it. It stays staged, on disk too,
+                // until the log shows whether it landed.
                 Err(CoreError::Net(e))
             }
             Ok(Response::Conflict { .. }) => {
@@ -767,6 +898,7 @@ impl Client {
 
     /// Makes another member an admin.
     pub async fn make_admin(&mut self, gid: GroupId, member: &Key) -> Result<(), CoreError> {
+        self.settle_sent(gid).await?;
         for _ in 0..3 {
             let live = self
                 .groups
@@ -854,10 +986,29 @@ impl Client {
                 my_key,
                 expires_unix,
             );
-            self.store
-                .save_voucher(&gid, &token, &postcard::to_stdvec(&voucher)?, &secret)?;
-            self.send_app(gid, &AppMsg::Voucher { voucher, secret })
-                .await?;
+            let (mac_key, seal_key) = (invite_mac_key(&secret), voucher_seal_key(&secret));
+            self.store.save_voucher(
+                &gid,
+                &token,
+                &StoredVoucher {
+                    voucher: postcard::to_stdvec(&voucher)?,
+                    mac_key,
+                    seal_key,
+                    secret: Some(secret),
+                },
+            )?;
+            // Members get keys derived from the secret, never the secret: they
+            // can check and complete the join, but only the person holding
+            // the link can prove it to this client.
+            self.send_app(
+                gid,
+                &AppMsg::Voucher {
+                    voucher,
+                    mac_key,
+                    seal_key,
+                },
+            )
+            .await?;
             link.inviter_fpr = Some(fingerprint(&self.profile.identity.public()));
             link.secret = Some(secret);
         }
@@ -877,37 +1028,32 @@ impl Client {
         blob: Vec<u8>,
         mac: [u8; 32],
     ) -> Result<(), CoreError> {
-        let Some((vbytes, secret)) = self.store.voucher(&gid, &token)? else {
+        let Some(stored) = self.store.voucher(&gid, &token)? else {
             return Ok(());
         };
-        if !mac_matches(&secret, &blob, &mac) {
+        if !mac_matches(&stored.mac_key, &blob, &mac) {
             self.emit(Event::Warning(
                 "A request to join one of your groups failed its check and was ignored.".into(),
             ));
             return Ok(());
         }
-        let Ok(voucher) = postcard::from_bytes::<Voucher>(&vbytes) else {
+        let Ok(voucher) = postcard::from_bytes::<Voucher>(&stored.voucher) else {
             return Ok(());
         };
-        // Only the person who made the link vouches for whoever holds it,
-        // whichever member ends up adding them.
-        if voucher.inviter_identity == self.profile.identity.public() {
-            let suite = self.groups.get(&gid).map(|l| l.mls.ciphersuite());
-            if let Some(kp) = suite.and_then(|s| pick_key_package(&self.prov, &blob, s)) {
-                if let Some(j) = key_of(kp.leaf_node().signature_key().as_slice()) {
-                    self.store.expect_joiner(&gid, &j)?;
-                }
-            }
-        }
+        // The verified mark for the joiner comes later, from their proof
+        // that they hold the link itself (see `AppMsg::InviteProof`): every
+        // member can make this request's MAC, so it proves nothing about who
+        // sent it.
+        let mine = stored.secret.is_some();
+        self.settle_sent(gid).await?;
         for _ in 0..3 {
-            let me = self.profile.identity.public();
             let live = self
                 .groups
                 .get_mut(&gid)
                 .ok_or_else(|| CoreError::Other("no such group".into()))?;
             let my_key = live.row.key.public();
             let is_admin = admins_from(live.mls.extensions()).contains(&my_key);
-            if !is_admin && voucher.inviter_identity != me {
+            if !is_admin && !mine {
                 return Ok(());
             }
             let Some(kp) = pick_key_package(&self.prov, &blob, live.mls.ciphersuite()) else {
@@ -928,7 +1074,7 @@ impl Client {
                 welcome: ser(&welcome)?,
                 // Sealed under the invite secret: the server stores it but
                 // cannot read the inviter's identity key inside.
-                voucher: seal_voucher(&secret, &voucher),
+                voucher: seal_voucher(&stored.seal_key, &voucher),
             };
             match self.post_commit(gid, commit, Some(welcome)).await {
                 Ok(Some(seq)) => {
@@ -962,7 +1108,10 @@ impl Client {
 
     // ---------- receiving ----------
 
-    /// Fetches and applies everything new from every server.
+    /// Fetches and applies everything new from every server. A dropped
+    /// connection shows as [`Event::Disconnected`] and the next sync
+    /// reconnects; a problem with one group or one request shows as a
+    /// warning and the others carry on.
     pub async fn sync(&mut self) -> Result<(), CoreError> {
         let mut servers: Vec<i64> = self.groups.values().map(|g| g.row.server_id).collect();
         servers.extend(self.store.pending_joins()?.iter().map(|p| p.server_id));
@@ -977,34 +1126,55 @@ impl Client {
         servers.dedup();
         for server_id in servers {
             if let Err(e) = self.sync_server(server_id).await {
-                match e {
-                    CoreError::Net(
-                        NetError::Disconnected | NetError::Io(_) | NetError::Timeout,
-                    ) => {
-                        self.conns.remove(&server_id);
-                        self.emit(Event::Disconnected);
-                    }
-                    e => return Err(e),
+                if !connection_lost(&e) {
+                    return Err(e);
                 }
+                self.conns.remove(&server_id);
+                self.emit(Event::Disconnected);
             }
         }
         Ok(())
     }
 
+    /// "Book club", or a plain description for a chat with no name yet.
+    fn label(&self, gid: &GroupId) -> String {
+        match self.groups.get(gid) {
+            Some(l) if !l.row.name.is_empty() => l.row.name.clone(),
+            Some(l) if l.row.is_dm => "a direct message".into(),
+            _ => "a chat".into(),
+        }
+    }
+
+    /// Passes on a dropped connection, and turns any other error from one
+    /// group's step into a warning so the other groups carry on.
+    fn group_step(&mut self, r: Result<(), CoreError>, what: &str) -> Result<(), CoreError> {
+        match r {
+            Err(e) if connection_lost(&e) => Err(e),
+            Err(e) => {
+                self.emit(Event::Warning(format!("{what}: {e}")));
+                Ok(())
+            }
+            Ok(()) => Ok(()),
+        }
+    }
+
     async fn sync_server(&mut self, server_id: i64) -> Result<(), CoreError> {
-        let mut join_requests = Vec::new();
+        let mut pushed: Vec<(GroupId, socketchat_proto::msg::JoinRequest)> = Vec::new();
         {
             let c = self.conn(server_id).await?;
             while let Some(p) = c.try_push() {
                 if let Push::JoinRequest { group, request } = p {
-                    join_requests.push((group, request));
+                    pushed.push((group, request));
                 }
             }
         }
         if let Response::Welcomes(ws) = self.request(server_id, Request::FetchWelcomes).await? {
             for w in ws {
                 if let Err(e) = self.handle_welcome(w).await {
-                    self.emit(Event::Warning(format!("could not join a group: {e}")));
+                    if connection_lost(&e) {
+                        return Err(e);
+                    }
+                    self.emit(Event::Warning(format!("Could not join a group: {e}")));
                 }
             }
         }
@@ -1014,16 +1184,11 @@ impl Client {
             .filter(|g| g.row.server_id == server_id)
             .map(|g| g.row.id)
             .collect();
-        for gid in gids {
-            self.fetch_group(gid).await?;
-            if !self.groups.contains_key(&gid) {
-                continue;
-            }
-            if let Response::Joins(js) = self
-                .request(server_id, Request::PendingJoins { group: gid })
-                .await?
-            {
-                join_requests.extend(js.into_iter().map(|j| (gid, j)));
+        for gid in &gids {
+            if self.groups.contains_key(gid) {
+                let r = self.fetch_group(*gid).await;
+                let what = format!("Could not fetch new messages in {}", self.label(gid));
+                self.group_step(r, &what)?;
             }
         }
         let todo: Vec<DmTodo> = std::mem::take(&mut self.dm_todo);
@@ -1034,23 +1199,22 @@ impl Client {
                     from,
                     group,
                     token,
-                } => self.accept_dm(shared, from, group, token).await,
+                    dm_key,
+                } => self.accept_dm(shared, from, group, token, dm_key).await,
                 DmTodo::Complete {
                     group,
                     token,
                     key_packages,
                 } => self.complete_dm(group, token, key_packages).await,
             };
-            if let Err(e) = r {
-                self.emit(Event::Warning(format!(
-                    "could not open the direct message: {e}"
-                )));
-            }
+            self.group_step(r, "Could not open the direct message")?;
         }
         let leaving: Vec<GroupId> = self.leaves.drain().collect();
         for gid in leaving {
             if self.groups.contains_key(&gid) {
-                self.commit_leaves(gid).await?;
+                let r = self.commit_leaves(gid).await;
+                let what = format!("Could not let someone leave {}", self.label(&gid));
+                self.group_step(r, &what)?;
             }
         }
         let now = self.now();
@@ -1062,51 +1226,127 @@ impl Client {
             .map(|g| g.row.id)
             .collect();
         for gid in stale {
-            self.update_keys(gid).await?;
+            let r = self.update_keys(gid).await;
+            let what = format!("Could not refresh your keys in {}", self.label(&gid));
+            self.group_step(r, &what)?;
         }
         let owed: Vec<GroupId> = self.repost.drain().collect();
         for gid in owed {
             if self.groups.contains_key(&gid) {
-                self.post_profile(gid).await?;
+                let r = self.post_profile(gid).await;
+                let what = format!("Could not share your name in {}", self.label(&gid));
+                self.group_step(r, &what)?;
             }
         }
+        // Join requests: the ones pushed live, then each group's waiting
+        // list one page at a time. A request this client cannot or will not
+        // complete stays on the server's list, so each token is tried once
+        // per sync and a page with nothing new ends the loop.
         let mut seen = HashSet::new();
-        for (gid, j) in join_requests {
+        for (gid, j) in pushed {
             if seen.insert(j.token) && self.groups.contains_key(&gid) {
-                self.handle_join_request(gid, j.token, j.key_package, j.mac)
-                    .await?;
+                let r = self
+                    .handle_join_request(gid, j.token, j.key_package, j.mac)
+                    .await;
+                self.group_step(r, "Could not let someone in")?;
+            }
+        }
+        for gid in gids {
+            let r = self.handle_waiting_joins(server_id, gid, &mut seen).await;
+            let what = format!(
+                "Could not check who is waiting to join {}",
+                self.label(&gid)
+            );
+            self.group_step(r, &what)?;
+        }
+        Ok(())
+    }
+
+    /// Works through a group's waiting join requests, a page at a time.
+    async fn handle_waiting_joins(
+        &mut self,
+        server_id: i64,
+        gid: GroupId,
+        seen: &mut HashSet<Token>,
+    ) -> Result<(), CoreError> {
+        /// More pages than this in one sync wait for the next one.
+        const MAX_PAGES: usize = 20;
+        for _ in 0..MAX_PAGES {
+            if !self.groups.contains_key(&gid) {
+                return Ok(());
+            }
+            let Response::Joins(js) = self
+                .request(server_id, Request::PendingJoins { group: gid })
+                .await?
+            else {
+                return Ok(());
+            };
+            let fresh: Vec<_> = js.into_iter().filter(|j| seen.insert(j.token)).collect();
+            if fresh.is_empty() {
+                return Ok(());
+            }
+            for j in fresh {
+                if !self.groups.contains_key(&gid) {
+                    return Ok(());
+                }
+                let r = self
+                    .handle_join_request(gid, j.token, j.key_package, j.mac)
+                    .await;
+                self.group_step(r, "Could not let someone in")?;
             }
         }
         Ok(())
     }
 
-    /// Fetches a group's new log entries and applies them in order.
+    /// Fetches a group's new log entries and applies them in order, until
+    /// the server has nothing more. A commit of this client's own still
+    /// staged once the log runs out never reached the server, so it goes.
     pub(crate) async fn fetch_group(&mut self, gid: GroupId) -> Result<(), CoreError> {
         let server_id = self.server_of(&gid)?;
         loop {
             let after = self.groups[&gid].row.last_seq;
-            let fetched = self
-                .request(
-                    server_id,
-                    Request::Fetch {
-                        group: gid,
-                        after,
-                        limit: 500,
-                    },
-                )
-                .await;
+            #[cfg(feature = "test-hooks")]
+            let fault = self.hooks.fetch_fault(gid);
+            #[cfg(not(feature = "test-hooks"))]
+            let fault: Option<CoreError> = None;
+            let fetched = match fault {
+                Some(e) => Err(e),
+                None => {
+                    self.request(
+                        server_id,
+                        Request::Fetch {
+                            group: gid,
+                            after,
+                            limit: 500,
+                        },
+                    )
+                    .await
+                }
+            };
             let es = match fetched {
                 Ok(Response::Entries(es)) => es,
                 Ok(_) => return Ok(()),
-                // The server dropped this mailbox: this member was removed
-                // or their leave went through.
-                Err(CoreError::Net(NetError::Refused(_))) => return self.forget_group(gid),
+                Err(CoreError::Net(NetError::Refused(why))) if why == NOT_A_MEMBER => {
+                    return self.forget_group(gid);
+                }
+                Err(CoreError::Net(NetError::Refused(why))) => {
+                    let label = self.label(&gid);
+                    self.emit(Event::Warning(format!(
+                        "The server would not send new messages in {label}: {why}"
+                    )));
+                    return Ok(());
+                }
                 Err(e) => return Err(e),
             };
             let Some(last) = es.last().map(|e| e.seq) else {
+                let live = self.groups.get_mut(&gid).expect("caller checked");
+                if live.mls.pending_commit().is_some() {
+                    live.mls
+                        .clear_pending_commit(self.prov.storage())
+                        .map_err(mls_err)?;
+                }
                 return Ok(());
             };
-            let full = es.len() == 500;
             for e in es {
                 self.apply_entry(gid, e).await?;
                 if !self.groups.contains_key(&gid) {
@@ -1122,40 +1362,38 @@ impl Client {
                     },
                 )
                 .await;
-            if !full {
-                return Ok(());
-            }
         }
     }
 
     async fn apply_entry(&mut self, gid: GroupId, e: Entry) -> Result<(), CoreError> {
+        let now = self.now();
         let live = self.groups.get_mut(&gid).expect("caller checked");
         if e.seq <= live.row.last_seq {
             return Ok(());
         }
         live.row.last_seq = e.seq;
         self.store.set_last_seq(&gid, e.seq)?;
-        if let Some(sent) = live.sent_commit.take() {
-            if sent == e.mls {
-                live.mls.merge_pending_commit(&self.prov).map_err(mls_err)?;
-                let now = crate::now_unix() + self.clock_offset;
-                live.row.last_update_unix = now;
-                self.store.set_last_update(&gid, now)?;
-                return Ok(());
-            }
-            live.mls
-                .clear_pending_commit(self.prov.storage())
-                .map_err(mls_err)?;
-        }
         let Ok(pm) =
             MlsMessageIn::tls_deserialize_exact(&e.mls).map(|m| m.try_into_protocol_message())
         else {
             return Ok(());
         };
         let Ok(pm) = pm else { return Ok(()) };
-        // Our own messages and anything from before we joined do not open.
-        let Ok(processed) = live.mls.process_message(&self.prov, pm) else {
-            return Ok(());
+        let local = live.mls.epoch().as_u64();
+        let epoch = pm.epoch().as_u64();
+        let is_commit = pm.content_type() == ContentType::Commit;
+        let processed = match live.mls.process_message(&self.prov, pm) {
+            Ok(p) => p,
+            Err(_) => {
+                // Anything from before this member joined, or already
+                // applied, does not open and needs nothing. A commit for the
+                // current epoch, or any message from a later one, means this
+                // app missed a change the others made.
+                if epoch > local || (is_commit && epoch == local) {
+                    self.report_drift(gid);
+                }
+                return Ok(());
+            }
         };
         let sender = match processed.sender() {
             Sender::Member(i) => live
@@ -1177,11 +1415,34 @@ impl Client {
                 self.leaves.insert(gid);
             }
             ProcessedMessageContent::StagedCommitMessage(sc) => {
+                // Someone else's commit for this epoch: merging it also drops
+                // any commit of this client's own still staged.
                 self.apply_commit(gid, e.seq, *sc).await?;
+            }
+            ProcessedMessageContent::OwnPendingCommit => {
+                // This client's own commit, whose reply never came.
+                live.mls.merge_pending_commit(&self.prov).map_err(mls_err)?;
+                live.row.last_update_unix = now;
+                self.store.set_last_update(&gid, now)?;
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Says once per session that a group fell out of step with the others.
+    fn report_drift(&mut self, gid: GroupId) {
+        if !self.drifted.insert(gid) {
+            return;
+        }
+        let what = match self.groups.get(&gid) {
+            Some(l) if !l.row.name.is_empty() => format!("The chat {}", l.row.name),
+            Some(l) if l.row.is_dm => "A direct message".into(),
+            _ => "A chat".into(),
+        };
+        self.emit(Event::Warning(format!(
+            "{what} fell out of step. Ask an admin to remove you and invite you again."
+        )));
     }
 
     async fn apply_commit(
@@ -1293,14 +1554,57 @@ impl Client {
                 }
                 self.emit(Event::GroupRenamed { group: gid });
             }
-            AppMsg::Voucher { voucher, secret } => {
-                if voucher.group == gid && voucher.secret_matches(&secret) {
+            AppMsg::Voucher {
+                voucher,
+                mac_key,
+                seal_key,
+            } => {
+                // Only the inviter can post their own voucher: it must be
+                // signed by the identity this sender proved in their profile,
+                // and name this sender's key in this group.
+                let bound = self
+                    .store
+                    .members(&gid)?
+                    .into_iter()
+                    .find(|m| m.key == sender)
+                    .and_then(|m| m.identity);
+                let genuine = voucher.group == gid
+                    && voucher.inviter_group_key == sender
+                    && bound == Some(voucher.inviter_identity)
+                    && voucher
+                        .verify(&fingerprint(&voucher.inviter_identity), self.now())
+                        .is_ok();
+                if genuine {
                     self.store.save_voucher(
                         &gid,
                         &voucher.token,
-                        &postcard::to_stdvec(&voucher)?,
-                        &secret,
+                        &StoredVoucher {
+                            voucher: postcard::to_stdvec(&voucher)?,
+                            mac_key,
+                            seal_key,
+                            secret: None,
+                        },
                     )?;
+                }
+            }
+            AppMsg::InviteProof { token, proof } => {
+                // Only a link this client made holds the secret to check it.
+                let secret = self.store.voucher(&gid, &token)?.and_then(|v| v.secret);
+                if let Some(secret) = secret {
+                    if proof_matches(&secret, &gid, &sender, &proof) {
+                        let identity = self
+                            .store
+                            .members(&gid)?
+                            .into_iter()
+                            .find(|m| m.key == sender)
+                            .and_then(|m| m.identity);
+                        match identity {
+                            Some(id) => self.store.trust(&id)?,
+                            // Their profile has not arrived: trust it when it does.
+                            None => self.store.expect_joiner(&gid, &sender)?,
+                        }
+                        self.emit(Event::MembersChanged { group: gid });
+                    }
                 }
             }
             AppMsg::File(offer) => {
@@ -1323,13 +1627,19 @@ impl Client {
                     l.row.is_dm = true;
                 }
             }
-            AppMsg::DmRequest { to, group, token } => {
+            AppMsg::DmRequest {
+                to,
+                group,
+                token,
+                dm_key,
+            } => {
                 if self.my_group_key(gid) == Some(to) {
                     self.dm_todo.push(DmTodo::Accept {
                         shared: gid,
                         from: sender,
                         group,
                         token,
+                        dm_key,
                     });
                 }
             }
@@ -1339,6 +1649,10 @@ impl Client {
                 token,
                 key_packages,
             } => {
+                #[cfg(feature = "test-hooks")]
+                if self.my_group_key(gid) != Some(to) {
+                    self.hooks.dm_accepts_seen.push(key_packages.clone());
+                }
                 if self.my_group_key(gid) == Some(to)
                     && self.dm_offers.get(&token) == Some(&(group, sender))
                 {
@@ -1542,25 +1856,21 @@ impl Client {
         self.groups.get(&gid).map(|g| g.mls.epoch().as_u64())
     }
 
-    /// Settles a commit whose reply was lost: if the server took it, apply
-    /// it; if not, drop it.
+    /// Settles a commit whose reply was lost: reads the log to its end. If
+    /// the server took the commit, it is applied on the way; if another
+    /// commit for that epoch came first, that one wins; if the log ends
+    /// without it, it is dropped.
     pub async fn resolve_pending(&mut self, gid: GroupId) -> Result<(), CoreError> {
-        self.fetch_group(gid).await?;
-        if let Some(live) = self.groups.get_mut(&gid) {
-            if live.sent_commit.take().is_some() {
-                live.mls
-                    .clear_pending_commit(self.prov.storage())
-                    .map_err(mls_err)?;
-            }
-        }
-        Ok(())
+        self.fetch_group(gid).await
     }
 
+    /// Settles any commit still staged before making or sending anything
+    /// new in the group.
     async fn settle_sent(&mut self, gid: GroupId) -> Result<(), CoreError> {
         if self
             .groups
             .get(&gid)
-            .is_some_and(|g| g.sent_commit.is_some())
+            .is_some_and(|g| g.mls.pending_commit().is_some())
         {
             self.resolve_pending(gid).await?;
         }
@@ -1665,6 +1975,7 @@ impl Client {
     /// the server requires.
     async fn commit_leaves(&mut self, gid: GroupId) -> Result<(), CoreError> {
         let server_id = self.server_of(&gid)?;
+        self.settle_sent(gid).await?;
         for _ in 0..3 {
             let live = self
                 .groups
@@ -1756,12 +2067,14 @@ impl Client {
             return Err(CoreError::Net(NetError::Unexpected("no invite".into())));
         };
         self.dm_offers.insert(token, (dm, *member));
+        let dm_key = self.groups[&dm].row.key.public();
         self.send_app(
             shared,
             &AppMsg::DmRequest {
                 to: *member,
                 group: dm,
                 token,
+                dm_key,
             },
         )
         .await?;
@@ -1774,6 +2087,7 @@ impl Client {
         from: Key,
         group: GroupId,
         token: Token,
+        dm_key: Key,
     ) -> Result<(), CoreError> {
         let server_id = self.server_of(&shared)?;
         let from_identity = self
@@ -1794,7 +2108,12 @@ impl Client {
         self.store.save_pending_join(&PendingJoin {
             token,
             server_id,
-            link: format!("{DM_LINK_PREFIX}{}", hex(&from_identity.0)),
+            link: DmAsk {
+                identity: from_identity,
+                dm_key,
+                group,
+            }
+            .to_link(),
             key,
             lodged_unix: self.now(),
         })?;
@@ -1817,6 +2136,10 @@ impl Client {
         token: Token,
         key_packages: Vec<u8>,
     ) -> Result<(), CoreError> {
+        if !self.groups.contains_key(&group) {
+            return Err(CoreError::Other("the direct message is gone".into()));
+        }
+        self.settle_sent(group).await?;
         let live = self
             .groups
             .get_mut(&group)
@@ -2030,5 +2353,94 @@ impl Client {
             .request(server_id, Request::FileDone { file: id })
             .await;
         Ok(saved)
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl Hooks {
+    /// The failure a test set up for this group's next fetch, if any.
+    fn fetch_fault(&mut self, gid: GroupId) -> Option<CoreError> {
+        if self.broken.contains(&gid) {
+            return Some(CoreError::Other("this group was broken for a test".into()));
+        }
+        self.refuse_fetch
+            .remove(&gid)
+            .map(|why| CoreError::Net(NetError::Refused(why)))
+    }
+}
+
+/// Hooks for tests that play a hostile member or a failing server. Only
+/// built with the `test-hooks` feature, which the shipped binary never has.
+#[cfg(feature = "test-hooks")]
+impl Client {
+    /// Posts any application message, as a hostile member could.
+    pub async fn test_send_app(&mut self, gid: GroupId, msg: &AppMsg) -> Result<u64, CoreError> {
+        self.send_app(gid, msg).await
+    }
+
+    /// The key this client checks join requests for `token` with.
+    pub fn test_invite_mac_key(&self, gid: GroupId, token: Token) -> Option<[u8; 32]> {
+        self.store
+            .voucher(&gid, &token)
+            .ok()
+            .flatten()
+            .map(|v| v.mac_key)
+    }
+
+    /// Joins with a group link, making the request's MAC under `mac_key`.
+    pub async fn test_join_with_mac_key(
+        &mut self,
+        link: &InviteLink,
+        mac_key: [u8; 32],
+    ) -> Result<JoinStatus, CoreError> {
+        self.join_with(link, Some(mac_key)).await
+    }
+
+    /// Forgets a staged commit without looking at the log, the way an old
+    /// bug did.
+    pub fn test_drop_pending_commit(&mut self, gid: GroupId) {
+        if let Some(live) = self.groups.get_mut(&gid) {
+            let _ = live.mls.clear_pending_commit(self.prov.storage());
+        }
+    }
+
+    /// Makes every fetch of this group fail.
+    pub fn test_break_group(&mut self, gid: GroupId) {
+        self.hooks.broken.insert(gid);
+    }
+
+    /// Makes the server's next fetch of this group come back refused.
+    pub fn test_refuse_next_fetch(&mut self, gid: GroupId, why: &str) {
+        self.hooks.refuse_fetch.insert(gid, why.to_string());
+    }
+
+    /// KeyPackages this client saw in direct-message answers meant for
+    /// someone else.
+    pub fn test_dm_accepts_seen(&self) -> Vec<Vec<u8>> {
+        self.hooks.dm_accepts_seen.clone()
+    }
+
+    /// Adds the owner of a KeyPackage blob to one of this client's groups
+    /// and returns the Welcome instead of sending it.
+    pub async fn test_add_and_keep_welcome(
+        &mut self,
+        gid: GroupId,
+        blob: &[u8],
+    ) -> Result<Vec<u8>, CoreError> {
+        let live = self
+            .groups
+            .get_mut(&gid)
+            .ok_or_else(|| CoreError::Other("no such group".into()))?;
+        let kp = pick_key_package(&self.prov, blob, live.mls.ciphersuite())
+            .ok_or_else(|| CoreError::Other("no usable KeyPackage".into()))?;
+        let (commit, welcome, _) = live
+            .mls
+            .add_members(&self.prov, &live.row.key, &[kp])
+            .map_err(mls_err)?;
+        let welcome = ser(&welcome)?;
+        self.post_commit(gid, commit, None)
+            .await?
+            .ok_or_else(|| CoreError::Other("the group moved on".into()))?;
+        Ok(welcome)
     }
 }

@@ -285,7 +285,11 @@ impl Conn {
                 Err(NetError::Timeout)
             }
             Ok(Err(_)) => Err(NetError::Disconnected),
-            Ok(Ok(Response::Error(e))) => Err(NetError::Server(e)),
+            // The server's own words reach people's screens: no escape codes.
+            Ok(Ok(Response::Error(e))) => Err(NetError::Server(crate::sanitize::clean_text(&e))),
+            Ok(Ok(Response::Refused(why))) => {
+                Ok(Response::Refused(crate::sanitize::clean_text(&why)))
+            }
             Ok(Ok(r)) => Ok(r),
         }
     }

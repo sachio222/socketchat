@@ -17,7 +17,7 @@ pub mod tls;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rand_core::{OsRng, RngCore};
 use rusqlite::{params, Connection};
@@ -166,9 +166,23 @@ pub(crate) struct State {
     clock_offset: AtomicU64,
     pub conns: AtomicUsize,
     pub online: conn::Online,
+    /// Replies and pushes waiting to be written, over every connection.
+    pub queued: Arc<AtomicUsize>,
+}
+
+/// Locks `m` even when a thread panicked while holding it. Requests that
+/// change several rows run in a transaction, which a panic rolls back, so
+/// what the lock guards stays whole.
+pub(crate) fn relock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl State {
+    /// The database, locked.
+    pub fn db(&self) -> MutexGuard<'_, Connection> {
+        relock(&self.db)
+    }
+
     pub fn now(&self) -> u64 {
         system_now() + self.clock_offset.load(Ordering::Relaxed)
     }
@@ -212,6 +226,7 @@ impl Server {
             clock_offset: AtomicU64::new(0),
             conns: AtomicUsize::new(0),
             online: Default::default(),
+            queued: Arc::new(AtomicUsize::new(0)),
         });
         let (stop, stop_rx) = watch::channel(false);
         let sweeper = state.clone();
@@ -269,11 +284,36 @@ impl ServerHandle {
     pub fn config(&self) -> &Config {
         &self.state.cfg
     }
+
+    /// Frames waiting to be written, over every connection. For tests.
+    #[doc(hidden)]
+    pub fn queued_frames(&self) -> usize {
+        self.state.queued.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn relock_recovers_from_a_panic() {
+        let m = Arc::new(Mutex::new(1));
+        let m2 = m.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("boom");
+        })
+        .join();
+        assert!(m.is_poisoned());
+        *relock(&m) += 1;
+        assert_eq!(*relock(&m), 2);
     }
 }
 

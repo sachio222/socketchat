@@ -262,3 +262,103 @@ fn two_people_chat_through_binary() {
     assert!(o.status.success(), "{s2}");
     assert!(s2.contains("Ada: hello from the command line"), "{s2}");
 }
+
+/// A server that answers every request with a refusal full of terminal
+/// escape codes, as a hostile operator could.
+fn hostile_server() -> (tempfile::TempDir, String) {
+    use socketchat_proto::msg::{from_body, to_frame, ClientFrame, Request, Response, ServerFrame};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let dir = tempfile::tempdir().unwrap();
+    socketchat_server::init(dir.path(), "127.0.0.1").unwrap();
+    let mut link = socketchat_server::make_server_invite(dir.path()).unwrap();
+    let acceptor = socketchat_server::tls::acceptor(dir.path()).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    link.port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let mut dec = socketchat_proto::FrameDecoder::default();
+                    let mut buf = vec![0u8; 4096];
+                    loop {
+                        while let Ok(Some(b)) = dec.next_frame() {
+                            let reply = match from_body::<ClientFrame>(&b) {
+                                Ok(ClientFrame::Hello { version }) => {
+                                    ServerFrame::HelloOk { version }
+                                }
+                                Ok(ClientFrame::Req {
+                                    id,
+                                    body: Request::Challenge,
+                                }) => ServerFrame::Resp {
+                                    id,
+                                    body: Response::Challenge([1; 32]),
+                                },
+                                Ok(ClientFrame::Req { id, .. }) => ServerFrame::Resp {
+                                    id,
+                                    body: Response::Refused(
+                                        "\x1b]0;pwned\x07\x1b[2Jgo away".into(),
+                                    ),
+                                },
+                                Err(_) => return,
+                            };
+                            if tls.write_all(&to_frame(&reply).unwrap()).await.is_err() {
+                                return;
+                            }
+                        }
+                        match tls.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => dec.push(&buf[..n]),
+                        }
+                    }
+                });
+            }
+        });
+    });
+    (dir, link.to_string())
+}
+
+#[test]
+fn server_refusals_reach_the_terminal_without_escape_codes() {
+    let (_dir, link) = hostile_server();
+    let home = tempfile::tempdir().unwrap();
+    let o = run(home.path(), &["join", &link]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    let said = out(&o);
+    assert!(said.contains("go away"), "{said:?}");
+    assert!(!said.contains('\x1b') && !said.contains('\x07'), "{said:?}");
+}
+
+#[test]
+fn second_process_on_one_profile_is_told_and_exits_1() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let open = rt
+        .block_on(socketchat_core::client::Client::open(&ada, pass()))
+        .unwrap();
+    let o = run(&ada, &["log", "--group", "x"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("socketchat is already open on this profile."),
+        "{}",
+        out(&o)
+    );
+    drop(open);
+    let o = run(&ada, &["new", "Later"]);
+    assert!(o.status.success(), "{}", out(&o));
+}

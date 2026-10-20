@@ -2,7 +2,11 @@
 //!
 //! One SQLCipher file holds everything: the app's own tables and OpenMLS's
 //! group state. The key comes from the person's passphrase through Argon2id
-//! with a random salt kept beside the file. The salt is not secret.
+//! with a random salt kept beside the file, together with the Argon2id
+//! settings it was made with. Neither is secret.
+//!
+//! One app at a time opens a profile: the store holds an operating-system
+//! lock on a file in the profile folder for as long as it is open.
 
 use std::path::{Path, PathBuf};
 
@@ -18,11 +22,79 @@ use socketchat_proto::Token;
 
 pub const DB_FILE: &str = "socketchat.db";
 pub const SALT_FILE: &str = "salt";
+/// Held locked while an app has the profile open.
+pub const LOCK_FILE: &str = "lock";
 
-/// Argon2id settings: OWASP's recommended minimum (19 MiB, 2 passes), so a
-/// Raspberry Pi opens a profile in well under a second.
+/// Argon2id settings for new profiles: OWASP's recommended minimum (19 MiB,
+/// 2 passes, 1 lane), so a Raspberry Pi opens a profile in well under a
+/// second. Each profile stores the settings it was made with, so raising
+/// these later never locks anyone out.
 const ARGON_MEM_KIB: u32 = 19 * 1024;
 const ARGON_PASSES: u32 = 2;
+const ARGON_LANES: u32 = 1;
+
+/// The salt file starts with these bytes when it also holds the Argon2id
+/// settings: `sckdf`, then format version 1.
+const KDF_MAGIC: &[u8; 6] = b"sckdf\x01";
+const SALT_LEN: usize = 16;
+
+/// Argon2id settings and salt for one profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Kdf {
+    mem_kib: u32,
+    passes: u32,
+    lanes: u32,
+    salt: [u8; SALT_LEN],
+}
+
+impl Kdf {
+    fn new() -> Kdf {
+        let mut salt = [0u8; SALT_LEN];
+        OsRng.fill_bytes(&mut salt);
+        Kdf {
+            mem_kib: ARGON_MEM_KIB,
+            passes: ARGON_PASSES,
+            lanes: ARGON_LANES,
+            salt,
+        }
+    }
+
+    /// The salt file: [`KDF_MAGIC`], memory in KiB, passes and lanes as
+    /// big-endian u32, then the salt.
+    fn encode(&self) -> Vec<u8> {
+        let mut v = KDF_MAGIC.to_vec();
+        for n in [self.mem_kib, self.passes, self.lanes] {
+            v.extend_from_slice(&n.to_be_bytes());
+        }
+        v.extend_from_slice(&self.salt);
+        v
+    }
+
+    /// Reads a salt file. A bare 16-byte salt comes from a profile made
+    /// before the settings were stored, which used today's defaults.
+    fn decode(b: &[u8]) -> Result<Kdf, CoreError> {
+        let bad = || CoreError::Storage("the profile's salt file is damaged".into());
+        if b.len() == SALT_LEN {
+            return Ok(Kdf {
+                mem_kib: ARGON_MEM_KIB,
+                passes: ARGON_PASSES,
+                lanes: ARGON_LANES,
+                salt: b.try_into().map_err(|_| bad())?,
+            });
+        }
+        let rest = b.strip_prefix(KDF_MAGIC.as_slice()).ok_or_else(bad)?;
+        if rest.len() != 12 + SALT_LEN {
+            return Err(bad());
+        }
+        let n = |i: usize| u32::from_be_bytes(rest[i..i + 4].try_into().expect("4 bytes"));
+        Ok(Kdf {
+            mem_kib: n(0),
+            passes: n(4),
+            lanes: n(8),
+            salt: rest[12..].try_into().map_err(|_| bad())?,
+        })
+    }
+}
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS profile (
@@ -109,18 +181,20 @@ pub struct Profile {
 pub struct Store {
     conn: Connection,
     dir: PathBuf,
+    /// Locked for as long as this store is open; dropping it unlocks.
+    _lock: std::fs::File,
 }
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, CoreError> {
-    let params = Params::new(ARGON_MEM_KIB, ARGON_PASSES, 1, Some(32))
+fn derive_key(passphrase: &str, kdf: &Kdf) -> Result<Zeroizing<[u8; 32]>, CoreError> {
+    let params = Params::new(kdf.mem_kib, kdf.passes, kdf.lanes, Some(32))
         .map_err(|e| CoreError::Other(e.to_string()))?;
     let mut key = Zeroizing::new([0u8; 32]);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(passphrase.as_bytes(), salt, key.as_mut())
+        .hash_password_into(passphrase.as_bytes(), &kdf.salt, key.as_mut())
         .map_err(|e| CoreError::Other(e.to_string()))?;
     Ok(key)
 }
@@ -144,6 +218,42 @@ fn open_keyed(path: &Path, key: &[u8; 32]) -> Result<Connection, CoreError> {
     Ok(conn)
 }
 
+/// Columns added after the first release, for profiles made before them.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+    ("vouchers", "mine", "INTEGER NOT NULL DEFAULT 0"),
+    ("vouchers", "mac_key", "BLOB"),
+    ("vouchers", "seal_key", "BLOB"),
+];
+
+fn migrate(conn: &Connection) -> Result<(), CoreError> {
+    conn.execute_batch(SCHEMA)?;
+    for (table, column, decl) in ADDED_COLUMNS {
+        let has: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            params![table, column],
+            |r| r.get(0),
+        )?;
+        if !has {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Takes the profile's lock, or says another app has it.
+fn lock(dir: &Path) -> Result<std::fs::File, CoreError> {
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(LOCK_FILE))?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(std::fs::TryLockError::WouldBlock) => Err(CoreError::ProfileInUse),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 fn provider(path: &Path, key: &[u8; 32]) -> Result<Provider, CoreError> {
     let conn = open_keyed(path, key)?;
     let mut storage = Storage::new(conn);
@@ -161,17 +271,21 @@ impl Store {
             return Err(CoreError::ProfileExists);
         }
         std::fs::create_dir_all(dir)?;
-        let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
-        std::fs::write(dir.join(SALT_FILE), salt)?;
-        let key = derive_key(passphrase, &salt)?;
+        let lock = lock(dir)?;
+        if db.exists() || dir.join(SALT_FILE).exists() {
+            return Err(CoreError::ProfileExists);
+        }
+        let kdf = Kdf::new();
+        std::fs::write(dir.join(SALT_FILE), kdf.encode())?;
+        let key = derive_key(passphrase, &kdf)?;
         let conn = open_keyed(&db, &key)?;
-        conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         let p = provider(&db, &key)?;
         Ok((
             Store {
                 conn,
                 dir: dir.to_path_buf(),
+                _lock: lock,
             },
             p,
         ))
@@ -184,15 +298,17 @@ impl Store {
         if !db.exists() || !salt_path.exists() {
             return Err(CoreError::NoProfile);
         }
-        let salt = std::fs::read(salt_path)?;
-        let key = derive_key(passphrase, &salt)?;
+        let lock = lock(dir)?;
+        let kdf = Kdf::decode(&std::fs::read(salt_path)?)?;
+        let key = derive_key(passphrase, &kdf)?;
         let conn = open_keyed(&db, &key)?;
-        conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         let p = provider(&db, &key)?;
         Ok((
             Store {
                 conn,
                 dir: dir.to_path_buf(),
+                _lock: lock,
             },
             p,
         ))
@@ -235,8 +351,18 @@ impl Store {
     }
 }
 
-/// A voucher's encoded bytes and the invite secret it belongs to.
-pub type StoredVoucher = (Vec<u8>, [u8; 32]);
+/// An invite link's voucher as one member holds it.
+#[derive(Clone, Debug)]
+pub struct StoredVoucher {
+    /// The voucher, postcard-encoded.
+    pub voucher: Vec<u8>,
+    /// Checks a join request's MAC.
+    pub mac_key: [u8; 32],
+    /// Seals the voucher for the joiner.
+    pub seal_key: [u8; 32],
+    /// The invite secret itself: only on the link maker's own rows.
+    pub secret: Option<[u8; 32]>,
+}
 
 /// A server this client talks to.
 #[derive(Clone, Debug)]
@@ -318,6 +444,33 @@ impl Store {
             params![host, port],
             |r| r.get(0),
         )?)
+    }
+
+    /// The pinned certificate fingerprint for a server address, if known.
+    pub fn server_pin(&self, host: &str, port: u16) -> Result<Option<[u8; 32]>, CoreError> {
+        let fpr: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT cert_fpr FROM servers WHERE host = ?1 AND port = ?2",
+                params![host, port],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(fpr.and_then(|f| f.try_into().ok()))
+    }
+
+    /// Pins a new certificate fingerprint for a known server address.
+    pub fn set_server_pin(
+        &self,
+        host: &str,
+        port: u16,
+        cert_fpr: &[u8; 32],
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE servers SET cert_fpr = ?1 WHERE host = ?2 AND port = ?3",
+            params![cert_fpr.as_slice(), host, port],
+        )?;
+        Ok(())
     }
 
     pub fn set_account(&self, server_id: i64, account: &KeyPair) -> Result<(), CoreError> {
@@ -563,31 +716,70 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Keeps a voucher. The first one stored for a token stays: a later
+    /// message about the same token never replaces it. `secret` is set only
+    /// for links this client made.
     pub fn save_voucher(
         &self,
         g: &GroupId,
         token: &Token,
-        voucher: &[u8],
-        secret: &[u8; 32],
+        v: &StoredVoucher,
     ) -> Result<(), CoreError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO vouchers (group_id, token, voucher, secret) VALUES (?1, ?2, ?3, ?4)",
-            params![g.0.as_slice(), token.0.as_slice(), voucher, secret.as_slice()],
+            "INSERT OR IGNORE INTO vouchers (group_id, token, voucher, secret, mine, mac_key, seal_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                g.0.as_slice(),
+                token.0.as_slice(),
+                v.voucher,
+                v.secret.as_ref().map(|s| s.as_slice()),
+                v.secret.is_some(),
+                v.mac_key.as_slice(),
+                v.seal_key.as_slice()
+            ],
         )?;
         Ok(())
     }
 
-    /// The stored voucher bytes and invite secret for a token.
+    /// The stored voucher for a token. Rows from before the keys were split
+    /// out hold only the secret; their keys are derived from it, and they
+    /// never count as this client's own.
     pub fn voucher(&self, g: &GroupId, token: &Token) -> Result<Option<StoredVoucher>, CoreError> {
-        let row: Option<(Vec<u8>, Vec<u8>)> = self
+        type Row = (
+            Vec<u8>,
+            Option<Vec<u8>>,
+            bool,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+        );
+        let row: Option<Row> = self
             .conn
             .query_row(
-                "SELECT voucher, secret FROM vouchers WHERE group_id = ?1 AND token = ?2",
+                "SELECT voucher, secret, mine, mac_key, seal_key FROM vouchers
+                 WHERE group_id = ?1 AND token = ?2",
                 params![g.0.as_slice(), token.0.as_slice()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        Ok(row.and_then(|(v, s)| s.try_into().ok().map(|s| (v, s))))
+        let Some((voucher, secret, mine, mac_key, seal_key)) = row else {
+            return Ok(None);
+        };
+        let b32 = |b: Option<Vec<u8>>| b.and_then(|b| <[u8; 32]>::try_from(b).ok());
+        let secret = b32(secret);
+        let (mac_key, seal_key) = match (b32(mac_key), b32(seal_key), secret) {
+            (Some(m), Some(s), _) => (m, s),
+            (_, _, Some(sec)) => (
+                crate::keys::invite_mac_key(&sec),
+                crate::keys::voucher_seal_key(&sec),
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(StoredVoucher {
+            voucher,
+            mac_key,
+            seal_key,
+            secret: if mine { secret } else { None },
+        }))
     }
 
     pub fn add_file(&self, g: &GroupId, offer: &crate::files::FileOffer) -> Result<(), CoreError> {
@@ -784,6 +976,66 @@ mod tests {
             .unwrap()
             .expect("group reloads");
         assert_eq!(g.ciphersuite(), SUITE);
+    }
+
+    /// Writes a profile keyed with `params`, its salt file in the stored
+    /// form: `sckdf` and version byte 1, memory in KiB, passes and lanes as
+    /// big-endian u32, then the salt.
+    fn profile_with_params(dir: &Path, pass: &str, m: u32, t: u32, p: u32) {
+        let salt = [7u8; 16];
+        let mut file = b"sckdf\x01".to_vec();
+        for v in [m, t, p] {
+            file.extend_from_slice(&v.to_be_bytes());
+        }
+        file.extend_from_slice(&salt);
+        std::fs::write(dir.join(SALT_FILE), file).unwrap();
+        let params = Params::new(m, t, p, Some(32)).unwrap();
+        let mut key = [0u8; 32];
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+            .hash_password_into(pass.as_bytes(), &salt, &mut key)
+            .unwrap();
+        let conn = open_keyed(&dir.join(DB_FILE), &key).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+    }
+
+    #[test]
+    fn profile_with_other_stored_kdf_params_opens() {
+        let d = tempfile::tempdir().unwrap();
+        profile_with_params(d.path(), "pass phrase", 8 * 1024, 3, 1);
+        assert!(Store::open(d.path(), "pass phrase").is_ok());
+        assert!(matches!(
+            Store::open(d.path(), "wrong"),
+            Err(CoreError::WrongPassphrase)
+        ));
+    }
+
+    #[test]
+    fn profile_with_bare_salt_opens_with_todays_params() {
+        let d = tempfile::tempdir().unwrap();
+        let salt = [5u8; 16];
+        std::fs::write(d.path().join(SALT_FILE), salt).unwrap();
+        let params = Params::new(ARGON_MEM_KIB, ARGON_PASSES, 1, Some(32)).unwrap();
+        let mut key = [0u8; 32];
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+            .hash_password_into(b"k", &salt, &mut key)
+            .unwrap();
+        open_keyed(&d.path().join(DB_FILE), &key)
+            .unwrap()
+            .execute_batch(SCHEMA)
+            .unwrap();
+        assert!(Store::open(d.path(), "k").is_ok());
+    }
+
+    #[test]
+    fn new_profile_stores_its_kdf_params() {
+        let d = tempfile::tempdir().unwrap();
+        drop(Store::create(d.path(), "k").unwrap());
+        let file = std::fs::read(d.path().join(SALT_FILE)).unwrap();
+        assert!(file.starts_with(b"sckdf\x01"), "{file:?}");
+        assert_eq!(&file[6..10], &ARGON_MEM_KIB.to_be_bytes());
+        assert_eq!(&file[10..14], &ARGON_PASSES.to_be_bytes());
+        assert_eq!(&file[14..18], &1u32.to_be_bytes());
+        assert_eq!(file.len(), 34);
     }
 
     #[test]

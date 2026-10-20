@@ -142,7 +142,7 @@ Files stream through memory one chunk at a time, so a large video never loads wh
 
 ### Group membership and the server
 
-The server has to know which mailboxes are in each group, because it delivers each encrypted message to those mailboxes. It also checks every group change against the group's admin list, so a change from a non-admin or a malformed change is refused before it reaches anyone. Without that check, a buggy or hostile app could send a change that some members accept and others reject, splitting the group into two halves that cannot read each other.
+The server has to know which mailboxes are in each group, because it delivers each encrypted message to those mailboxes. It also checks every group change: the signature, the epoch, and the group's admin list, so a change from a non-admin, or a second change for an epoch that already moved on, is refused before it reaches anyone. It cannot check the encrypted parts of a change, the new keys each member receives. A buggy or hostile app can still send a change that passes these checks but that some members cannot apply. Those members fall out of step and stop being able to read the group; their app tells them so, and an admin can remove them and invite them again.
 
 v4 limits what that knowledge reveals:
 
@@ -231,7 +231,7 @@ socketchat://chat.example.com:7444/j/<token>#<server-cert-fpr>.<inviter-key-fpr>
 
 The token is random and stored on the server with its group, creator, expiry and remaining uses. Everything after `#` is the link fragment, which clients never send to the server. The invite secret lives only there, so a server cannot forge a join request even if someone has taken it over.
 
-When the inviter creates the link, their client also signs a **voucher**: the token, a hash of the invite secret, the group ID, the inviter's group key and an expiry, signed with the inviter's identity key. The voucher goes to the group inside an encrypted MLS message, so every member's client holds it and the server never sees it.
+When the inviter creates the link, their client also signs a **voucher**: the token, a hash of the invite secret, the group ID, the inviter's group key and an expiry, signed with the inviter's identity key. The voucher goes to the group inside an encrypted MLS message, together with two keys derived from the invite secret: one checks the joiner's request, the other seals the voucher for the joiner. Every member's client holds these and the server never sees them. The secret itself stays with the inviter and the joiner. A member's client keeps a voucher only when the member who posted it is the inviter it names, signed by the identity that member proved in the group, and never lets a later voucher replace it.
 
 Redeeming an invite:
 
@@ -239,12 +239,13 @@ Redeeming an invite:
 2. It makes a fresh group key and registers a new mailbox for it using the token.
 3. It uploads a KeyPackage for that group key against the token, together with a MAC of that KeyPackage keyed by the invite secret.
 4. The server notifies the inviter's client. If the inviter is offline, any group admin who is online can act. The joiner's screen says who it is waiting for.
-5. That client finds the matching voucher and invite secret, which members receive together inside the group's encrypted messages. It checks the MAC with that secret, adds the KeyPackage with a Commit, and sends the Welcome to the joiner's mailbox along with the inviter's signed voucher. The voucher travels sealed under a key derived from the invite secret, so the server cannot read it.
+5. That client finds the matching voucher and keys, which members receive together inside the group's encrypted messages. It checks the MAC, adds the KeyPackage with a Commit, and sends the Welcome to the joiner's mailbox along with the inviter's signed voucher. The voucher travels sealed under a key derived from the invite secret, so the server cannot read it.
 6. The joiner processes the Welcome and checks the voucher's signature against the identity fingerprint in the link. The join counts as verified when that signature holds and the adder is either the group key the voucher names or an admin of the group. Anything else shows the red warning.
+7. The joiner posts a proof made from the invite secret itself, bound to their new group key. Only the inviter's client can check it, and only someone holding the link can make it, so the inviter marks the newcomer verified only then. A member who raced the real invitee with the keys every member holds gets in unverified.
 
 The 24-hour expiry covers redeeming the link. Once a join request is lodged, it waits up to 7 days for someone to act.
 
-To start a direct message with someone you already share a group with, use `/dm <name>`. The two apps exchange the new chat's KeyPackage and mailbox inside the shared group's encrypted messages, so the server's records do not link the two chats. For anyone else, `/invite --dm` makes a link that opens a new two-person chat.
+To start a direct message with someone you already share a group with, use `/dm <name>`. The two apps exchange the new chat's KeyPackage and mailbox inside the shared group's encrypted messages, so the server's records do not link the two chats. The request names the asker's key in the new chat, and the other person's app marks the direct message verified only when that key added them to that chat and they had already verified the asker. For anyone else, `/invite --dm` makes a link that opens a new two-person chat.
 
 A server invite from `socketchat server invite` registers a server account key with no group, so the person can then create groups. When the operator allows members to invite, a group invite also registers a server account key for the joiner, so they can start their own groups and direct messages. The server does not record which invite created which account or mailbox. The operator can turn off members' ability to bring new people onto the server (`members_can_invite = false`).
 
@@ -256,7 +257,7 @@ MLS has no built-in roles, so v4 keeps them in group state that every member and
 
 - The admin list lives in a GroupContext extension: a list of admin group keys that every member agrees on through MLS.
 - Commits and Proposals travel as MLS PublicMessages, which are signed but not encrypted. Application messages (chat text, files, profiles, vouchers) stay encrypted as PrivateMessages.
-- The server checks each Commit's signature, its epoch, and that an admin sent it whenever it adds, removes or changes the admin list. A Commit that fails is refused before any member sees it, so clients never split from the log.
+- The server checks each Commit's signature, its epoch, and that an admin sent it whenever it adds, removes or changes the admin list. A Commit that fails is refused before any member sees it. The server cannot check a Commit's encrypted parts, so a member whose app cannot apply one falls out of step; the app says so, and an admin can remove and invite them again.
 - The same PublicMessages tell the server who is in each group, which it needs for routing, deleting acknowledged entries and expiring files.
 - Leaving: `/leave` sends a Remove proposal for yourself, and the next online member's client commits it on its own.
 - If the last admin leaves, their leave Commit must promote the longest-standing member, and the server refuses it otherwise.

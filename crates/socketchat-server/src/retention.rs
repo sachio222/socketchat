@@ -17,7 +17,7 @@ pub fn sweep(state: &State) {
     // Mailbox times are rounded down to the day, so allow one more day:
     // a mailbox waiting on a join is never removed before the full wait.
     let mailbox_cutoff = now.saturating_sub(STALE_MAILBOX_SECS + DAY_SECS) as i64;
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let _ = db.execute("DELETE FROM log WHERE created_unix < ?1", [cutoff]);
     let _ = db.execute("DELETE FROM welcomes WHERE created_unix < ?1", [cutoff]);
     let _ = db.execute("DELETE FROM invites WHERE expires_unix < ?1", [now as i64]);
@@ -25,6 +25,11 @@ pub fn sweep(state: &State) {
         "DELETE FROM joins WHERE lodged_unix < ?1
              OR (lodged_unix IS NULL AND NOT EXISTS (SELECT 1 FROM invites WHERE invites.token = joins.token))",
         [join_cutoff],
+    );
+    let quota_cutoff = now.saturating_sub(crate::groups::quota_window_secs(state)) as i64;
+    let _ = db.execute(
+        "DELETE FROM invite_quota WHERE since_unix <= ?1",
+        [quota_cutoff],
     );
     let _ = db.execute(
         "DELETE FROM mailboxes WHERE joined_seq IS NULL AND created_unix < ?1",

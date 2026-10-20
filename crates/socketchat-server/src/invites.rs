@@ -1,19 +1,51 @@
 //! Join requests: a joiner lodges a KeyPackage under the invite token they
 //! redeemed, and the group's online members hear about it.
 
+use openmls::prelude::tls_codec::Deserialize as _;
+use openmls::prelude::KeyPackageIn;
 use rusqlite::params;
-use socketchat_proto::msg::{GroupId as Gid, JoinRequest, Key, Push, Response, ServerFrame};
+use socketchat_proto::msg::{
+    from_body, to_frame, GroupId as Gid, JoinRequest, Key, Push, Response, ServerFrame,
+};
 use socketchat_proto::Token;
 
 use crate::conn::ConnState;
-use crate::groups::{joined_keys, member_key};
+use crate::groups::{joined_keys, member_key, REPLY_BYTES};
 use crate::State;
 
 /// How long a lodged join request waits for someone to act: 7 days.
 pub const JOIN_WAIT_SECS: u64 = 7 * 24 * 3600;
 
-/// Largest KeyPackage bundle a joiner may lodge.
-const MAX_KEY_PACKAGE: usize = 64 * 1024;
+/// Largest KeyPackage bundle a joiner may lodge. A bundle holds one
+/// KeyPackage per cipher suite; a post-quantum one measures about 2.7 KB, a
+/// standard one about 0.3 KB, so two post-quantum ones fit with room to spare.
+const MAX_KEY_PACKAGE: usize = 8 * 1024;
+
+/// Most KeyPackages in one bundle: one per cipher suite the server accepts.
+const MAX_KEY_PACKAGES: usize = 2;
+
+/// Bytes a join request adds to a reply besides its KeyPackages: token,
+/// MAC, time and length, at their largest.
+const JOIN_OVERHEAD: usize = 64;
+
+/// True when `blob` is what clients lodge: a list of one or two MLS
+/// KeyPackages, encoded exactly, each made for `mailbox`.
+fn key_packages_ok(blob: &[u8], mailbox: &Key) -> bool {
+    let Ok(kps) = from_body::<Vec<Vec<u8>>>(blob) else {
+        return false;
+    };
+    if kps.is_empty() || kps.len() > MAX_KEY_PACKAGES {
+        return false;
+    }
+    // Nothing after the list.
+    if to_frame(&kps).map(|f| f.len() - 4) != Ok(blob.len()) {
+        return false;
+    }
+    kps.iter().all(|b| {
+        KeyPackageIn::tls_deserialize_exact(b)
+            .is_ok_and(|kp| kp.unverified_credential().signature_key.as_slice() == mailbox.0)
+    })
+}
 
 pub fn redeem(
     state: &State,
@@ -26,7 +58,7 @@ pub fn redeem(
         return Response::Refused("that key package is too large".into());
     }
     let now = state.now();
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let row: Option<(Vec<u8>, Vec<u8>)> = db
         .query_row(
             "SELECT group_id, mailbox FROM joins WHERE token = ?1 AND key_package IS NULL",
@@ -45,6 +77,9 @@ pub fn redeem(
     };
     if !cs.proven.contains(&mailbox) {
         return Response::Refused("sign in with the mailbox that redeemed this invite".into());
+    }
+    if !key_packages_ok(&key_package, &mailbox) {
+        return Response::Refused("that is not a key package for your mailbox".into());
     }
     if db
         .execute(
@@ -73,43 +108,49 @@ pub fn redeem(
 
 pub fn pending(state: &State, cs: &ConnState, group: Gid) -> Response {
     let now = state.now();
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     if member_key(&db, cs, &group).is_none() {
         return Response::Refused("you are not a member of this group".into());
     }
-    let mut st = db
-        .prepare(
+    // Oldest first, as many as fit one reply. Requests leave the list when
+    // a member adds the person or when they expire, and the next call
+    // returns the ones after them.
+    let read = || -> rusqlite::Result<Vec<JoinRequest>> {
+        let mut st = db.prepare(
             "SELECT token, key_package, mac, lodged_unix FROM joins
-             WHERE group_id = ?1 AND key_package IS NOT NULL AND lodged_unix > ?2",
-        )
-        .expect("static SQL");
-    let rows = st.query_map(
-        params![
+             WHERE group_id = ?1 AND key_package IS NOT NULL AND lodged_unix > ?2
+             ORDER BY lodged_unix, token",
+        )?;
+        let mut rows = st.query(params![
             group.0.as_slice(),
             now.saturating_sub(JOIN_WAIT_SECS) as i64
-        ],
-        |r| {
-            Ok((
-                r.get::<_, Vec<u8>>(0)?,
-                r.get::<_, Vec<u8>>(1)?,
-                r.get::<_, Vec<u8>>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        },
-    );
-    let Ok(rows) = rows else {
-        return Response::Error("could not read join requests".into());
-    };
-    let joins = rows
-        .filter_map(Result::ok)
-        .filter_map(|(t, kp, mac, at)| {
-            Some(JoinRequest {
-                token: Token(t.try_into().ok()?),
+        ])?;
+        let mut out = Vec::new();
+        let mut bytes = 0;
+        while let Some(r) = rows.next()? {
+            let t: Vec<u8> = r.get(0)?;
+            let kp: Vec<u8> = r.get(1)?;
+            let mac: Vec<u8> = r.get(2)?;
+            let at: i64 = r.get(3)?;
+            let size = kp.len() + JOIN_OVERHEAD;
+            if !out.is_empty() && bytes + size > REPLY_BYTES {
+                break;
+            }
+            let (Ok(token), Ok(mac)) = (t.try_into(), mac.try_into()) else {
+                continue;
+            };
+            bytes += size;
+            out.push(JoinRequest {
+                token: Token(token),
                 key_package: kp,
-                mac: mac.try_into().ok()?,
+                mac,
                 lodged_unix: at as u64,
-            })
-        })
-        .collect();
-    Response::Joins(joins)
+            });
+        }
+        Ok(out)
+    };
+    match read() {
+        Ok(joins) => Response::Joins(joins),
+        Err(_) => Response::Error("could not read join requests".into()),
+    }
 }

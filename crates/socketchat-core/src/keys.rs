@@ -279,26 +279,49 @@ impl Voucher {
 const VOUCHER_SEAL: &[u8] = b"socketchat/v1/voucher-seal";
 const SEAL_NONCE_LEN: usize = 24;
 
-fn voucher_seal_cipher(secret: &[u8; 32]) -> XChaCha20Poly1305 {
-    let mut key = Zeroizing::new([0u8; 32]);
+/// Labels the key members check a join request's MAC with.
+const INVITE_MAC: &[u8] = b"socketchat/v1/invite-mac";
+/// Labels the key a joiner proves they hold the link with.
+const INVITE_PROOF: &[u8] = b"socketchat/v1/invite-proof";
+
+fn derive(secret: &[u8; 32], label: &[u8]) -> [u8; 32] {
+    let mut key = [0u8; 32];
     Hkdf::<Sha256>::new(None, secret)
-        .expand(VOUCHER_SEAL, key.as_mut())
+        .expand(label, &mut key)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
-    <XChaCha20Poly1305 as chacha20poly1305::KeyInit>::new(key.as_ref().into())
+    key
+}
+
+/// The key that seals a voucher for the joiner: HKDF-SHA256 of the invite
+/// secret, no salt, info `socketchat/v1/voucher-seal`. Members get this
+/// key, never the secret, so any admin can complete a join.
+pub fn voucher_seal_key(secret: &[u8; 32]) -> [u8; 32] {
+    derive(secret, VOUCHER_SEAL)
+}
+
+/// The key a join request's MAC is made with: HKDF-SHA256 of the invite
+/// secret, no salt, info `socketchat/v1/invite-mac`. Members get this key,
+/// never the secret, so they can check a request but cannot make the
+/// [`invite_proof`] that only the link's holder can make.
+pub fn invite_mac_key(secret: &[u8; 32]) -> [u8; 32] {
+    derive(secret, INVITE_MAC)
+}
+
+fn voucher_seal_cipher(seal_key: &[u8; 32]) -> XChaCha20Poly1305 {
+    <XChaCha20Poly1305 as chacha20poly1305::KeyInit>::new(seal_key.into())
 }
 
 /// Seals a voucher for the joiner, who holds the invite secret from the link.
 /// The server stores and forwards the result but cannot read it, so it never
 /// learns the inviter's identity key.
 ///
-/// Key: HKDF-SHA256 of the invite secret (no salt, info
-/// `socketchat/v1/voucher-seal`). Cipher: XChaCha20-Poly1305 with a fresh
+/// Key: [`voucher_seal_key`]. Cipher: XChaCha20-Poly1305 with a fresh
 /// random nonce. Output: nonce, then ciphertext.
-pub fn seal_voucher(secret: &[u8; 32], voucher: &Voucher) -> Vec<u8> {
+pub fn seal_voucher(seal_key: &[u8; 32], voucher: &Voucher) -> Vec<u8> {
     let plain = Zeroizing::new(postcard::to_stdvec(voucher).expect("a voucher always encodes"));
     let mut nonce = [0u8; SEAL_NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
-    let sealed = voucher_seal_cipher(secret)
+    let sealed = voucher_seal_cipher(seal_key)
         .encrypt(
             XNonce::from_slice(&nonce),
             Payload {
@@ -310,15 +333,15 @@ pub fn seal_voucher(secret: &[u8; 32], voucher: &Voucher) -> Vec<u8> {
     [nonce.as_slice(), &sealed].concat()
 }
 
-/// Opens a voucher sealed by [`seal_voucher`]. `None` when the secret is
+/// Opens a voucher sealed by [`seal_voucher`]. `None` when the key is
 /// wrong or any byte was changed.
-pub fn open_voucher(secret: &[u8; 32], sealed: &[u8]) -> Option<Voucher> {
+pub fn open_voucher(seal_key: &[u8; 32], sealed: &[u8]) -> Option<Voucher> {
     if sealed.len() < SEAL_NONCE_LEN {
         return None;
     }
     let (nonce, body) = sealed.split_at(SEAL_NONCE_LEN);
     let plain = Zeroizing::new(
-        voucher_seal_cipher(secret)
+        voucher_seal_cipher(seal_key)
             .decrypt(
                 XNonce::from_slice(nonce),
                 Payload {
@@ -333,19 +356,51 @@ pub fn open_voucher(secret: &[u8; 32], sealed: &[u8]) -> Option<Voucher> {
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// MAC of a KeyPackage keyed by the invite secret. Only someone holding the
-/// link can make it, so a server cannot slip in its own KeyPackage.
-pub fn invite_mac(secret: &[u8; 32], key_package: &[u8]) -> [u8; 32] {
-    let mut m = HmacSha256::new_from_slice(secret).expect("any key length works");
+/// MAC of a KeyPackage under [`invite_mac_key`]. Only someone holding the
+/// link or a member of the group can make it, so a server cannot slip in
+/// its own KeyPackage.
+pub fn invite_mac(mac_key: &[u8; 32], key_package: &[u8]) -> [u8; 32] {
+    let mut m = HmacSha256::new_from_slice(mac_key).expect("any key length works");
     m.update(key_package);
     m.finalize().into_bytes().into()
 }
 
 /// Constant-time check of [`invite_mac`].
-pub fn mac_matches(secret: &[u8; 32], key_package: &[u8], mac: &[u8; 32]) -> bool {
-    let mut m = HmacSha256::new_from_slice(secret).expect("any key length works");
+pub fn mac_matches(mac_key: &[u8; 32], key_package: &[u8], mac: &[u8; 32]) -> bool {
+    let mut m = HmacSha256::new_from_slice(mac_key).expect("any key length works");
     m.update(key_package);
     m.verify_slice(mac).is_ok()
+}
+
+fn proof_mac(secret: &[u8; 32], group: &GroupId, group_key: &Key) -> HmacSha256 {
+    let mut m =
+        HmacSha256::new_from_slice(&derive(secret, INVITE_PROOF)).expect("any key length works");
+    m.update(&group.0);
+    m.update(&group_key.0);
+    m
+}
+
+/// A joiner's proof that they hold the invite secret itself, bound to their
+/// key in the group. Only the link's maker can check it, and no other
+/// member can make it, so only the real invitee earns the maker's verified
+/// mark.
+pub fn invite_proof(secret: &[u8; 32], group: &GroupId, group_key: &Key) -> [u8; 32] {
+    proof_mac(secret, group, group_key)
+        .finalize()
+        .into_bytes()
+        .into()
+}
+
+/// Constant-time check of [`invite_proof`].
+pub fn proof_matches(
+    secret: &[u8; 32],
+    group: &GroupId,
+    group_key: &Key,
+    proof: &[u8; 32],
+) -> bool {
+    proof_mac(secret, group, group_key)
+        .verify_slice(proof)
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -530,5 +585,30 @@ mod tests {
         assert_eq!(invite_mac(&[1; 32], b"kp"), invite_mac(&[1; 32], b"kp"));
         assert!(mac_matches(&[1; 32], b"kp", &invite_mac(&[1; 32], b"kp")));
         assert!(!mac_matches(&[1; 32], b"kq", &invite_mac(&[1; 32], b"kp")));
+    }
+
+    #[test]
+    fn members_keys_cannot_make_the_joiners_proof() {
+        let secret = [3u8; 32];
+        let (g, k) = (GroupId([1; 16]), KeyPair::generate().public());
+        let proof = invite_proof(&secret, &g, &k);
+        assert!(proof_matches(&secret, &g, &k, &proof));
+        assert!(!proof_matches(&secret, &GroupId([2; 16]), &k, &proof));
+        assert!(!proof_matches(
+            &secret,
+            &g,
+            &KeyPair::generate().public(),
+            &proof
+        ));
+        for member_key in [invite_mac_key(&secret), voucher_seal_key(&secret)] {
+            assert!(!proof_matches(
+                &secret,
+                &g,
+                &k,
+                &invite_proof(&member_key, &g, &k)
+            ));
+            assert_ne!(member_key, secret);
+        }
+        assert_ne!(invite_mac_key(&secret), voucher_seal_key(&secret));
     }
 }

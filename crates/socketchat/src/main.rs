@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use socketchat_core::client::{Client, Event, JoinStatus, Verification};
 use socketchat_core::invite::hours_text;
+use socketchat_core::sanitize::{clean_name, clean_text};
 use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
 use socketchat_proto::InviteLink;
@@ -237,11 +238,21 @@ async fn sync_and_report(c: &mut Client) -> Result<(), Fail> {
             Event::JoinRequestHandled { group } => println!("Someone you invited joined {}.", group_name(c, group)),
             Event::Message { group, line } => println!("[{}] {}: {}", group_name(c, group), line.sender, line.text),
             Event::Left { group } => println!("You are no longer in {}.", group_name(c, group)),
-            Event::Warning(w) => eprintln!("{w}"),
+            Event::Warning(w) => eprintln!("{}", clean_text(&w)),
             _ => {}
         }
     }
     Ok(())
+}
+
+/// Prints the warnings a step left behind, such as a server's new
+/// certificate.
+fn report_warnings(c: &mut Client) {
+    for e in c.take_events() {
+        if let Event::Warning(w) = e {
+            eprintln!("{}", clean_text(&w));
+        }
+    }
 }
 
 fn fingerprint_text(f: &[u8; 32]) -> String {
@@ -324,9 +335,10 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             let mut c = open_or_create().await?;
             match c.join(&link).await? {
                 JoinStatus::Registered => {
+                    report_warnings(&mut c);
                     println!(
                         "You are on {}. Start a group with: socketchat new <name>",
-                        link.host
+                        clean_name(&link.host)
                     );
                 }
                 JoinStatus::Waiting { for_name } => {
@@ -408,7 +420,8 @@ fn main() -> ExitCode {
     match rt.block_on(main_inner(cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Fail(code, msg)) => {
-            eprintln!("{msg}");
+            // Errors can carry a server's own words: no escape codes.
+            eprintln!("{}", clean_text(&msg));
             ExitCode::from(code)
         }
     }

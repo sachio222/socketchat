@@ -60,7 +60,7 @@ pub fn begin(state: &State, cs: &ConnState, group: Gid, size: u64) -> Response {
             "this file is larger than this server's limit of {limit} MB"
         ));
     }
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let Some(me) = member_key(&db, cs, &group) else {
         return Response::Refused("you are not a member of this group".into());
     };
@@ -85,7 +85,7 @@ pub fn chunk(state: &State, cs: &ConnState, file: FileId, index: u32, data: &[u8
     if data.len() > MAX_CHUNK {
         return Response::Refused("that chunk is too large".into());
     }
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let Some(f) = load(&db, &file) else {
         return Response::Refused("no such upload".into());
     };
@@ -107,7 +107,7 @@ pub fn chunk(state: &State, cs: &ConnState, file: FileId, index: u32, data: &[u8
     {
         return Response::Error("could not store the chunk".into());
     }
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let _ = db.execute(
         "UPDATE files SET chunks = chunks + 1 WHERE id = ?1",
         [file.0.as_slice()],
@@ -116,7 +116,7 @@ pub fn chunk(state: &State, cs: &ConnState, file: FileId, index: u32, data: &[u8
 }
 
 pub fn end(state: &State, cs: &ConnState, file: FileId) -> Response {
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let Some(f) = load(&db, &file) else {
         return Response::Refused("no such upload".into());
     };
@@ -138,7 +138,7 @@ pub fn end(state: &State, cs: &ConnState, file: FileId) -> Response {
 }
 
 pub fn get(state: &State, cs: &ConnState, file: FileId, index: u32) -> Response {
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let Some(f) = load(&db, &file) else {
         return Response::Refused("this file is no longer on the server".into());
     };
@@ -167,7 +167,7 @@ pub(crate) fn delete(state: &State, db: &rusqlite::Connection, file: &FileId) {
 
 /// A member has the file. Once every member but the sender does, it goes.
 pub fn done(state: &State, cs: &ConnState, file: FileId) -> Response {
-    let db = state.db.lock().unwrap();
+    let db = state.db();
     let Some(f) = load(&db, &file) else {
         return Response::Ok;
     };
