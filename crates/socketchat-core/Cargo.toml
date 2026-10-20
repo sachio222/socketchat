@@ -1,0 +1,28 @@
+[package]
+name = "socketchat-core"
+description = "The socketchat client engine: keys, MLS groups, invites, files and encrypted local storage."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+socketchat-proto.workspace = true
+openmls.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_basic_credential.workspace = true
+openmls_traits.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

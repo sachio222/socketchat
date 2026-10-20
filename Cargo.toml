@@ -18,6 +18,23 @@ postcard = { version = "1", default-features = false, features = ["use-std"] }
 thiserror = "2"
 base64 = "0.22"
 proptest = "1"
+socketchat-core = { path = "crates/socketchat-core" }
+socketchat-server = { path = "crates/socketchat-server" }
+openmls = { version = "=0.9.1", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_rust_crypto = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_basic_credential = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_traits = "0.6"
+openmls_sqlite_storage = { version = "=0.3.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
+ed25519-dalek = { version = "2.2", features = ["rand_core", "zeroize"] }
+sha2 = "0.10"
+hmac = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
+argon2 = "0.5"
+chacha20poly1305 = { version = "0.10", features = ["stream"] }
+zeroize = "1"
+serde_json = "1"
+tempfile = "3"
 
 [profile.release]
 lto = true
