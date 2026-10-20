@@ -7,6 +7,9 @@
 //! An unused group invite names the mailbox that made it, so a member's
 //! open links can be counted. The name is cleared when someone uses the
 //! link, so no record ever links an inviter to the person who joined.
+//!
+//! Secure delete is on: SQLite overwrites deleted rows and cleared fields
+//! with zeros instead of leaving them in free pages.
 
 use std::path::Path;
 
@@ -91,6 +94,9 @@ pub fn open(data_dir: &Path) -> Result<Connection, ServerError> {
     conn.execute_batch(
         "PRAGMA cipher_log_level = NONE; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;",
     )?;
+    // Overwrite deleted rows and cleared fields with zeros, so they do not
+    // linger in free pages for anyone who copies the file.
+    conn.execute_batch("PRAGMA secure_delete = ON;")?;
     conn.execute_batch(SCHEMA)?;
     // Databases made before invites named their maker.
     let has_maker: bool = conn.query_row(
@@ -112,6 +118,43 @@ pub fn open(data_dir: &Path) -> Result<Connection, ServerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deleted rows and cleared invite makers are overwritten on disk, not
+    /// left in free pages where someone who copies the file could read them.
+    #[test]
+    fn deleted_data_is_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(dir.path()).unwrap();
+        let on: i64 = db
+            .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+        // Delete a recognizable value and look for it in the files. It is
+        // larger than a page, so its pages go to the free list when deleted.
+        let marker = b"invite-maker-marker-7f3a";
+        let big: Vec<u8> = marker.repeat(1000);
+        db.execute(
+            "INSERT INTO invites (token, group_id, expires_unix, uses_left, maker) VALUES (x'02', NULL, 9, 1, ?1)",
+            [big.as_slice()],
+        )
+        .unwrap();
+        db.execute("UPDATE invites SET maker = NULL WHERE token = x'02'", [])
+            .unwrap();
+        db.execute("DELETE FROM invites WHERE token = x'02'", [])
+            .unwrap();
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(db);
+        for name in [DB_FILE, "server.db-wal"] {
+            let Ok(bytes) = std::fs::read(dir.path().join(name)) else {
+                continue;
+            };
+            assert!(
+                !bytes.windows(marker.len()).any(|w| w == marker),
+                "{name} still holds a deleted value"
+            );
+        }
+    }
 
     #[test]
     fn old_database_gains_the_maker_column() {

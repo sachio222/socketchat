@@ -15,8 +15,12 @@ The first frame from the app must be `Hello { version }`. The protocol number in
 
 - `HelloOk { version }`: the server speaks this version; requests may follow.
 - `VersionMismatch { server }`: the server speaks another version and closes the connection.
+- `Busy(Full)`: the server already serves `max_connections` connections (1,000 by default) and closes the connection.
+- `Busy(Network)`: the connection's address already holds `max_per_ip` connections (256 by default; an IPv6 address counts by its /64 network) and the server closes the connection. While 64 such connections are already being turned away, the server drops the next one before TLS instead.
 
-The server also closes the connection, without a reply, when the first frame is anything else, when no Hello arrives within 10 seconds, or when it already serves `max_connections` connections. It drops a new connection before TLS when that address already holds 32 (an IPv6 address counts by its /64 network). Later it closes a connection that sends nothing for 5 minutes. Each connection may have at most 2 MiB of replies and pushes waiting to be written. The server handles the next request only once there is room for the largest reply, and closes the connection when a push would not fit. A write that makes no progress for 30 seconds also closes it, so a client that stops reading frees its slot. Apps reconnect when they next need the server and fetch what they missed.
+The app shows a `Busy` reply as "this server is full right now; try again in a few minutes" or "this server has too many connections from your network right now; try again in a few minutes".
+
+The server also closes the connection, without a reply, when the first frame is anything else or when no Hello arrives within 10 seconds. Later it closes a connection that sends nothing for 5 minutes. Each connection may have at most 2 MiB of replies and pushes waiting to be written. The server handles the next request only once there is room for the largest reply, and closes the connection when a push would not fit. A write that makes no progress for 30 seconds also closes it, so a client that stops reading frees its slot. Apps reconnect when they next need the server and fetch what they missed.
 
 ## Requests and responses
 

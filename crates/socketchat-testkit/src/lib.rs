@@ -269,6 +269,59 @@ impl CutProxy {
     }
 }
 
+/// A TCP relay that reads the client's bytes slowly into a small socket
+/// buffer, as a busy link to a server would: `chunk` bytes at a time, with
+/// `pause` between reads. The client's socket fills while it writes a large
+/// request. Replies pass through at full speed.
+pub struct SlowProxy {
+    pub port: u16,
+}
+
+impl SlowProxy {
+    pub async fn start(
+        target: SocketAddr,
+        rcvbuf: u32,
+        chunk: usize,
+        pause: std::time::Duration,
+    ) -> SlowProxy {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        // Accepted sockets take their receive buffer from the listener.
+        sock.set_recv_buffer_size(rcvbuf).unwrap();
+        sock.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = sock.listen(16).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let Ok(server) = tokio::net::TcpStream::connect(target).await else {
+                    continue;
+                };
+                let (mut cr, mut cw) = client.into_split();
+                let (mut sr, mut sw) = server.into_split();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; chunk];
+                    loop {
+                        tokio::time::sleep(pause).await;
+                        let n = match cr.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        if sw.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                    let _ = sw.shutdown().await;
+                });
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut sr, &mut cw).await;
+                    let _ = cw.shutdown().await;
+                });
+            }
+        });
+        SlowProxy { port }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::passphrase;

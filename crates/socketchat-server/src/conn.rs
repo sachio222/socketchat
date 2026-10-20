@@ -18,12 +18,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use socketchat_proto::msg::{
-    from_body, to_frame, ClientFrame, Key, Request, Response, ServerFrame,
+    from_body, to_frame, Busy, ClientFrame, Key, Request, Response, ServerFrame,
 };
 use socketchat_proto::{FrameDecoder, MAX_FRAME, PROTOCOL_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{mpsc, watch, Notify, OwnedSemaphorePermit};
 use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 
@@ -45,6 +45,18 @@ const WRITE_LIMIT: Duration = Duration::from_secs(30);
 /// How long the writer may go on after the reader stops.
 const WRITER_GRACE: Duration = Duration::from_secs(10);
 
+/// Most connections turned away with a reply at once. Past this, a
+/// connection over its address's share is dropped before TLS.
+pub const MAX_REFUSALS: usize = 64;
+
+/// Longest a connection being turned away may take: TLS, its Hello and
+/// the reply.
+const REFUSE_LIMIT: Duration = Duration::from_secs(5);
+
+/// The most a connection being turned away may send before its Hello is
+/// whole. A Hello is a few bytes.
+const REFUSE_READ_MAX: usize = 64;
+
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 /// What waits to be written over every connection, for tests and limits.
@@ -60,16 +72,41 @@ struct Account {
     /// Wakes the reader when bytes leave the queue.
     drained: Notify,
     all: Arc<Queued>,
+    /// The most `bytes` has ever counted, for tests of the accounting.
+    #[cfg(test)]
+    peak: AtomicUsize,
 }
 
 impl Account {
+    fn new(all: Arc<Queued>) -> Account {
+        Account {
+            bytes: AtomicUsize::new(0),
+            drained: Notify::new(),
+            all,
+            #[cfg(test)]
+            peak: AtomicUsize::new(0),
+        }
+    }
+
     /// Counts `n` more bytes if they fit under `limit`.
     fn take(&self, n: usize, limit: usize) -> bool {
-        self.bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |b| {
-                (b + n <= limit).then_some(b + n)
-            })
-            .is_ok()
+        let mut b = self.bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = b.checked_add(n).filter(|&t| t <= limit) else {
+                return false;
+            };
+            match self
+                .bytes
+                .compare_exchange_weak(b, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    #[cfg(test)]
+                    self.peak.fetch_max(next, Ordering::Relaxed);
+                    return true;
+                }
+                Err(now) => b = now,
+            }
+        }
     }
 
     fn give(&self, n: usize) {
@@ -150,7 +187,10 @@ impl Tx {
 }
 
 /// Room held for a reply while the request is handled.
-struct Reserved(Arc<Account>);
+struct Reserved {
+    acct: Arc<Account>,
+    held: usize,
+}
 
 impl Reserved {
     /// Waits until the largest reply fits in the queue's bytes, then holds
@@ -159,13 +199,34 @@ impl Reserved {
         while !acct.take(MAX_WIRE, QUEUE_BYTES) {
             acct.drained.notified().await;
         }
-        Reserved(acct.clone())
+        Reserved {
+            acct: acct.clone(),
+            held: MAX_WIRE,
+        }
+    }
+
+    /// Queues the encoded reply `bytes` in the room held for it, and gives
+    /// back the room it does not use. The reply's bytes are counted from
+    /// the room already held, never on top of it, so the count never goes
+    /// over the limit and a push that fits beside the reply is not refused.
+    fn send(mut self, permit: mpsc::Permit<'_, Frame>, bytes: Vec<u8>) {
+        let n = bytes.len();
+        if n <= self.held {
+            self.acct.give(self.held - n);
+        } else {
+            // No reply is larger than a frame, which the room covers.
+            self.acct.take(n - self.held, usize::MAX);
+        }
+        self.held = 0;
+        permit.send(Frame::new(Arc::new(bytes), &self.acct));
     }
 }
 
 impl Drop for Reserved {
     fn drop(&mut self) {
-        self.0.give(MAX_WIRE);
+        if self.held > 0 {
+            self.acct.give(self.held);
+        }
     }
 }
 
@@ -337,6 +398,37 @@ async fn write_frames<W: AsyncWrite + Unpin>(
     let _ = tokio::time::timeout(limit, wr.shutdown()).await;
 }
 
+/// Turns a connection away with a reply the app can show: TLS, the app's
+/// Hello, then `Busy` and close. It reads the Hello first, because closing
+/// with it unread resets the connection and the reply can be lost. It holds
+/// no slot and gives up after `REFUSE_LIMIT`.
+pub async fn refuse(
+    acceptor: TlsAcceptor,
+    tcp: TcpStream,
+    why: Busy,
+    _permit: OwnedSemaphorePermit,
+) {
+    let _ = tokio::time::timeout(REFUSE_LIMIT, async {
+        let mut tls = acceptor.accept(tcp).await.ok()?;
+        let mut dec = FrameDecoder::default();
+        let mut buf = [0u8; REFUSE_READ_MAX];
+        let mut read = 0;
+        while dec.next_frame().ok()?.is_none() {
+            let n = tls.read(&mut buf).await.ok()?;
+            read += n;
+            if n == 0 || read > REFUSE_READ_MAX {
+                return None;
+            }
+            dec.push(&buf[..n]);
+        }
+        let bytes = to_frame(&ServerFrame::Busy(why)).ok()?;
+        tls.write_all(&bytes).await.ok()?;
+        tls.flush().await.ok()?;
+        tls.shutdown().await.ok()
+    })
+    .await;
+}
+
 pub async fn serve(
     state: Arc<State>,
     acceptor: TlsAcceptor,
@@ -354,11 +446,7 @@ pub async fn serve(
     let (mut rd, wr) = tokio::io::split(tls);
     let (stx, rx) = mpsc::channel::<Frame>(QUEUE_FRAMES);
     let close = Arc::new(Notify::new());
-    let acct = Arc::new(Account {
-        bytes: AtomicUsize::new(0),
-        drained: Notify::new(),
-        all: state.queued.clone(),
-    });
+    let acct = Arc::new(Account::new(state.queued.clone()));
     let tx = Tx {
         inner: stx,
         close: close.clone(),
@@ -393,6 +481,7 @@ pub async fn serve(
             match frame {
                 ClientFrame::Hello { version } if !greeted => {
                     if count > state.cfg.max_connections {
+                        tx.push_frame(&ServerFrame::Busy(Busy::Full));
                         break 'conn;
                     }
                     if version != PROTOCOL_VERSION {
@@ -427,11 +516,8 @@ pub async fn serve(
                     };
                     let resp = handle(&state, &mut cs, body).await;
                     if let Some(b) = encode(&ServerFrame::Resp { id, body: resp }) {
-                        // Fits: it is no larger than the room held for it.
-                        acct.take(b.len(), usize::MAX);
-                        permit.send(Frame::new(Arc::new(b), &acct));
+                        reserved.send(permit, b);
                     }
-                    drop(reserved);
                     deadline = Instant::now() + timing.idle;
                 }
                 _ => break 'conn,
@@ -556,11 +642,46 @@ mod tests {
     }
 
     fn account() -> Arc<Account> {
-        Arc::new(Account {
-            bytes: AtomicUsize::new(0),
-            drained: Notify::new(),
-            all: Default::default(),
-        })
+        Arc::new(Account::new(Default::default()))
+    }
+
+    /// Queuing a reply turns the room held for it into the reply's own
+    /// count. Adding the reply first and giving the held room back after
+    /// counted both for a moment, so a push that fit beside the reply was
+    /// refused and closed a healthy connection.
+    #[tokio::test]
+    async fn reply_takes_over_its_held_room() {
+        let acct = account();
+        let reserved = Reserved::wait(&acct).await;
+        // Pushes fill the rest of the queue's bytes.
+        assert!(acct.take(QUEUE_BYTES - MAX_WIRE, QUEUE_BYTES));
+        let (tx, mut rx) = mpsc::channel(4);
+        let permit = tx.reserve().await.unwrap();
+        reserved.send(permit, vec![0; 100]);
+        let peak = acct.peak.load(Ordering::Relaxed);
+        assert!(
+            peak <= QUEUE_BYTES,
+            "counted {} bytes over the limit",
+            peak - QUEUE_BYTES
+        );
+        assert_eq!(
+            acct.bytes.load(Ordering::Relaxed),
+            QUEUE_BYTES - MAX_WIRE + 100
+        );
+        // Room the reply did not use is free again.
+        assert!(acct.take(MAX_WIRE - 100, QUEUE_BYTES));
+        acct.give(QUEUE_BYTES - 100);
+        drop(rx.recv().await);
+        assert_eq!(acct.bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(acct.all.bytes.load(Ordering::Relaxed), 0);
+    }
+
+    /// Room held for a reply that never comes is given back whole.
+    #[tokio::test]
+    async fn unused_reservation_is_given_back() {
+        let acct = account();
+        drop(Reserved::wait(&acct).await);
+        assert_eq!(acct.bytes.load(Ordering::Relaxed), 0);
     }
 
     /// A writer that keeps bytes until flushed, as TLS does when the socket

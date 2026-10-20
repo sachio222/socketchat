@@ -81,7 +81,8 @@ sudo -u socketchat socketchat server init --data-dir /var/lib/socketchat --host 
 | `invite_ttl_hours` | `24` | Hours an invite link stays usable. |
 | `members_can_invite` | `true` | Whether members, not only admins, can make group invite links. When `false`, only admins make group links, only you make server invites, and people who join through a group link can chat there but cannot start their own groups until you send them a server invite. |
 | `require_standard_suite` | `false` | When `true`, new groups must use the standard MLS suite (0x0001), which has no post-quantum protection. Groups that already exist keep their suite. |
-| `max_connections` | `1000` | Most connections served at once. |
+| `max_connections` | `1000` | Most connections served at once. Past it, apps hear "this server is full right now; try again in a few minutes". |
+| `max_per_ip` | `256` | Most connections from one address at once (an IPv6 address counts by its /64 network). The default is high because one address may be a whole office or school behind one router. Past it, apps hear "this server has too many connections from your network right now; try again in a few minutes". |
 
 `socketchat server invite --data-dir /var/lib/socketchat` prints a one-time link that registers one new person. It works while the server runs.
 

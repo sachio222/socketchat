@@ -163,6 +163,7 @@ fn connection_lost(e: &CoreError) -> bool {
                 | NetError::Tls(_)
                 | NetError::CertMismatch { .. }
                 | NetError::Version(_)
+                | NetError::Busy(_)
         )
     )
 }
@@ -213,6 +214,8 @@ struct Hooks {
     /// Groups whose fetches come back as the same old page again and again,
     /// as a hostile server could send them.
     stale_pages: HashSet<GroupId>,
+    /// Groups where sharing this member's name after an add fails once.
+    fail_after_add: HashSet<GroupId>,
 }
 
 enum DmTodo {
@@ -518,6 +521,16 @@ impl Client {
         self.join_with(link, None, false).await
     }
 
+    /// The fingerprint of the certificate this profile trusts for a server,
+    /// or None for a server it has not used.
+    pub fn trusted_certificate(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Option<[u8; 32]>, CoreError> {
+        self.store.server_pin(host, port)
+    }
+
     /// [`Client::join`] for a link whose server certificate differs from the
     /// one this profile trusts, after the person accepted the new one. The
     /// new certificate replaces the old only once a connection to it and the
@@ -572,8 +585,9 @@ impl Client {
                 self.store
                     .set_server_pin(&link.host, link.port, &link.cert_fpr)?;
                 self.emit(Event::Warning(format!(
-                    "socketchat now trusts the new certificate for {}.",
-                    crate::sanitize::clean_name(&link.host)
+                    "socketchat now trusts the new certificate for {}:{}.",
+                    crate::sanitize::clean_name(&link.host),
+                    link.port
                 )));
             }
         }
@@ -1175,7 +1189,11 @@ impl Client {
             match self.post_commit(gid, commit, Some(welcome)).await {
                 Ok(Some(seq)) => {
                     self.store.upsert_member(&gid, &joiner, Some(seq))?;
+                    // Owed from here on: if sharing fails, a later sync
+                    // sends it.
+                    self.repost.insert(gid);
                     self.after_add(gid).await?;
+                    self.repost.remove(&gid);
                     self.emit(Event::JoinRequestHandled { group: gid });
                     self.emit(Event::MembersChanged { group: gid });
                     return Ok(());
@@ -1191,6 +1209,12 @@ impl Client {
     /// After someone joins, repeat this member's profile (and the group's
     /// name, if this member knows it) so the newcomer can read them.
     async fn after_add(&mut self, gid: GroupId) -> Result<(), CoreError> {
+        #[cfg(feature = "test-hooks")]
+        if self.hooks.fail_after_add.remove(&gid) {
+            return Err(CoreError::Other(
+                "sharing your name failed for a test".into(),
+            ));
+        }
         self.post_profile(gid).await?;
         if self.groups[&gid].row.is_dm {
             self.send_app(gid, &AppMsg::IsDm).await?;
@@ -1226,6 +1250,10 @@ impl Client {
                     return Err(e);
                 }
                 self.conns.remove(&server_id);
+                // A server that turned the connection away says why.
+                if let CoreError::Net(NetError::Busy(_)) = &e {
+                    self.emit(Event::Warning(e.to_string()));
+                }
                 self.emit(Event::Disconnected);
             }
         }
@@ -2356,7 +2384,10 @@ impl Client {
             if let Some(j) = joiner {
                 self.store.upsert_member(&group, &j, Some(seq))?;
             }
+            // Owed from here on: if sharing fails, a later sync sends it.
+            self.repost.insert(group);
             self.after_add(group).await?;
+            self.repost.remove(&group);
             self.emit(Event::MembersChanged { group });
         }
         Ok(())
@@ -2610,6 +2641,12 @@ impl Client {
     /// Makes every fetch of this group fail.
     pub fn test_break_group(&mut self, gid: GroupId) {
         self.hooks.broken.insert(gid);
+    }
+
+    /// Makes the next step that shares this member's name, the chat's name
+    /// and its kind after an add fail once, after the add went through.
+    pub fn test_fail_next_after_add(&mut self, gid: GroupId) {
+        self.hooks.fail_after_add.insert(gid);
     }
 
     /// Makes the server's next fetch of this group come back refused.

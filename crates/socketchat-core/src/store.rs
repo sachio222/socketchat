@@ -38,11 +38,12 @@ const ARGON_LANES: u32 = 1;
 const KDF_MAGIC: &[u8; 6] = b"sckdf\x01";
 const SALT_LEN: usize = 16;
 
-/// The most a salt file may ask for: 1 GiB of memory, 16 passes, 8 lanes.
-/// Anything above, or less than 8 KiB of memory per lane (Argon2's own
-/// floor), means the file was damaged or tampered with, and opening the
-/// profile with it could take hours.
-const MAX_MEM_KIB: u32 = 1 << 20;
+/// The most a salt file may ask for: 256 MiB of memory, 16 passes, 8
+/// lanes. Anything above, or less than 8 KiB of memory per lane (Argon2's
+/// own floor), means the file was damaged or tampered with: opening the
+/// profile with it could take hours, or run a 512 MB Raspberry Pi Zero 2 W
+/// out of memory.
+const MAX_MEM_KIB: u32 = 256 * 1024;
 const MAX_PASSES: u32 = 16;
 const MAX_LANES: u32 = 8;
 
@@ -1120,10 +1121,14 @@ mod tests {
             f.extend_from_slice(&[1; SALT_LEN]);
             f
         };
-        assert!(Kdf::decode(&file(MAX_MEM_KIB, MAX_PASSES, MAX_LANES)).is_ok());
+        // 256 MiB at most: a 512 MB Raspberry Pi Zero 2 W must survive a
+        // changed salt file.
+        assert_eq!(MAX_MEM_KIB, 256 * 1024);
+        assert!(Kdf::decode(&file(256 * 1024, MAX_PASSES, MAX_LANES)).is_ok());
         assert!(Kdf::decode(&file(64, 1, 8)).is_ok());
         for (m, t, p) in [
-            (MAX_MEM_KIB + 1, 2, 1),
+            (256 * 1024 + 1, 2, 1),
+            (1 << 20, 2, 1),
             (19 * 1024, MAX_PASSES + 1, 1),
             (19 * 1024, u32::MAX, 1),
             (19 * 1024, 2, MAX_LANES + 1),

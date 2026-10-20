@@ -3,7 +3,7 @@ use std::sync::Arc;
 use socketchat_core::keys::KeyPair;
 use socketchat_core::net::{Conn, NetError};
 use socketchat_proto::msg::{Request, Response};
-use socketchat_testkit::TestServer;
+use socketchat_testkit::{SlowProxy, TestServer};
 
 #[tokio::test]
 async fn connects_with_matching_fingerprint() {
@@ -100,4 +100,94 @@ async fn reconnect_after_server_restart_reproves_keys() {
         .await
         .unwrap();
     assert!(matches!(r, Response::Invite { .. }), "{r:?}");
+}
+
+/// Large requests reach a server that reads slowly. The client handed each
+/// request to TLS without flushing; when the socket was full, the last TLS
+/// records of a request stayed in the TLS buffer until the next write, so a
+/// large request with nothing after it never arrived whole and timed out.
+/// Windows CI saw this with two 700 KB messages; the slow link here shows it
+/// on every platform.
+#[tokio::test]
+async fn large_requests_reach_a_slow_server_whole() {
+    use socketchat_proto::msg::GroupId;
+    let s = TestServer::start().await;
+    let proxy = SlowProxy::start(
+        s.addr(),
+        4096,
+        16 * 1024,
+        std::time::Duration::from_millis(1),
+    )
+    .await;
+    let c = Conn::connect("127.0.0.1", proxy.port, s.fpr())
+        .await
+        .unwrap();
+    let big = || Request::Post {
+        group: GroupId([0; 16]),
+        mls: vec![7; 700_000],
+        welcome: None,
+    };
+    let replies = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        tokio::join!(
+            c.request(big()),
+            c.request(big()),
+            c.request(big()),
+            c.request(big())
+        )
+    })
+    .await
+    .expect("a large request never reached the server whole");
+    // Signed out, the server turns each one down, but it answers each one.
+    for r in [replies.0, replies.1, replies.2, replies.3] {
+        assert!(
+            matches!(r, Ok(Response::Refused(_)) | Err(NetError::Server(_))),
+            "{r:?}"
+        );
+    }
+}
+
+/// One address over its share of connections, behind a router that a whole
+/// office or school shares, gets a reply it can show instead of a reset.
+#[tokio::test]
+async fn crowded_network_is_told_why() {
+    let s = TestServer::start_with(|c| c.max_per_ip = 1).await;
+    let first = Conn::connect("127.0.0.1", s.addr().port(), s.fpr())
+        .await
+        .unwrap();
+    let err = Conn::connect("127.0.0.1", s.addr().port(), s.fpr())
+        .await
+        .err()
+        .expect("a second connection from one address got in");
+    assert_eq!(
+        err.to_string(),
+        "this server has too many connections from your network right now; try again in a few minutes"
+    );
+    // The first connection still works, and its slot comes back when it
+    // closes.
+    assert!(matches!(
+        first.request(Request::Challenge).await.unwrap(),
+        Response::Challenge(_)
+    ));
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    Conn::connect("127.0.0.1", s.addr().port(), s.fpr())
+        .await
+        .unwrap();
+}
+
+/// A server at its connection limit says it is full.
+#[tokio::test]
+async fn full_server_is_told_why() {
+    let s = TestServer::start_with(|c| c.max_connections = 1).await;
+    let _first = Conn::connect("127.0.0.1", s.addr().port(), s.fpr())
+        .await
+        .unwrap();
+    let err = Conn::connect("127.0.0.1", s.addr().port(), s.fpr())
+        .await
+        .err()
+        .expect("a connection over the limit got in");
+    assert_eq!(
+        err.to_string(),
+        "this server is full right now; try again in a few minutes"
+    );
 }

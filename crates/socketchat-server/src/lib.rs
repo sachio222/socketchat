@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rand_core::{OsRng, RngCore};
 use rusqlite::{params, Connection};
+use socketchat_proto::msg::Busy;
 use socketchat_proto::{InviteLink, Token};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -170,6 +171,8 @@ pub(crate) struct State {
     pub per_ip: conn::PerIp,
     /// Replies and pushes waiting to be written, over every connection.
     pub queued: Arc<conn::Queued>,
+    /// Room for connections being turned away with a reply.
+    pub refusals: Arc<tokio::sync::Semaphore>,
 }
 
 /// Locks `m` even when a thread panicked while holding it. Requests that
@@ -230,6 +233,7 @@ impl Server {
             online: Default::default(),
             per_ip: Default::default(),
             queued: Default::default(),
+            refusals: Arc::new(tokio::sync::Semaphore::new(conn::MAX_REFUSALS)),
         });
         let (stop, stop_rx) = watch::channel(false);
         let sweeper = state.clone();
@@ -252,11 +256,16 @@ impl Server {
                     _ = stop_rx2.changed() => break,
                     acc = listener.accept() => {
                         let Ok((tcp, peer)) = acc else { continue };
-                        // An address over its share is dropped before TLS.
+                        let _ = tcp.set_nodelay(true);
+                        // An address over its share hears why and is closed,
+                        // or is dropped before TLS when too many are being
+                        // turned away at once.
                         let Some(slot) = conn::PerIp::take(&st, peer.ip(), st.cfg.max_per_ip) else {
+                            if let Ok(permit) = st.refusals.clone().try_acquire_owned() {
+                                tokio::spawn(conn::refuse(acceptor.clone(), tcp, Busy::Network, permit));
+                            }
                             continue;
                         };
-                        let _ = tcp.set_nodelay(true);
                         tokio::spawn(conn::serve(st.clone(), acceptor.clone(), tcp, stop_rx.clone(), slot));
                     }
                 }

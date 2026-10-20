@@ -31,10 +31,9 @@ pub struct Config {
     pub require_standard_suite: bool,
     /// Most connections served at once.
     pub max_connections: usize,
-    /// Most connections from one address at once. Not read from the file;
-    /// tests lower it.
-    #[serde(skip)]
-    #[doc(hidden)]
+    /// Most connections from one address at once. An IPv6 address counts
+    /// by its /64 network. One address may be a whole office or school
+    /// behind one router.
     pub max_per_ip: usize,
     /// How long a connection may wait before Hello and between requests.
     /// Not read from the file; tests shorten it.
@@ -43,9 +42,11 @@ pub struct Config {
     pub timing: Timing,
 }
 
-/// Most connections one address may hold at once. An IPv6 address counts
-/// by its /64 network, which one host usually holds whole.
-pub const MAX_PER_IP: usize = 32;
+/// Most connections one address may hold at once, unless the config says
+/// otherwise. An IPv6 address counts by its /64 network, which one host
+/// usually holds whole. One address may be a whole office or school behind
+/// one router, so this is generous; `max_connections` bounds the total.
+pub const MAX_PER_IP: usize = 256;
 
 /// Seconds a client gets to say Hello once TLS is up.
 pub const HELLO_DEADLINE: Duration = Duration::from_secs(10);
@@ -103,5 +104,34 @@ impl Config {
         let text = toml::to_string_pretty(self).map_err(|e| ServerError::Config(e.to_string()))?;
         std::fs::write(self.data_dir.join(CONFIG_FILE), text)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Operators set the per-address limit in the config file, and a saved
+    /// config writes it out so they can see it.
+    #[test]
+    fn max_per_ip_round_trips_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        assert_eq!(cfg.max_per_ip, 256);
+        cfg.save().unwrap();
+        let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("max_per_ip = 256"), "{text}");
+        std::fs::write(
+            dir.path().join(CONFIG_FILE),
+            text.replace("max_per_ip = 256", "max_per_ip = 7"),
+        )
+        .unwrap();
+        assert_eq!(Config::load(dir.path()).unwrap().max_per_ip, 7);
+        // A file from before the key existed gets the default.
+        let old: Config = toml::from_str("retention_days = 3").unwrap();
+        assert_eq!(old.max_per_ip, 256);
     }
 }

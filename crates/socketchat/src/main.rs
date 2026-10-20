@@ -338,7 +338,19 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             })?;
             let mut c = open_or_create().await?;
             let joined = if new_certificate {
-                c.join_new_certificate(&link).await?
+                let old = c.trusted_certificate(&link.host, link.port)?;
+                let joined = c.join_new_certificate(&link).await?;
+                if let Some(old) = old.filter(|o| *o != link.cert_fpr) {
+                    // The app's own line names the server; both
+                    // fingerprints follow it.
+                    report_warnings(&mut c);
+                    eprintln!(
+                        "Old certificate: {}\nNew certificate: {}",
+                        fingerprint_text(&old),
+                        fingerprint_text(&link.cert_fpr)
+                    );
+                }
+                joined
             } else {
                 c.join(&link).await?
             };

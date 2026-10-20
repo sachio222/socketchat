@@ -32,10 +32,30 @@ pub enum ClientFrame {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ServerFrame {
-    HelloOk { version: u16 },
-    VersionMismatch { server: u16 },
-    Resp { id: u32, body: Response },
+    HelloOk {
+        version: u16,
+    },
+    VersionMismatch {
+        server: u16,
+    },
+    Resp {
+        id: u32,
+        body: Response,
+    },
     Push(Push),
+    /// Sent instead of `HelloOk` when the server will not serve this
+    /// connection now. The server closes the connection after it.
+    Busy(Busy),
+}
+
+/// Why a server turned a connection away at Hello.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Busy {
+    /// The server already serves `max_connections` connections.
+    Full,
+    /// The connection's address (an IPv6 address by its /64 network)
+    /// already holds `max_per_ip` connections.
+    Network,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -361,6 +381,8 @@ mod tests {
         }
         rt(ServerFrame::HelloOk { version: 1 });
         rt(ServerFrame::VersionMismatch { server: 2 });
+        rt(ServerFrame::Busy(Busy::Full));
+        rt(ServerFrame::Busy(Busy::Network));
         rt(ServerFrame::Push(Push::Entry { group: g, entry }));
         rt(ServerFrame::Push(Push::Welcome(wi)));
         rt(ServerFrame::Push(Push::JoinRequest {

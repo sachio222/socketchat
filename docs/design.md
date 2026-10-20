@@ -284,6 +284,7 @@ SQLite in WAL mode, one file. Tables for accounts, mailboxes, groups, group memb
 - `members_can_invite` (default true)
 - `require_standard_suite` (default false)
 - `max_connections` (default 1,000)
+- `max_per_ip` (default 256)
 
 ### Performance targets
 

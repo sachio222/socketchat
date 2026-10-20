@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::*;
 use socketchat_core::suite::SUITE;
-use socketchat_proto::msg::{to_frame, ClientFrame, Request, Response, ServerFrame};
+use socketchat_proto::msg::{to_frame, Busy, ClientFrame, Request, Response, ServerFrame};
 use socketchat_server::{init, make_server_invite, Config, Server, ServerHandle};
 
 struct Env {
@@ -150,27 +150,39 @@ async fn rr_non_reading_client_frees_its_slot_after_idle() {
     );
 }
 
-/// One address may hold only so many connections; the next one is closed
-/// at once, and a freed slot can be used again.
+/// One address may hold only as many connections as `max_per_ip` in the
+/// config file says; the next one hears why and is closed, and a freed slot
+/// can be used again.
 #[tokio::test]
 async fn connections_per_address_are_capped() {
-    let e = env_with(|c| c.max_per_ip = 2).await;
+    let d = tempfile::tempdir().unwrap();
+    init(d.path(), "localhost").unwrap();
+    let file = d.path().join(socketchat_server::config::CONFIG_FILE);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("max_per_ip = 256"), "{text}");
+    std::fs::write(
+        &file,
+        text.replace("max_per_ip = 256", "max_per_ip = 2")
+            .replace("0.0.0.0:7444", "127.0.0.1:0"),
+    )
+    .unwrap();
+    let h = Server::start(Config::load(d.path()).unwrap())
+        .await
+        .unwrap();
+    let e = Env { d, h };
     let mut one = Raw::connect(e.h.addr, e.h.cert_fpr).await;
     one.hello().await;
     let mut two = Raw::connect(e.h.addr, e.h.cert_fpr).await;
     two.hello().await;
-    // The third gets nothing: the server drops it before TLS.
-    let mut third = tokio::net::TcpStream::connect(e.h.addr).await.unwrap();
-    let mut buf = [0u8; 16];
-    let r = tokio::time::timeout(
-        Duration::from_secs(3),
-        tokio::io::AsyncReadExt::read(&mut third, &mut buf),
-    )
-    .await;
-    assert!(
-        matches!(r, Ok(Ok(0)) | Ok(Err(_))),
-        "a third connection from one address stayed open: {r:?}"
-    );
+    // The third is told why at Hello, then closed.
+    let mut third = Raw::connect(e.h.addr, e.h.cert_fpr).await;
+    third
+        .send(&ClientFrame::Hello {
+            version: socketchat_proto::PROTOCOL_VERSION,
+        })
+        .await;
+    assert_eq!(third.recv().await, Some(ServerFrame::Busy(Busy::Network)));
+    assert_eq!(third.recv().await, None);
     // Closing one frees its slot.
     drop(two);
     tokio::time::sleep(Duration::from_millis(300)).await;

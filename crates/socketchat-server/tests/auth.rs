@@ -206,6 +206,11 @@ async fn connection_limit_enforced() {
         version: socketchat_proto::PROTOCOL_VERSION,
     })
     .await;
+    // The third hears that the server is full, then the connection closes.
+    assert_eq!(
+        c.recv().await,
+        Some(ServerFrame::Busy(socketchat_proto::msg::Busy::Full))
+    );
     assert_eq!(c.recv().await, None);
     drop(a);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;

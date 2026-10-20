@@ -11,11 +11,11 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
 use socketchat_proto::msg::{
-    from_body, to_frame, ClientFrame, Key, Push, Request, Response, ServerFrame,
+    from_body, to_frame, Busy, ClientFrame, Key, Push, Request, Response, ServerFrame,
 };
 use socketchat_proto::{FrameDecoder, Token, PROTOCOL_VERSION};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_rustls::TlsConnector;
@@ -41,12 +41,24 @@ pub enum NetError {
     Disconnected,
     #[error("the server took too long to answer")]
     Timeout,
+    #[error("{}", busy_text(.0))]
+    Busy(Busy),
     #[error("{0}")]
     Refused(String),
     #[error("server error: {0}")]
     Server(String),
     #[error("unexpected reply from the server: {0}")]
     Unexpected(String),
+}
+
+/// What to tell people when a server turns them away.
+fn busy_text(why: &Busy) -> &'static str {
+    match why {
+        Busy::Full => "this server is full right now; try again in a few minutes",
+        Busy::Network => {
+            "this server has too many connections from your network right now; try again in a few minutes"
+        }
+    }
 }
 
 /// Accepts only the certificate whose SHA-256 matches the pin, and records
@@ -168,7 +180,7 @@ async fn open(
         version: PROTOCOL_VERSION,
     })
     .map_err(|e| NetError::Unexpected(e.to_string()))?;
-    wr.write_all(&hello)
+    write_frame(&mut wr, &hello)
         .await
         .map_err(|e| NetError::Io(e.to_string()))?;
     let mut dec = FrameDecoder::default();
@@ -192,19 +204,12 @@ async fn open(
     match first {
         ServerFrame::HelloOk { .. } => {}
         ServerFrame::VersionMismatch { server } => return Err(NetError::Version(server)),
+        ServerFrame::Busy(why) => return Err(NetError::Busy(why)),
         other => return Err(NetError::Unexpected(format!("{other:?}"))),
     }
 
-    let (out, mut out_rx) = mpsc::unbounded_channel::<ClientFrame>();
-    tokio::spawn(async move {
-        while let Some(f) = out_rx.recv().await {
-            let Ok(bytes) = to_frame(&f) else { break };
-            if wr.write_all(&bytes).await.is_err() {
-                break;
-            }
-        }
-        let _ = wr.shutdown().await;
-    });
+    let (out, out_rx) = mpsc::unbounded_channel::<ClientFrame>();
+    tokio::spawn(write_frames(out_rx, wr));
 
     let pending: Pending = Default::default();
     let alive = Arc::new(AtomicBool::new(true));
@@ -247,6 +252,29 @@ async fn open(
         },
         push_rx,
     ))
+}
+
+/// Writes one encoded frame and flushes it. When the socket is full, a TLS
+/// stream keeps the last records of a write in its own buffer and sends
+/// them only on the next write or a flush; a request with nothing after it
+/// would never arrive whole.
+async fn write_frame<W: AsyncWrite + Unpin>(wr: &mut W, bytes: &[u8]) -> std::io::Result<()> {
+    wr.write_all(bytes).await?;
+    wr.flush().await
+}
+
+/// Writes frames from the queue until it closes or a write fails.
+async fn write_frames<W: AsyncWrite + Unpin>(
+    mut rx: mpsc::UnboundedReceiver<ClientFrame>,
+    mut wr: W,
+) {
+    while let Some(f) = rx.recv().await {
+        let Ok(bytes) = to_frame(&f) else { break };
+        if write_frame(&mut wr, &bytes).await.is_err() {
+            break;
+        }
+    }
+    let _ = wr.shutdown().await;
 }
 
 impl Conn {
@@ -404,5 +432,51 @@ impl Conn {
             self.prove(k).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A writer that keeps bytes until flushed, as TLS does when the socket
+    /// is full, still delivers a lone request: the writer flushes each one.
+    #[tokio::test]
+    async fn each_frame_is_flushed() {
+        let (near, mut far) = tokio::io::duplex(64 * 1024);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let w = tokio::spawn(write_frames(rx, tokio::io::BufWriter::new(near)));
+        let f = ClientFrame::Req {
+            id: 1,
+            body: Request::Challenge,
+        };
+        let bytes = to_frame(&f).unwrap();
+        tx.send(f).unwrap();
+        let mut got = vec![0u8; bytes.len()];
+        tokio::time::timeout(Duration::from_secs(2), far.read_exact(&mut got))
+            .await
+            .expect("the request stayed in the writer's buffer")
+            .unwrap();
+        assert_eq!(got, bytes);
+        drop(tx);
+        w.await.unwrap();
+    }
+
+    /// The Hello goes out whole on its own, with nothing written after it.
+    #[tokio::test]
+    async fn hello_is_flushed() {
+        let (near, mut far) = tokio::io::duplex(64 * 1024);
+        let mut wr = tokio::io::BufWriter::new(near);
+        let hello = to_frame(&ClientFrame::Hello {
+            version: PROTOCOL_VERSION,
+        })
+        .unwrap();
+        write_frame(&mut wr, &hello).await.unwrap();
+        let mut got = vec![0u8; hello.len()];
+        tokio::time::timeout(Duration::from_secs(2), far.read_exact(&mut got))
+            .await
+            .expect("the Hello stayed in the writer's buffer")
+            .unwrap();
+        assert_eq!(got, hello);
     }
 }

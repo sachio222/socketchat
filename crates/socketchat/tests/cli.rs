@@ -60,8 +60,14 @@ fn server() -> Server {
 
 /// A server whose config file `edit` rewrites between init and run.
 fn server_with_config(edit: impl FnOnce(String) -> String) -> Server {
-    let dir = tempfile::tempdir().unwrap();
     let listen = format!("127.0.0.1:{}", free_port());
+    server_at(&listen, edit).expect("server did not start")
+}
+
+/// A server set up fresh, with a new certificate, listening on `listen`.
+/// None when it could not start there.
+fn server_at(listen: &str, edit: impl FnOnce(String) -> String) -> Option<Server> {
+    let dir = tempfile::tempdir().unwrap();
     let d = dir.path().to_str().unwrap();
     let o = Command::new(BIN)
         .args([
@@ -72,7 +78,7 @@ fn server_with_config(edit: impl FnOnce(String) -> String) -> Server {
             "--host",
             "127.0.0.1",
             "--listen",
-            &listen,
+            listen,
         ])
         .output()
         .unwrap();
@@ -89,8 +95,8 @@ fn server_with_config(edit: impl FnOnce(String) -> String) -> Server {
     BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut first)
         .unwrap();
-    assert!(first.contains("listening"), "{first}");
-    Server { child, dir }
+    let s = Server { child, dir };
+    first.contains("listening").then_some(s)
 }
 
 fn server_invite(s: &Server) -> String {
@@ -256,6 +262,59 @@ fn join_with_a_different_certificate_asks_first() {
     assert_eq!(o.status.code(), Some(1), "{}", out(&o));
     assert!(out(&o).contains("does not match"), "{}", out(&o));
     let o = run(&ada, &["new", "Still here"]);
+    assert!(o.status.success(), "{}", out(&o));
+}
+
+/// Accepting a new certificate names the server and shows the certificate
+/// socketchat trusted before and the one it trusts now.
+#[test]
+fn accepting_a_new_certificate_shows_both_fingerprints() {
+    use socketchat_core::keys::fingerprint_text;
+    use socketchat_proto::InviteLink;
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    let first: InviteLink = server_invite(&s).parse().unwrap();
+    assert!(run(&ada, &["join", &first.to_string()]).status.success());
+    // The operator sets the server up again on the same address.
+    drop(s);
+    let listen = format!("127.0.0.1:{}", first.port);
+    let s = (0..50)
+        .find_map(|_| {
+            server_at(&listen, |c| c).or_else(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                None
+            })
+        })
+        .expect("no new server on the old port");
+    let link = server_invite(&s);
+    let new: InviteLink = link.parse().unwrap();
+    assert_ne!(new.cert_fpr, first.cert_fpr);
+    let o = run(&ada, &["join", "--new-certificate", &link]);
+    let said = out(&o);
+    assert!(o.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "socketchat now trusts the new certificate for 127.0.0.1:{}.",
+            first.port
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "Old certificate: {}",
+            fingerprint_text(&first.cert_fpr)
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "New certificate: {}",
+            fingerprint_text(&new.cert_fpr)
+        )),
+        "{said}"
+    );
+    let o = run(&ada, &["new", "After"]);
     assert!(o.status.success(), "{}", out(&o));
 }
 

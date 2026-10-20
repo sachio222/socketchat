@@ -9,6 +9,62 @@ use socketchat_core::client::{Client, Event};
 use socketchat_proto::msg::GroupId;
 use socketchat_testkit::{drain, passphrase, settle, TestClient, TestServer};
 
+// ---------- names owed after an add ----------
+
+/// Ada lets Bo in, but sharing her name and the group's name fails right
+/// after the server took the add. She still owes them to Bo, and a later
+/// sync sends them.
+#[tokio::test]
+async fn names_owed_after_a_join_request_add_go_out_later() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    a.test_fail_next_after_add(g);
+    settle(&mut [&mut a, &mut b]).await;
+    let name = b.groups().into_iter().find(|x| x.id == g).map(|x| x.name);
+    assert_eq!(
+        name.as_deref(),
+        Some("Crew"),
+        "Bo never learns the group's name"
+    );
+    assert!(
+        b.members(g).iter().any(|m| m.name == "Ada"),
+        "Bo never learns Ada's name: {:?}",
+        b.members(g)
+    );
+}
+
+/// The same for a direct message: the add went through, sharing Ada's name
+/// failed once, and Bo still gets it.
+#[tokio::test]
+async fn names_owed_after_a_dm_add_go_out_later() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    let bk = b.my_group_key(g).unwrap();
+    let dm = a.dm(g, &bk).await.unwrap();
+    a.test_fail_next_after_add(dm);
+    settle(&mut [&mut a, &mut b]).await;
+    assert!(
+        b.groups().iter().any(|x| x.id == dm && x.is_dm),
+        "Bo is not in the direct message"
+    );
+    assert!(
+        b.members(dm).iter().any(|m| m.name == "Ada"),
+        "Bo never learns Ada's name in the direct message: {:?}",
+        b.members(dm)
+    );
+}
+
 fn warnings(events: &[Event]) -> Vec<String> {
     events
         .iter()
