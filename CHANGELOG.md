@@ -16,5 +16,6 @@ The first release of socketchat v4: a rewrite in Rust of the earlier Python vers
 - **A server that cannot read**: it checks signed group changes and admin rights, stores only encrypted data, and keeps no record that ties one person's groups together.
 - **Files, photos and videos**, encrypted in chunks with a fresh key per file. Photos lose their location and device data before sending; videos ask first, because they keep theirs.
 - **A terminal chat screen** that works at 80 by 24 and over SSH, with commands for invites, direct chats, files, verification and admins.
-- **Encrypted local storage** keyed by your passphrase.
+- **Encrypted local storage** keyed by your passphrase, locked so only one copy of socketchat opens a profile at a time.
+- **A server built to face the open internet**: every connection has a memory budget, idle and silent connections are closed, large backlogs come back in pages, and a server that is full says so. Three rounds of security review went into this release.
 - **One-line installers** for macOS, Linux and Windows. The Linux programs run on Intel and AMD machines and on 64-bit ARM, which includes a Raspberry Pi 4 or Zero 2 W.

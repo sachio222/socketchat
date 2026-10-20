@@ -29,8 +29,6 @@ socketchat's server is one program with its data in one folder. A release build 
 
 ## Quick start
 
-The installers below go live with the first release, 0.4.0, which is in final testing. Until then, use "Or build from source" further down.
-
 Install socketchat with one command. On macOS or Linux, run this in a terminal:
 
 ```
