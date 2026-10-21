@@ -21,3 +21,4 @@ directories.workspace = true
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true
+socketchat-testkit.workspace = true

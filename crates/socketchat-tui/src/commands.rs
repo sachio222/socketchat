@@ -2,18 +2,40 @@
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
-    Invite { dm: bool },
+    Invite {
+        dm: bool,
+    },
     Join(String),
     New(String),
     Dm(String),
     Send(String),
-    Save { file: String, dir: Option<String> },
+    Save {
+        file: String,
+        dir: Option<String>,
+    },
     Verify(String),
-    Rename { name: String, new: String },
+    Rename {
+        name: String,
+        new: String,
+    },
     Name(String),
     Kick(String),
     Admin(String),
     Leave,
+    /// Open another room: by name, or the switcher with no name.
+    Switch(Option<String>),
+    /// Rename this room for everyone.
+    Title(String),
+    Close,
+    /// Vote to keep this room open.
+    Keep,
+    Invites,
+    /// Cancel the link at this number in the last `/invites` list.
+    Cancel(usize),
+    Mute,
+    Unmute,
+    Details,
+    Clear,
     Help,
     Quit,
 }
@@ -41,7 +63,20 @@ pub const HELP: &[(&str, &str)] = &[
     ("/name <new>", "change the name others see for you"),
     ("/kick <name>", "remove someone (admins)"),
     ("/admin <name>", "make someone an admin (admins)"),
-    ("/leave", "leave this chat"),
+    ("/leave", "leave this chat and delete its history here"),
+    (
+        "/switch [room]",
+        "open another room; Tab completes the name",
+    ),
+    ("/title <name>", "rename this room for everyone (admins)"),
+    ("/close", "close this room for everyone (admins agree)"),
+    ("/keep", "say no to closing this room (admins)"),
+    ("/invites", "see your open invite links"),
+    ("/cancel <number>", "stop an invite link from /invites"),
+    ("/mute", "hide this room's new-message count"),
+    ("/unmute", "show this room's new-message count again"),
+    ("/details", "see this room's admins, size and age"),
+    ("/clear", "delete this room's messages from this computer"),
     ("/quit", "close socketchat"),
 ];
 
@@ -110,6 +145,19 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         "/kick" => Command::Kick(need("/kick <name>")?),
         "/admin" => Command::Admin(need("/admin <name>")?),
         "/leave" => Command::Leave,
+        "/switch" => Command::Switch((!rest.is_empty()).then(|| rest.to_string())),
+        "/title" => Command::Title(need("/title <name>")?),
+        "/close" => Command::Close,
+        "/keep" => Command::Keep,
+        "/invites" => Command::Invites,
+        "/cancel" => Command::Cancel(
+            rest.parse()
+                .map_err(|_| "Usage: /cancel <number>".to_string())?,
+        ),
+        "/mute" => Command::Mute,
+        "/unmute" => Command::Unmute,
+        "/details" => Command::Details,
+        "/clear" => Command::Clear,
         "/help" => Command::Help,
         "/quit" => Command::Quit,
         other => {

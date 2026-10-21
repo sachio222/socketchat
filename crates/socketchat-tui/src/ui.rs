@@ -7,11 +7,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
+use socketchat_core::client::Ended;
 use socketchat_core::invite::hours_text;
 use socketchat_core::keys::Key;
 use socketchat_proto::msg::GroupId;
 
-use crate::app::{App, Focus, Modal};
+use crate::app::{ended_hint, pick_room, App, Focus, Modal};
 use crate::commands::HELP;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +21,10 @@ pub struct GroupView {
     pub name: String,
     pub unread: u32,
     pub is_dm: bool,
+    /// Muted on this computer: no count, and the name is dim.
+    pub muted: bool,
+    /// Why this person is no longer in the room; `None` while they are.
+    pub ended: Option<Ended>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,7 +65,9 @@ pub fn fit(s: &str, w: usize) -> String {
     } else if w == 0 {
         String::new()
     } else {
-        s.chars().take(w - 1).chain(std::iter::once('…')).collect()
+        // "Book…", not "Book …".
+        let head: String = s.chars().take(w - 1).collect();
+        format!("{}…", head.trim_end())
     }
 }
 
@@ -111,6 +118,9 @@ fn help_line(app: &App) -> &'static str {
             Modal::ConfirmVideo { .. } => "Y send it · N cancel",
             Modal::NewCertificate { .. } => "Y trust the new certificate · N keep the old one",
             Modal::Invite { .. } => "C copy the link · Esc close",
+            Modal::Confirm { .. } => "Y yes · N no",
+            Modal::Invites { .. } => "/cancel <number> stops a link · Esc close",
+            Modal::Help { .. } => "Up/Down scroll · Esc close",
             _ => "Esc close",
         };
     }
@@ -127,11 +137,12 @@ fn help_line(app: &App) -> &'static str {
 
 pub fn draw(f: &mut Frame, app: &App, vm: &ViewModel) {
     let area = f.area();
+    let input = input_lines(app, vm, area.width.saturating_sub(2) as usize);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(input.len() as u16 + 2),
             Constraint::Length(1),
         ])
         .split(area);
@@ -148,7 +159,7 @@ pub fn draw(f: &mut Frame, app: &App, vm: &ViewModel) {
     draw_messages(f, app, vm, cols[1]);
     draw_members(f, app, vm, cols[2]);
 
-    draw_input(f, app, vm, rows[1]);
+    draw_input(f, app, input, rows[1]);
     // A status message replaces the help line until the next key, so it is
     // seen without covering what the person types.
     let help = match &app.status {
@@ -167,73 +178,92 @@ pub fn draw(f: &mut Frame, app: &App, vm: &ViewModel) {
         draw_switcher(f, app, vm, area);
     }
     if let Some(m) = &app.modal {
-        draw_modal(f, m, area);
+        draw_modal(f, app, m, area);
     }
 }
 
 /// Shown in the empty message box.
 const COMMANDS_HINT: &str = "/ for commands";
 
-/// The framed message box: a hint naming the open chat while it is empty,
-/// and what the person types once they start.
-fn draw_input(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
+/// The rows inside the message box, `w` characters wide: a hint naming
+/// the open chat while it is empty, and what the person types once they
+/// start. The hint for a room this person is no longer in wraps onto
+/// more rows rather than being cut short.
+fn input_lines(app: &App, vm: &ViewModel, w: usize) -> Vec<Line<'static>> {
+    // Typed text and the hint both start after the "› " prompt's width.
+    let start = 2.min(w);
+    if !app.input.is_empty() {
+        let room = w.saturating_sub(start + 1);
+        let n = app.input.chars().count();
+        let shown: String = app.input.chars().skip(n.saturating_sub(room)).collect();
+        return vec![Line::from(vec![Span::raw("› "), Span::raw(shown)])];
+    }
+    let dim = Style::default().fg(Color::DarkGray);
+    let room = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let avail = w - start;
+    let open = vm.groups.iter().find(|g| Some(g.id) == app.selected);
+    let mut rows: Vec<Vec<Span<'static>>> = match open {
+        Some(GroupView {
+            ended: Some(why), ..
+        }) => wrap(ended_hint(*why), avail)
+            .into_iter()
+            .map(|l| vec![Span::styled(l, dim)])
+            .collect(),
+        Some(g) if g.is_dm => {
+            let before = "Say hi to ";
+            vec![vec![
+                Span::styled(before, dim),
+                Span::styled(fit(&g.name, avail.saturating_sub(before.len())), room),
+            ]]
+        }
+        Some(g) => {
+            let (before, after) = ("What's on your mind, ", "?");
+            vec![vec![
+                Span::styled(before, dim),
+                Span::styled(
+                    fit(&g.name, avail.saturating_sub(before.len() + after.len())),
+                    room,
+                ),
+                Span::styled(after, dim),
+            ]]
+        }
+        None => vec![vec![Span::styled(
+            fit(
+                "Start a chat with /new <name>, or paste an invite with /join <link>",
+                avail,
+            ),
+            dim,
+        )]],
+    };
+    // "/ for commands" sits at the right end of the last row, if it fits.
+    if let Some(last) = rows.last_mut() {
+        let used: usize = last.iter().map(|s| s.content.chars().count()).sum();
+        let cmd = COMMANDS_HINT.chars().count();
+        if used + 2 + cmd <= avail {
+            last.push(Span::raw(" ".repeat(avail - used - cmd)));
+            last.push(Span::styled(COMMANDS_HINT, dim));
+        }
+    }
+    rows.into_iter()
+        .map(|mut spans| {
+            spans.insert(0, Span::raw(" ".repeat(start)));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The framed message box, holding `lines` from [`input_lines`].
+fn draw_input(f: &mut Frame, app: &App, lines: Vec<Line<'static>>, r: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border(app.focus == Focus::Input));
     let inner = block.inner(r);
     f.render_widget(block, r);
     let w = inner.width as usize;
-    // Typed text and the hint both start after the "› " prompt's width.
     let start = 2.min(w);
-    let line = if app.input.is_empty() {
-        let dim = Style::default().fg(Color::DarkGray);
-        let room = Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD);
-        let avail = w - start;
-        let open = vm.groups.iter().find(|g| Some(g.id) == app.selected);
-        let mut spans: Vec<Span> = match open {
-            Some(g) if g.is_dm => {
-                let before = "Say hi to ";
-                vec![
-                    Span::styled(before, dim),
-                    Span::styled(fit(&g.name, avail.saturating_sub(before.len())), room),
-                ]
-            }
-            Some(g) => {
-                let (before, after) = ("What's on your mind, ", "?");
-                vec![
-                    Span::styled(before, dim),
-                    Span::styled(
-                        fit(&g.name, avail.saturating_sub(before.len() + after.len())),
-                        room,
-                    ),
-                    Span::styled(after, dim),
-                ]
-            }
-            None => vec![Span::styled(
-                fit(
-                    "Start a chat with /new <name>, or paste an invite with /join <link>",
-                    avail,
-                ),
-                dim,
-            )],
-        };
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let cmd = COMMANDS_HINT.chars().count();
-        if used + 2 + cmd <= avail {
-            spans.push(Span::raw(" ".repeat(avail - used - cmd)));
-            spans.push(Span::styled(COMMANDS_HINT, dim));
-        }
-        spans.insert(0, Span::raw(" ".repeat(start)));
-        Line::from(spans)
-    } else {
-        let room = w.saturating_sub(start + 1);
-        let n = app.input.chars().count();
-        let shown: String = app.input.chars().skip(n.saturating_sub(room)).collect();
-        Line::from(vec![Span::raw("› "), Span::raw(shown)])
-    };
-    f.render_widget(Paragraph::new(line), inner);
+    f.render_widget(Paragraph::new(lines), inner);
     if app.modal.is_none() && app.switcher.is_none() {
         // While empty, the cursor waits in the gap before the hint so it
         // never hides a letter; once typing starts it follows the text.
@@ -253,22 +283,41 @@ fn draw_groups(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
         .iter()
         .map(|g| {
             let mark = if g.is_dm { "@" } else { "#" };
-            let count = if g.unread > 0 {
+            // A muted room shows no count.
+            let count = if g.unread > 0 && !g.muted {
                 format!(" {}", g.unread.min(99))
             } else {
                 String::new()
             };
-            let name = fit(&g.name, w.saturating_sub(2 + count.chars().count()));
-            let pad = w.saturating_sub(2 + name.chars().count() + count.chars().count());
-            let text = format!("{mark} {name}{}{count}", " ".repeat(pad));
-            let style = if Some(g.id) == app.selected {
+            let ended = match g.ended {
+                Some(Ended::Closed) => " (closed)",
+                Some(Ended::Left) => " (left)",
+                Some(Ended::Removed) => " (removed)",
+                None => "",
+            };
+            let (count_w, ended_w) = (count.chars().count(), ended.chars().count());
+            let name = fit(&g.name, w.saturating_sub(2 + ended_w + count_w));
+            let pad = w.saturating_sub(2 + name.chars().count() + ended_w + count_w);
+            let selected = Some(g.id) == app.selected;
+            let style = if selected {
                 Style::default().add_modifier(Modifier::REVERSED)
-            } else if g.unread > 0 {
+            } else if g.muted {
+                Style::default().fg(Color::DarkGray)
+            } else if !count.is_empty() {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            Line::from(Span::styled(text, style))
+            let ended_style = if selected {
+                style
+            } else {
+                style.fg(Color::DarkGray)
+            };
+            Line::from(vec![
+                Span::styled(format!("{mark} {name}"), style),
+                Span::styled(ended, ended_style),
+                Span::styled(format!("{}{count}", " ".repeat(pad)), style),
+            ])
         })
         .collect();
     let block = Block::default()
@@ -422,8 +471,10 @@ fn draw_switcher(f: &mut Frame, app: &App, vm: &ViewModel, area: Rect) {
         "> {}",
         app.switcher.as_deref().unwrap_or("")
     ))];
-    for (i, g) in app.switcher_matches(vm).iter().take(8).enumerate() {
-        let style = if i == 0 {
+    // The room Enter would open stands out.
+    let pick = pick_room(app.switcher.as_deref().unwrap_or(""), &vm.groups).map(|g| g.id);
+    for g in app.switcher_matches(vm).iter().take(8) {
+        let style = if Some(g.id) == pick {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
             Style::default()
@@ -451,10 +502,67 @@ pub fn qr_rows(text: &str) -> Vec<String> {
     }
 }
 
-fn draw_modal(f: &mut Frame, m: &Modal, area: Rect) {
+/// Width of the command column in the help box: the longest command and
+/// one space.
+const HELP_COLUMN: usize = 22;
+
+/// Every row of the help box at `inner_w` characters wide. A description
+/// too long for its row goes on under itself, never cut short.
+fn help_rows(inner_w: usize) -> Vec<Line<'static>> {
+    let cyan = Style::default().fg(Color::Cyan);
+    let mut rows = vec![];
+    for (c, d) in HELP {
+        for (i, part) in wrap(d, inner_w.saturating_sub(HELP_COLUMN))
+            .into_iter()
+            .enumerate()
+        {
+            let head = if i == 0 { *c } else { "" };
+            rows.push(Line::from(vec![
+                Span::styled(format!("{head:<HELP_COLUMN$}"), cyan),
+                Span::raw(part),
+            ]));
+        }
+    }
+    rows
+}
+
+/// Lines of plain text, each wrapped to `w`.
+fn wrapped(lines: &[String], w: usize) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .flat_map(|l| wrap(l, w))
+        .map(Line::from)
+        .collect()
+}
+
+fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
     let width = area.width.saturating_sub(4).min(76);
     let inner_w = width.saturating_sub(2) as usize;
+    let max_h = area.height.saturating_sub(2) as usize;
     let (title, mut lines): (String, Vec<Line>) = match m {
+        Modal::Confirm { question, .. } => (String::new(), wrapped(std::slice::from_ref(question), inner_w)),
+        Modal::Invites { rows } => (" Open invite links ".into(), wrapped(rows, inner_w)),
+        Modal::Details { lines } => (" Room details ".into(), wrapped(lines, inner_w)),
+        Modal::Help { offset } => {
+            let all = help_rows(inner_w);
+            // Rows inside the box at most, with a frame above and below.
+            let fits = max_h.saturating_sub(2).max(2);
+            let max = all.len().saturating_sub(fits);
+            app.help_scroll.set((max, fits));
+            let top = (*offset).min(max);
+            let shown: Vec<Line> = if top < max {
+                // Rows below are cut off: the last row says so.
+                let mut v: Vec<Line> = all[top..top + fits - 1].to_vec();
+                v.push(Line::from(Span::styled(
+                    "↓ more",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                v
+            } else {
+                all[top..].to_vec()
+            };
+            (" Commands ".into(), shown)
+        }
         Modal::Invite { link, hours } => {
             let mut v: Vec<Line> = wrap(
                 &format!(
@@ -534,14 +642,7 @@ fn draw_modal(f: &mut Frame, m: &Modal, area: Rect) {
             }
             (" New server certificate ".into(), v)
         }
-        Modal::Help => (
-            " Commands ".into(),
-            HELP.iter()
-                .map(|(c, d)| Line::from(vec![Span::styled(format!("{c:<22}"), Style::default().fg(Color::Cyan)), Span::raw(fit(d, inner_w.saturating_sub(22)))]))
-                .collect(),
-        ),
     };
-    let max_h = area.height.saturating_sub(2) as usize;
     if lines.len() + 2 > max_h {
         lines.truncate(max_h.saturating_sub(2));
     }
