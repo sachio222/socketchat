@@ -167,6 +167,12 @@ CREATE TABLE IF NOT EXISTS vouchers (
     secret BLOB,
     PRIMARY KEY (group_id, token)
 );
+CREATE TABLE IF NOT EXISTS invites_made (
+    token BLOB PRIMARY KEY,
+    server_id INTEGER NOT NULL,
+    group_id BLOB,
+    expires_unix INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS files (
     id BLOB PRIMARY KEY,
     group_id BLOB NOT NULL,
@@ -242,6 +248,8 @@ pub const ROOM_STATE_TABLES: &[&str] = &[
     "expected_joiners",
     "close_votes",
     "close_kept",
+    // Server links have no `group_id`, so ending a room leaves them be.
+    "invites_made",
 ];
 
 /// Tables holding a room's history, each keyed by `group_id`. An ended
@@ -1089,6 +1097,78 @@ impl Store {
                 v.request_key.0.as_slice(),
                 v.seal_key.as_slice()
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Remembers an invite link this client made. `group` is `None` for a
+    /// server link.
+    pub fn save_invite_made(
+        &self,
+        token: &Token,
+        server_id: i64,
+        group: Option<&GroupId>,
+        expires_unix: u64,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO invites_made (token, server_id, group_id, expires_unix)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                token.0.as_slice(),
+                server_id,
+                group.map(|g| g.0.as_slice()),
+                expires_unix as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The links this client made on a server: token, room (`None` for a
+    /// server link) and expiry.
+    pub fn invites_made_on(
+        &self,
+        server_id: i64,
+    ) -> Result<Vec<(Token, Option<GroupId>, u64)>, CoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT token, group_id, expires_unix FROM invites_made WHERE server_id = ?1",
+        )?;
+        let rows = st.query_map([server_id], |r| {
+            let t: Vec<u8> = r.get(0)?;
+            let g: Option<Vec<u8>> = r.get(1)?;
+            Ok((
+                Token(t.try_into().unwrap_or([0; 16])),
+                g.map(|g| GroupId(g.try_into().unwrap_or([0; 16]))),
+                r.get::<_, i64>(2)? as u64,
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The server holding a link this client made: from the links it
+    /// recorded, else from the room of a voucher it made.
+    pub fn invite_server(&self, token: &Token) -> Result<Option<i64>, CoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT server_id FROM invites_made WHERE token = ?1
+                 UNION ALL
+                 SELECT g.server_id FROM vouchers v JOIN groups g ON g.id = v.group_id
+                 WHERE v.token = ?1 AND v.mine = 1",
+                [token.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Forgets a link this client made, and the voucher kept for it.
+    pub fn forget_invite(&self, token: &Token) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM invites_made WHERE token = ?1",
+            [token.0.as_slice()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM vouchers WHERE token = ?1 AND mine = 1",
+            [token.0.as_slice()],
         )?;
         Ok(())
     }

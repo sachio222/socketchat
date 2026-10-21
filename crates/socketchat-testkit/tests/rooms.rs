@@ -1319,3 +1319,117 @@ async fn retry_after_giving_up_posts_closed_once() {
     closed_for(&c, g);
     assert_eq!(server_rows(&s, g), (0, 0));
 }
+
+// ---------- open invite links ----------
+
+const NOT_VALID: &str = "this invite link is not valid on this server";
+
+#[tokio::test]
+async fn invites_lists_room_and_server_links() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let (room_link, room_exp) = a.invite(Some(g), false).await.unwrap();
+    let (server_link, server_exp) = a.invite(None, false).await.unwrap();
+    let list = a.invites().await.unwrap();
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert!(list
+        .windows(2)
+        .all(|w| w[0].expires_unix <= w[1].expires_unix));
+    let room = list.iter().find(|i| i.token == room_link.token).unwrap();
+    assert_eq!(room.group, Some(g));
+    assert_eq!(room.label, "Crew");
+    assert_eq!(room.expires_unix, room_exp);
+    let server = list.iter().find(|i| i.token == server_link.token).unwrap();
+    assert_eq!(server.group, None);
+    assert_eq!(server.label, "Server invite");
+    assert_eq!(server.expires_unix, server_exp);
+}
+
+#[tokio::test]
+async fn cancelled_link_no_longer_works() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let (room_link, _) = a.invite(Some(g), false).await.unwrap();
+    let (server_link, _) = a.invite(None, false).await.unwrap();
+    a.cancel_invite(room_link.token).await.unwrap();
+    let list = a.invites().await.unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0].token, server_link.token);
+    let mut b = TestClient::profile_only("Bo").await;
+    let err = b.join(&room_link).await.unwrap_err();
+    assert!(err.to_string().contains(NOT_VALID), "{err}");
+    // The link is gone for good, and so is a server link once cancelled.
+    a.cancel_invite(server_link.token).await.unwrap();
+    assert!(a.invites().await.unwrap().is_empty());
+    let mut c = TestClient::profile_only("Cy").await;
+    let err = c.join(&server_link).await.unwrap_err();
+    assert!(err.to_string().contains(NOT_VALID), "{err}");
+}
+
+#[tokio::test]
+async fn used_link_drops_off_the_list() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let (link, _) = a.invite(Some(g), false).await.unwrap();
+    let (spare, _) = a.invite(Some(g), false).await.unwrap();
+    let mut b = TestClient::new(&s, "Bo").await;
+    b.join(&link).await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    let list = a.invites().await.unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0].token, spare.token);
+    // Cancelling the used link says so, and leaves the other alone.
+    let err = a.cancel_invite(link.token).await.unwrap_err();
+    assert!(err.to_string().contains("isn't one of yours"), "{err}");
+    assert_eq!(a.invites().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn invites_on_protocol_1_server_warn() {
+    let s = TestServer::start_with(|c| c.protocol_max = 1).await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    a.invite(Some(g), false).await.unwrap();
+    drain(&mut a).await;
+    assert!(a.invites().await.unwrap().is_empty());
+    let ev = drain(&mut a).await;
+    let want = format!(
+        "{} runs an older version of socketchat, so its invite links can't be listed here.",
+        s.addr().ip()
+    );
+    let got: Vec<_> = warnings(&ev);
+    assert_eq!(got.len(), 1, "{ev:?}");
+    assert!(matches!(got[0], Event::Warning(w) if *w == want), "{ev:?}");
+}
+
+#[tokio::test]
+async fn cancel_unknown_link_says_so() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let err = a
+        .cancel_invite(socketchat_proto::Token([7; 16]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, CoreError::Other(m) if m == "That invite link isn't one of yours, or it's already gone."),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn leaving_a_room_drops_its_invite_rows_but_not_server_links() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    a.invite(Some(g), false).await.unwrap();
+    let (server_link, _) = a.invite(None, false).await.unwrap();
+    assert!(a.test_traces(g).contains(&"invites_made"));
+    a.leave(g).await.unwrap();
+    assert!(a.test_traces(g).is_empty(), "{:?}", a.test_traces(g));
+    let list = a.invites().await.unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0].token, server_link.token);
+}

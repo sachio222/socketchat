@@ -138,6 +138,17 @@ impl Ended {
 /// The longest an ended room's unread messages stay on this computer.
 pub const KEEP_UNSEEN_SECS: u64 = 30 * 24 * 3600;
 
+/// An open invite link, as [`Client::invites`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InviteView {
+    pub token: Token,
+    /// The room it leads into; `None` for a server invite.
+    pub group: Option<GroupId>,
+    /// The room's name, or `"Server invite"`.
+    pub label: String,
+    pub expires_unix: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupSummary {
     pub id: GroupId,
@@ -1330,6 +1341,8 @@ impl Client {
         else {
             return Err(CoreError::Net(NetError::Unexpected("no invite".into())));
         };
+        self.store
+            .save_invite_made(&token, server_id, gid.as_ref(), expires_unix)?;
         let mut link = InviteLink {
             host: row.host,
             port: row.port,
@@ -1379,6 +1392,81 @@ impl Client {
             link.secret = Some(secret);
         }
         Ok((link, expires_unix))
+    }
+
+    /// The invite links this client made that are still open, soonest to
+    /// expire first. Each server is asked; a link it no longer lists was
+    /// used, has expired or was cancelled, and is forgotten here. A server
+    /// on protocol 1 can't list, so it adds a warning and is skipped.
+    pub async fn invites(&mut self) -> Result<Vec<InviteView>, CoreError> {
+        let mut out = Vec::new();
+        for server in self.store.servers()? {
+            let protocol = self.conn(server.id).await?.protocol();
+            if protocol < 2 {
+                self.emit(Event::Warning(format!(
+                    "{} runs an older version of socketchat, so its invite links can't be listed here.",
+                    server.host
+                )));
+                continue;
+            }
+            let made = self.store.invites_made_on(server.id)?;
+            let server_tokens: Vec<Token> = made
+                .iter()
+                .filter(|(_, g, _)| g.is_none())
+                .map(|(t, _, _)| *t)
+                .collect();
+            let Response::Invites(open) = self
+                .request(server.id, Request::ListInvites { server_tokens })
+                .await?
+            else {
+                return Err(CoreError::Net(NetError::Unexpected(
+                    "no invite list".into(),
+                )));
+            };
+            for (token, ..) in &made {
+                if !open.iter().any(|i| i.token == *token) {
+                    self.store.forget_invite(token)?;
+                }
+            }
+            for info in open {
+                // A room link made before this client kept a list.
+                if !made.iter().any(|(t, ..)| *t == info.token) {
+                    self.store.save_invite_made(
+                        &info.token,
+                        server.id,
+                        info.group.as_ref(),
+                        info.expires_unix,
+                    )?;
+                }
+                let label = match info.group {
+                    Some(g) => match self.groups.get(&g) {
+                        Some(l) => l.row.name.clone(),
+                        None => continue,
+                    },
+                    None => "Server invite".to_string(),
+                };
+                out.push(InviteView {
+                    token: info.token,
+                    group: info.group,
+                    label,
+                    expires_unix: info.expires_unix,
+                });
+            }
+        }
+        out.sort_by_key(|i| i.expires_unix);
+        Ok(out)
+    }
+
+    /// Cancels an open invite link this client made, so it stops working.
+    pub async fn cancel_invite(&mut self, token: Token) -> Result<(), CoreError> {
+        let Some(server_id) = self.store.invite_server(&token)? else {
+            return Err(CoreError::Other(
+                "That invite link isn't one of yours, or it's already gone.".into(),
+            ));
+        };
+        self.request(server_id, Request::CancelInvite { token })
+            .await?;
+        self.store.forget_invite(&token)
     }
 
     /// Whole hours from now until `expires_unix`, for telling someone when
