@@ -1214,3 +1214,108 @@ async fn failed_close_check_is_one_rooms_warning() {
     assert_eq!(warnings(&ev).len(), 1, "{ev:?}");
     assert!(texts(&b, g).contains(&"one".to_string()));
 }
+
+#[tokio::test]
+async fn kept_request_stays_kept_after_an_admin_leaves() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Cy", "Di"], 3).await;
+    cs[0].vote_close(g, true).await.unwrap();
+    settle_all(&mut cs).await;
+    cs[1].vote_close(g, true).await.unwrap();
+    settle_all(&mut cs).await;
+    assert_eq!(
+        cs[2].vote_close(g, false).await.unwrap(),
+        CloseOutcome::Kept
+    );
+    settle_all(&mut cs).await;
+    let kept = cs[0].close_state(g).unwrap();
+    assert!(kept.kept);
+    // Kept for good, in a table ending the room deletes.
+    assert!(cs[0].test_traces(g).contains(&"close_kept"));
+    // With Cy gone, Ada's and Bo's yes would be all two admins.
+    let mut cy = cs.remove(2);
+    cy.leave(g).await.unwrap();
+    settle_all(&mut cs).await;
+    settle_all(&mut cs).await;
+    for c in &cs {
+        assert_eq!(summary(c, g).ended, None, "{}", c.display_name());
+        let view = c.close_state(g).unwrap();
+        assert!(view.kept, "{}: {view:?}", c.display_name());
+        assert_eq!(view.close_id, kept.close_id);
+    }
+    assert_eq!(cs[0].members(g).len(), 3);
+    assert_eq!(server_rows(&s, g).0, 1);
+    // Asking again starts a new request.
+    assert_eq!(
+        cs[0].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Waiting { yes: 1, needed: 2 }
+    );
+    let fresh = cs[0].close_state(g).unwrap();
+    assert_ne!(fresh.close_id, kept.close_id);
+    assert!(!fresh.kept);
+}
+
+#[tokio::test]
+async fn kept_request_closed_by_an_admin_leaving_stays_kept() {
+    let s = TestServer::start().await;
+    // Five admins need three. Ada says yes, Bo and Cy say no: three can
+    // still agree until Di leaves.
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Cy", "Di", "Ed"], 5).await;
+    cs[0].vote_close(g, true).await.unwrap();
+    settle_all(&mut cs).await;
+    cs[1].vote_close(g, false).await.unwrap();
+    settle_all(&mut cs).await;
+    cs[2].vote_close(g, false).await.unwrap();
+    settle_all(&mut cs).await;
+    assert!(!cs[0].close_state(g).unwrap().kept);
+    let mut di = cs.remove(3);
+    di.leave(g).await.unwrap();
+    settle_all(&mut cs).await;
+    let kept = cs[0].close_state(g).unwrap();
+    assert!(kept.kept, "{kept:?}");
+    assert!(texts(&cs[0], g)
+        .contains(&"This room stays open: too few admins agreed to close it.".to_string()));
+    // Bo and Cy change their minds, but the request was kept: it never
+    // closes the room.
+    cs[1]
+        .test_send_app(
+            g,
+            &AppMsg::CloseVote {
+                close_id: kept.close_id,
+                yes: true,
+            },
+        )
+        .await
+        .unwrap();
+    cs[2]
+        .test_send_app(
+            g,
+            &AppMsg::CloseVote {
+                close_id: kept.close_id,
+                yes: true,
+            },
+        )
+        .await
+        .unwrap();
+    settle_all(&mut cs).await;
+    for c in &cs {
+        assert_eq!(summary(c, g).ended, None, "{}", c.display_name());
+    }
+    assert_eq!(server_rows(&s, g).0, 1);
+}
+
+#[tokio::test]
+async fn retry_after_giving_up_posts_closed_once() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b, mut c) = trio(&s).await;
+    a.test_refuse_next_close_commit();
+    assert!(a.vote_close(g, true).await.is_err());
+    assert!(a.my_group_key(g).is_some());
+    assert_eq!(a.test_closed_posts(), 1);
+    assert_eq!(a.vote_close(g, true).await.unwrap(), CloseOutcome::Closed);
+    assert_eq!(a.test_closed_posts(), 1);
+    settle(&mut [&mut b, &mut c]).await;
+    closed_for(&b, g);
+    closed_for(&c, g);
+    assert_eq!(server_rows(&s, g), (0, 0));
+}

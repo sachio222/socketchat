@@ -41,16 +41,24 @@ pub struct Request {
     pub admins: usize,
     /// This member's own vote, whether or not it counts.
     pub my_vote: Option<bool>,
+    /// This app saw it kept: it stays kept, whatever the count says now.
+    pub kept_here: bool,
 }
 
 impl Request {
-    /// Enough admins said yes: the room closes.
+    /// Enough admins said yes: the room closes. A kept request never is.
     pub fn met(&self) -> bool {
-        self.admins > 0 && self.yes >= self.needed
+        !self.kept_here && self.admins > 0 && self.yes >= self.needed
     }
 
-    /// Too many admins said no for the rest to reach `needed`.
+    /// Ended without closing: too many admins said no for the rest to
+    /// reach `needed`, now or at any time this app counted it.
     pub fn kept(&self) -> bool {
+        self.kept_here || self.too_few()
+    }
+
+    /// Too many admins say no now for the rest to reach `needed`.
+    pub fn too_few(&self) -> bool {
         self.admins.saturating_sub(self.no) < self.needed
     }
 
@@ -68,8 +76,9 @@ impl Request {
 
 /// Every request with at least one vote from a current admin, in the
 /// order their first counted vote arrived. Only votes from `admins` count,
-/// and a voter's newer vote replaces the older.
-pub fn requests(votes: &[Vote], admins: &[Key], me: &Key) -> Vec<Request> {
+/// and a voter's newer vote replaces the older. `kept` lists the requests
+/// this app already saw kept.
+pub fn requests(votes: &[Vote], admins: &[Key], me: &Key, kept: &[[u8; 16]]) -> Vec<Request> {
     let mut out: Vec<Request> = Vec::new();
     let mut ids: Vec<[u8; 16]> = Vec::new();
     for v in votes {
@@ -110,6 +119,7 @@ pub fn requests(votes: &[Vote], admins: &[Key], me: &Key) -> Vec<Request> {
             needed,
             admins: admins.len(),
             my_vote: latest.iter().find(|v| v.voter == *me).map(|v| v.yes),
+            kept_here: kept.contains(&id),
         });
     }
     out.sort_by_key(|r| r.first_unix);
@@ -179,11 +189,11 @@ mod tests {
     fn only_admin_votes_count() {
         let admins = [k(1), k(2), k(3)];
         let votes = [vote(1, 1, true, 10), vote(1, 9, true, 11)];
-        let rs = requests(&votes, &admins, &k(1));
+        let rs = requests(&votes, &admins, &k(1), &[]);
         assert_eq!(rs.len(), 1);
         assert_eq!((rs[0].yes, rs[0].needed, rs[0].admins), (1, 3, 3));
         // Votes from nobody who is an admin make no request.
-        assert!(requests(&[vote(2, 9, true, 10)], &admins, &k(1)).is_empty());
+        assert!(requests(&[vote(2, 9, true, 10)], &admins, &k(1), &[]).is_empty());
     }
 
     #[test]
@@ -194,7 +204,7 @@ mod tests {
             vote(1, 2, true, 11),
             vote(1, 2, false, 12),
         ];
-        let r = &requests(&votes, &admins, &k(2))[0];
+        let r = &requests(&votes, &admins, &k(2), &[])[0];
         assert_eq!((r.yes, r.no), (1, 1));
         assert_eq!(r.my_vote, Some(false));
         assert_eq!(r.asked_by, Some(k(1)));
@@ -211,6 +221,7 @@ mod tests {
             ],
             &admins,
             &k(1),
+            &[],
         );
         assert!(met[0].met() && !met[0].kept());
         // Four admins need three: two saying no leave only two who could agree.
@@ -222,12 +233,36 @@ mod tests {
             ],
             &admins,
             &k(1),
+            &[],
         );
         assert!(kept[0].kept() && !kept[0].met());
         assert!(open_request(&kept, 0).is_none());
         assert_eq!(current(&kept, 0).map(|r| r.close_id), Some([1; 16]));
-        let one_no = requests(&[vote(1, 1, true, 0), vote(1, 2, false, 0)], &admins, &k(1));
+        let one_no = requests(
+            &[vote(1, 1, true, 0), vote(1, 2, false, 0)],
+            &admins,
+            &k(1),
+            &[],
+        );
         assert!(!one_no[0].kept());
+    }
+
+    #[test]
+    fn kept_here_stays_kept() {
+        // Three admins, Cy said no: kept. Cy leaves; the two yes votes
+        // would now be enough, but the request stays kept.
+        let votes = [
+            vote(1, 1, true, 0),
+            vote(1, 2, true, 0),
+            vote(1, 3, false, 0),
+        ];
+        let now = requests(&votes, &[k(1), k(2), k(3)], &k(1), &[]);
+        assert!(now[0].kept());
+        let later = requests(&votes, &[k(1), k(2)], &k(1), &[[1; 16]]);
+        assert!(later[0].kept() && !later[0].met() && !later[0].too_few());
+        assert!(open_request(&later, 0).is_none());
+        let forgot = requests(&votes, &[k(1), k(2)], &k(1), &[]);
+        assert!(forgot[0].met());
     }
 
     #[test]
@@ -237,6 +272,7 @@ mod tests {
             &[vote(1, 1, true, 100), vote(1, 2, true, 200)],
             &admins,
             &k(1),
+            &[],
         );
         assert!(rs[0].met());
         assert!(open_request(&rs, 100 + CLOSE_ASK_SECS - 1).is_some());
@@ -247,7 +283,12 @@ mod tests {
     #[test]
     fn first_open_request_wins() {
         let admins = [k(1), k(2), k(3)];
-        let rs = requests(&[vote(1, 1, true, 5), vote(2, 2, true, 6)], &admins, &k(3));
+        let rs = requests(
+            &[vote(1, 1, true, 5), vote(2, 2, true, 6)],
+            &admins,
+            &k(3),
+            &[],
+        );
         assert_eq!(open_request(&rs, 6).map(|r| r.close_id), Some([1; 16]));
     }
 }

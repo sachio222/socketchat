@@ -217,6 +217,11 @@ CREATE TABLE IF NOT EXISTS close_votes (
     at_unix INTEGER NOT NULL,
     PRIMARY KEY (group_id, close_id, voter)
 );
+CREATE TABLE IF NOT EXISTS close_kept (
+    group_id BLOB NOT NULL,
+    close_id BLOB NOT NULL,
+    PRIMARY KEY (group_id, close_id)
+);
 CREATE TABLE IF NOT EXISTS ended_rooms (
     group_id BLOB PRIMARY KEY,
     name TEXT NOT NULL,
@@ -236,6 +241,7 @@ pub const ROOM_STATE_TABLES: &[&str] = &[
     "owed_proofs",
     "expected_joiners",
     "close_votes",
+    "close_kept",
 ];
 
 /// Tables holding a room's history, each keyed by `group_id`. An ended
@@ -277,24 +283,17 @@ fn delete_state(tx: &rusqlite::Transaction, g: &GroupId, mls: &[u8]) -> Result<(
     Ok(())
 }
 
-/// A `Closed` message this app knows of in a room.
+/// A `Closed` message this app knows of in a room: one it remembers from
+/// someone else, or its own while it closes the room itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Closing {
     pub close_id: [u8; 16],
     /// Who sent it: this member's own key while it closes the room itself.
     pub by: Key,
-    pub step: CloseStep,
-}
-
-/// How far this app got with a close of its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CloseStep {
-    /// Started, or a `Closed` from someone else this app remembers.
-    Started = 0,
-    /// This app's `Closed` went out.
-    Posted = 1,
-    /// This app stopped trying, and said so.
-    GaveUp = 2,
+    /// This app's own `Closed` for `close_id` went out.
+    pub posted: bool,
+    /// This app stopped trying to finish this close, and said so.
+    pub gave_up: bool,
 }
 
 /// How many times [`Store::checkpoint`] tries before it gives up.
@@ -1514,25 +1513,42 @@ impl Store {
         Ok(out)
     }
 
-    /// Records a `Closed` message this app knows of: request `close_id`,
-    /// sent by `by` (this member's own key when it is closing the room
-    /// itself), at step `step`. Stored in `groups.closing` as the 16-byte
-    /// request ID, the 32-byte key, then one byte for the step.
-    pub fn set_closing(
-        &self,
-        g: &GroupId,
-        close_id: &[u8; 16],
-        by: &Key,
-        step: CloseStep,
-    ) -> Result<(), CoreError> {
-        let mut blob = close_id.to_vec();
-        blob.extend_from_slice(&by.0);
-        blob.push(step as u8);
+    /// Records a `Closed` message this app knows of. Stored in
+    /// `groups.closing` as the 16-byte request ID, the 32-byte key, then
+    /// one byte of flags: 1 for posted, 2 for gave up.
+    pub fn set_closing(&self, g: &GroupId, c: &Closing) -> Result<(), CoreError> {
+        let mut blob = c.close_id.to_vec();
+        blob.extend_from_slice(&c.by.0);
+        blob.push(u8::from(c.posted) | (u8::from(c.gave_up) << 1));
         self.conn.execute(
             "UPDATE groups SET closing = ?1 WHERE id = ?2",
             params![blob, g.0.as_slice()],
         )?;
         Ok(())
+    }
+
+    /// Records that a request to close was kept: it never closes the room.
+    pub fn add_kept_close(&self, g: &GroupId, close_id: &[u8; 16]) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO close_kept (group_id, close_id) VALUES (?1, ?2)",
+            params![g.0.as_slice(), close_id.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// The requests to close a room that were kept.
+    pub fn kept_closes(&self, g: &GroupId) -> Result<Vec<[u8; 16]>, CoreError> {
+        let mut st = self
+            .conn
+            .prepare("SELECT close_id FROM close_kept WHERE group_id = ?1")?;
+        let rows = st.query_map([g.0.as_slice()], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(id) = <[u8; 16]>::try_from(row?) {
+                out.push(id);
+            }
+        }
+        Ok(out)
     }
 
     /// Forgets the `Closed` message this app knew of in a room.
@@ -1559,11 +1575,8 @@ impl Store {
             Some(Closing {
                 close_id: b.get(..16)?.try_into().ok()?,
                 by: key_col(Some(b.get(16..48)?.to_vec()))?,
-                step: match b.get(48) {
-                    Some(1) => CloseStep::Posted,
-                    Some(2) => CloseStep::GaveUp,
-                    _ => CloseStep::Started,
-                },
+                posted: b.get(48).is_some_and(|f| f & 1 != 0),
+                gave_up: b.get(48).is_some_and(|f| f & 2 != 0),
             })
         }))
     }

@@ -23,7 +23,7 @@ use crate::keys::{
 };
 use crate::net::{Conn, NetError};
 use crate::provider::Provider;
-use crate::store::{CloseStep, GroupRow, PendingJoin, Profile, Store, StoredVoucher};
+use crate::store::{Closing, GroupRow, PendingJoin, Profile, Store, StoredVoucher};
 use crate::suite::{
     admins_from, group_context_extensions, group_create_config, group_join_config, SUITE,
 };
@@ -341,6 +341,8 @@ struct Hooks {
     closed_posts: usize,
     /// The next check for a close to finish fails.
     fail_close_check: bool,
+    /// The server refuses the next remove commit of a close.
+    refuse_close_commit: bool,
 }
 
 enum DmTodo {
@@ -1219,6 +1221,7 @@ impl Client {
                 live.row.last_update_unix = now;
                 self.store.set_last_update(&gid, now)?;
                 self.note_own_entry(gid, seq);
+                self.mark_kept(gid, Some(seq))?;
                 Ok(Some(seq))
             }
             Err(CoreError::Net(
@@ -2039,6 +2042,8 @@ impl Client {
         for k in removed {
             self.store.remove_member(&gid, k)?;
         }
+        // Someone leaving can leave too few admins to close.
+        self.mark_kept(gid, Some(seq))?;
         if !added.is_empty() || !removed.is_empty() {
             self.emit(Event::MembersChanged { group: gid });
         }
@@ -2285,7 +2290,7 @@ impl Client {
                 let closing = self.store.closing(&gid)?;
                 // This app is closing the room too: it carries on, and its
                 // own commit or its removal ends the room.
-                if closing.is_some_and(|c| Some(c.by) == me && c.step != CloseStep::GaveUp) {
+                if closing.is_some_and(|c| Some(c.by) == me && !c.gave_up) {
                     return Ok(());
                 }
                 let met = self
@@ -2297,9 +2302,16 @@ impl Client {
                 }
                 // Too few votes seen here, as for someone who joined after
                 // them. If this member is removed next, the room was closed.
-                if closing.is_none_or(|c| c.step == CloseStep::GaveUp) {
-                    self.store
-                        .set_closing(&gid, &close_id, &sender, CloseStep::Started)?;
+                if closing.is_none_or(|c| c.gave_up) {
+                    self.store.set_closing(
+                        &gid,
+                        &Closing {
+                            close_id,
+                            by: sender,
+                            posted: false,
+                            gave_up: false,
+                        },
+                    )?;
                 }
             }
         }
@@ -3038,10 +3050,12 @@ impl Client {
             return Ok(vec![]);
         };
         let votes = self.store.close_votes(gid)?;
+        let kept = self.store.kept_closes(gid)?;
         Ok(crate::close::requests(
             &votes,
             &self.current_admins(gid),
             &me,
+            &kept,
         ))
     }
 
@@ -3112,7 +3126,28 @@ impl Client {
         }
         self.store
             .add_message(&gid, seq, None, kind::NOTICE, &text, now)?;
+        self.mark_kept(gid, None)?;
+        let after = self.close_request(&gid, &close_id)?.unwrap_or(after);
         Ok(Some(self.close_view(&gid, &after)))
+    }
+
+    /// Records every live request that is now kept, so it stays kept even
+    /// when admins leave or join later. With `seq` (a group change that
+    /// kept it), says so in a notice there.
+    fn mark_kept(&mut self, gid: GroupId, seq: Option<u64>) -> Result<(), CoreError> {
+        let now = self.now();
+        for r in self.close_requests(&gid)? {
+            if r.kept_here || r.yes == 0 || !r.live(now) || !r.too_few() {
+                continue;
+            }
+            self.store.add_kept_close(&gid, &r.close_id)?;
+            if let Some(seq) = seq {
+                let text = "This room stays open: too few admins agreed to close it.";
+                self.store
+                    .add_message(&gid, seq, None, kind::NOTICE, text, now)?;
+            }
+        }
+        Ok(())
     }
 
     /// Votes on closing a room. Needs an admin, and a server on protocol 2
@@ -3211,15 +3246,16 @@ impl Client {
         };
         let mut gave_up = None;
         match self.store.closing(&gid)? {
-            Some(c) if c.by == me && c.step == CloseStep::GaveUp => gave_up = Some(c.close_id),
+            Some(c) if c.by == me && c.gave_up => gave_up = Some(c.close_id),
             Some(c) if c.by == me => return Ok(Some(c.close_id)),
             _ => {}
         }
         if !self.current_admins(&gid).contains(&me) {
             return Ok(None);
         }
-        // Votes close a room only while their request is live: one that ran
-        // out, or was kept, never closes it later with nobody acting.
+        // Votes close a room only while their request is live and was never
+        // kept here (a kept request is not `met`): one that ran out, or
+        // ended kept, never closes it later with nobody acting.
         let now = self.now();
         Ok(self
             .close_requests(&gid)?
@@ -3247,8 +3283,19 @@ impl Client {
         me: Key,
         e: CoreError,
     ) -> Result<(), CoreError> {
-        self.store
-            .set_closing(&gid, &close_id, &me, CloseStep::GaveUp)?;
+        let posted = self
+            .store
+            .closing(&gid)?
+            .is_some_and(|c| c.close_id == close_id && c.by == me && c.posted);
+        self.store.set_closing(
+            &gid,
+            &Closing {
+                close_id,
+                by: me,
+                posted,
+                gave_up: true,
+            },
+        )?;
         Err(e)
     }
 
@@ -3271,14 +3318,20 @@ impl Client {
         }
         // `Closed` goes out once per close, even when a later step fails
         // and the next sync carries on.
+        // A retry after giving up does not post it again either.
         let posted = self
             .store
             .closing(&gid)?
-            .is_some_and(|c| c.close_id == close_id && c.by == me && c.step == CloseStep::Posted);
-        if !posted {
-            self.store
-                .set_closing(&gid, &close_id, &me, CloseStep::Started)?;
-        }
+            .is_some_and(|c| c.close_id == close_id && c.by == me && c.posted);
+        self.store.set_closing(
+            &gid,
+            &Closing {
+                close_id,
+                by: me,
+                posted,
+                gave_up: false,
+            },
+        )?;
         let others = |c: &Client| {
             c.groups
                 .get(&gid)
@@ -3298,8 +3351,15 @@ impl Client {
             }
             match r {
                 Ok(()) => {
-                    self.store
-                        .set_closing(&gid, &close_id, &me, CloseStep::Posted)?;
+                    self.store.set_closing(
+                        &gid,
+                        &Closing {
+                            close_id,
+                            by: me,
+                            posted: true,
+                            gave_up: false,
+                        },
+                    )?;
                     #[cfg(feature = "test-hooks")]
                     {
                         self.hooks.closed_posts += 1;
@@ -3307,6 +3367,10 @@ impl Client {
                             return Err(CoreError::Net(NetError::Disconnected));
                         }
                     }
+                }
+                // This member is out of the room: it ends the usual way.
+                Err(CoreError::Net(NetError::Refused(why))) if why == NOT_A_MEMBER => {
+                    return self.removed_from(gid).await;
                 }
                 Err(e @ CoreError::Net(NetError::Refused(_))) => {
                     return self.give_up_close(gid, close_id, me, e);
@@ -3322,6 +3386,11 @@ impl Client {
                     return Ok(());
                 }
                 r?;
+                #[cfg(feature = "test-hooks")]
+                if std::mem::take(&mut self.hooks.refuse_close_commit) {
+                    let e = CoreError::Net(NetError::Refused("refused for a test".into()));
+                    return self.give_up_close(gid, close_id, me, e);
+                }
                 let live = self.groups.get_mut(&gid).expect("checked above");
                 let gone: Vec<(LeafNodeIndex, Key)> = live
                     .mls
@@ -3424,7 +3493,7 @@ impl Client {
     ) -> Result<(), CoreError> {
         let me = self.my_group_key(gid);
         match (self.store.closing(&gid)?, closer) {
-            (Some(c), _) if Some(c.by) == me && c.step != CloseStep::GaveUp => {
+            (Some(c), _) if Some(c.by) == me && !c.gave_up => {
                 // Whichever admin's commit landed closed the room.
                 self.end_closed(gid, closer.unwrap_or(c.by), seq)
             }
@@ -3861,6 +3930,11 @@ impl Client {
         self.hooks.closed_posts
     }
 
+    /// Makes the server refuse the next remove commit of a close.
+    pub fn test_refuse_next_close_commit(&mut self) {
+        self.hooks.refuse_close_commit = true;
+    }
+
     /// Makes the next check for a close to finish fail.
     pub fn test_fail_next_close_check(&mut self) {
         self.hooks.fail_close_check = true;
@@ -3871,7 +3945,15 @@ impl Client {
     pub fn test_set_closing(&mut self, gid: GroupId, close_id: [u8; 16]) {
         let me = self.my_group_key(gid).expect("in the room");
         self.store
-            .set_closing(&gid, &close_id, &me, CloseStep::Started)
+            .set_closing(
+                &gid,
+                &Closing {
+                    close_id,
+                    by: me,
+                    posted: false,
+                    gave_up: false,
+                },
+            )
             .expect("set closing");
     }
 
