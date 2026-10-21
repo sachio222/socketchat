@@ -153,6 +153,8 @@ pub const MAX_MLS_BYTES: usize = 1_047_552;
 
 /// Errors that mean the connection to a server is gone, as opposed to one
 /// group or one request going wrong.
+/// `Unsupported` is left out on purpose: the connection is fine, one
+/// request needs a newer server.
 fn connection_lost(e: &CoreError) -> bool {
     matches!(
         e,
@@ -216,6 +218,9 @@ struct Hooks {
     stale_pages: HashSet<GroupId>,
     /// Groups where sharing this member's name after an add fails once.
     fail_after_add: HashSet<GroupId>,
+    /// The newest protocol later connections offer, to stand in for an
+    /// older app.
+    protocol_cap: Option<u16>,
 }
 
 enum DmTodo {
@@ -433,6 +438,25 @@ impl Client {
         self.conns.values().all(|c| c.is_alive())
     }
 
+    /// The newest protocol version this client offers a server.
+    fn protocol_cap(&self) -> u16 {
+        #[cfg(feature = "test-hooks")]
+        if let Some(cap) = self.hooks.protocol_cap {
+            return cap;
+        }
+        socketchat_proto::PROTOCOL_VERSION
+    }
+
+    /// The agreed protocol version of the connection serving this room, if
+    /// it is connected.
+    pub fn protocol_for(&self, gid: GroupId) -> Option<u16> {
+        let server = self.groups.get(&gid)?.row.server_id;
+        self.conns
+            .get(&server)
+            .filter(|c| c.is_alive())
+            .map(|c| c.protocol())
+    }
+
     fn emit(&mut self, e: Event) {
         self.events.push_back(e);
     }
@@ -451,7 +475,8 @@ impl Client {
                 .into_iter()
                 .find(|s| s.id == server_id)
                 .ok_or_else(|| CoreError::Other("unknown server".into()))?;
-            let c = Conn::connect(&row.host, row.port, row.cert_fpr).await?;
+            let c =
+                Conn::connect_upto(&row.host, row.port, row.cert_fpr, self.protocol_cap()).await?;
             // An account the server no longer knows (it was set up again)
             // must not stop the connection: a new server invite replaces it.
             if let Some(a) = &row.account {
@@ -2599,6 +2624,11 @@ impl Hooks {
 /// built with the `test-hooks` feature, which the shipped binary never has.
 #[cfg(feature = "test-hooks")]
 impl Client {
+    /// Later connections say Hello with at most `max`, as an older app would.
+    pub fn test_cap_protocol(&mut self, max: u16) {
+        self.hooks.protocol_cap = Some(max);
+    }
+
     /// Posts any application message, as a hostile member could.
     pub async fn test_send_app(&mut self, gid: GroupId, msg: &AppMsg) -> Result<u64, CoreError> {
         self.send_app(gid, msg).await

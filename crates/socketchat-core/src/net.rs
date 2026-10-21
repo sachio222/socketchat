@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use socketchat_proto::msg::{
     from_body, to_frame, Busy, ClientFrame, Key, Push, Request, Response, ServerFrame,
 };
-use socketchat_proto::{FrameDecoder, Token, PROTOCOL_VERSION};
+use socketchat_proto::{FrameDecoder, Token, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -37,6 +37,10 @@ pub enum NetError {
     Io(String),
     #[error("the server speaks protocol {0}; update socketchat")]
     Version(u16),
+    #[error(
+        "this server runs an older version of socketchat that can't do that yet; ask the person who runs it to update it"
+    )]
+    Unsupported { needs: u16, server: u16 },
     #[error("the connection to the server dropped")]
     Disconnected,
     #[error("the server took too long to answer")]
@@ -131,6 +135,10 @@ pub struct Conn {
     port: u16,
     fpr: [u8; 32],
     link: Link,
+    /// The newest version this app offers when it connects.
+    max: u16,
+    /// The version agreed with the server.
+    protocol: u16,
     pushes: mpsc::UnboundedReceiver<Push>,
     next_id: AtomicU32,
     keys: Mutex<Vec<KeyPair>>,
@@ -140,7 +148,8 @@ async fn open(
     host: &str,
     port: u16,
     fpr: [u8; 32],
-) -> Result<(Link, mpsc::UnboundedReceiver<Push>), NetError> {
+    version: u16,
+) -> Result<(Link, mpsc::UnboundedReceiver<Push>, u16), NetError> {
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port)))
         .await
         .map_err(|_| NetError::Timeout)?
@@ -176,10 +185,8 @@ async fn open(
     };
     let (mut rd, mut wr) = tokio::io::split(tls);
 
-    let hello = to_frame(&ClientFrame::Hello {
-        version: PROTOCOL_VERSION,
-    })
-    .map_err(|e| NetError::Unexpected(e.to_string()))?;
+    let hello = to_frame(&ClientFrame::Hello { version })
+        .map_err(|e| NetError::Unexpected(e.to_string()))?;
     write_frame(&mut wr, &hello)
         .await
         .map_err(|e| NetError::Io(e.to_string()))?;
@@ -201,12 +208,17 @@ async fn open(
         }
         dec.push(&buf[..n]);
     };
-    match first {
-        ServerFrame::HelloOk { .. } => {}
+    let agreed = match first {
+        ServerFrame::HelloOk { version: v } if v == version => v,
+        ServerFrame::HelloOk { version: v } => {
+            return Err(NetError::Unexpected(format!(
+                "the server answered with protocol {v} after Hello {version}"
+            )))
+        }
         ServerFrame::VersionMismatch { server } => return Err(NetError::Version(server)),
         ServerFrame::Busy(why) => return Err(NetError::Busy(why)),
         other => return Err(NetError::Unexpected(format!("{other:?}"))),
-    }
+    };
 
     let (out, out_rx) = mpsc::unbounded_channel::<ClientFrame>();
     tokio::spawn(write_frames(out_rx, wr));
@@ -251,7 +263,24 @@ async fn open(
             alive,
         },
         push_rx,
+        agreed,
     ))
+}
+
+/// Opens a connection at `max`; when the server only speaks an older
+/// version this app also knows, opens once more at that version.
+async fn open_upto(
+    host: &str,
+    port: u16,
+    fpr: [u8; 32],
+    max: u16,
+) -> Result<(Link, mpsc::UnboundedReceiver<Push>, u16), NetError> {
+    match open(host, port, fpr, max).await {
+        Err(NetError::Version(server)) if (MIN_PROTOCOL_VERSION..max).contains(&server) => {
+            open(host, port, fpr, server).await
+        }
+        other => other,
+    }
 }
 
 /// Writes one encoded frame and flushes it. When the socket is full, a TLS
@@ -279,16 +308,33 @@ async fn write_frames<W: AsyncWrite + Unpin>(
 
 impl Conn {
     pub async fn connect(host: &str, port: u16, fpr: [u8; 32]) -> Result<Conn, NetError> {
-        let (link, pushes) = open(host, port, fpr).await?;
+        Self::connect_upto(host, port, fpr, PROTOCOL_VERSION).await
+    }
+
+    /// Connects offering protocol versions up to `max`.
+    pub async fn connect_upto(
+        host: &str,
+        port: u16,
+        fpr: [u8; 32],
+        max: u16,
+    ) -> Result<Conn, NetError> {
+        let (link, pushes, protocol) = open_upto(host, port, fpr, max).await?;
         Ok(Conn {
             host: host.to_string(),
             port,
             fpr,
             link,
+            max,
+            protocol,
             pushes,
             next_id: AtomicU32::new(1),
             keys: Mutex::new(vec![]),
         })
+    }
+
+    /// The protocol version agreed with the server.
+    pub fn protocol(&self) -> u16 {
+        self.protocol
     }
 
     pub fn is_alive(&self) -> bool {
@@ -299,6 +345,12 @@ impl Conn {
     pub async fn request(&self, body: Request) -> Result<Response, NetError> {
         if !self.is_alive() {
             return Err(NetError::Disconnected);
+        }
+        if body.min_version() > self.protocol {
+            return Err(NetError::Unsupported {
+                needs: body.min_version(),
+                server: self.protocol,
+            });
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -424,7 +476,8 @@ impl Conn {
     /// Opens a fresh connection to the same server and signs in again with
     /// every key used before.
     pub async fn reconnect(&mut self) -> Result<(), NetError> {
-        let (link, pushes) = open(&self.host, self.port, self.fpr).await?;
+        let (link, pushes, protocol) = open_upto(&self.host, self.port, self.fpr, self.max).await?;
+        self.protocol = protocol;
         self.link = link;
         self.pushes = pushes;
         let keys: Vec<KeyPair> = self.keys.lock().unwrap().clone();
