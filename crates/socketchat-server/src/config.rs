@@ -40,6 +40,11 @@ pub struct Config {
     #[serde(skip)]
     #[doc(hidden)]
     pub timing: Timing,
+    /// Highest protocol this server speaks. Not read from the file; tests
+    /// set it to 1 to stand in for a 0.4.0 server.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub protocol_max: u16,
 }
 
 /// Most connections one address may hold at once, unless the config says
@@ -84,6 +89,7 @@ impl Default for Config {
             max_connections: 1000,
             max_per_ip: MAX_PER_IP,
             timing: Timing::default(),
+            protocol_max: socketchat_proto::PROTOCOL_VERSION,
         }
     }
 }

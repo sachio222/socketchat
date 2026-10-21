@@ -6,6 +6,7 @@ Each release of socketchat has a section here. Version numbers follow [Semantic 
 
 - Planned for 0.5.0 (see [ROADMAP.md](ROADMAP.md)): rename and close rooms (closing needs the admins to agree), a `/switch` command with Tab completion, history that is deleted when you leave or a room closes, and a way to see and cancel invite links you sent.
 - A check now keeps libraries released less than 30 days ago out of `Cargo.lock`; run it with `sh scripts/crate-age-check.sh`. 47 libraries went back to older releases. `openmls` 0.9.1 stays, because socketchat pins that exact version.
+- A 0.5.0 server still serves apps on 0.4.0, so you can update the server first.
 
 ## 0.4.0 - 2026-10-20
 

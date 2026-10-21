@@ -54,7 +54,7 @@ async fn hello_version_mismatch_closes() {
     c.send(&ClientFrame::Hello { version: 99 }).await;
     assert_eq!(
         c.recv().await,
-        Some(ServerFrame::VersionMismatch { server: 1 })
+        Some(ServerFrame::VersionMismatch { server: 2 })
     );
     assert_eq!(c.recv().await, None);
 }

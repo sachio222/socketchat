@@ -10,8 +10,11 @@ pub mod msg;
 pub use frame::{encode_frame, FrameDecoder, FrameError, MAX_FRAME};
 pub use link::{InviteLink, LinkError, Token};
 
-/// Protocol number sent in the first frame of every connection.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Newest protocol number: sent in the first frame of every connection.
+pub const PROTOCOL_VERSION: u16 = 2;
+
+/// Oldest protocol number a server still serves.
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
 
 /// Port the server listens on unless its config says otherwise.
 pub const DEFAULT_PORT: u16 = 7444;

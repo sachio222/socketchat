@@ -141,6 +141,60 @@ pub enum Request {
     FileDone {
         file: FileId,
     },
+    /// Protocol 2. Open invite links this connection's keys made in groups,
+    /// plus the server invites named by `server_tokens` (at most 100; the
+    /// server keeps no record of who made a server invite).
+    ListInvites {
+        server_tokens: Vec<Token>,
+    },
+    /// Protocol 2. Cancels an open invite link the connection made.
+    CancelInvite {
+        token: Token,
+    },
+    /// Protocol 2. When `group` was created on this server.
+    GroupCreated {
+        group: GroupId,
+    },
+}
+
+impl Request {
+    /// The lowest protocol a connection must have said Hello with for the
+    /// server to run this request. No catch-all arm: a new variant must be
+    /// given its version here.
+    pub fn min_version(&self) -> u16 {
+        match self {
+            Request::Challenge
+            | Request::Prove { .. }
+            | Request::RegisterAccount { .. }
+            | Request::RegisterMailbox { .. }
+            | Request::CreateGroup { .. }
+            | Request::Post { .. }
+            | Request::Fetch { .. }
+            | Request::Ack { .. }
+            | Request::Members { .. }
+            | Request::CreateInvite { .. }
+            | Request::RedeemInvite { .. }
+            | Request::PendingJoins { .. }
+            | Request::FetchWelcomes
+            | Request::FileBegin { .. }
+            | Request::FileChunk { .. }
+            | Request::FileEnd { .. }
+            | Request::FileGet { .. }
+            | Request::FileDone { .. } => 1,
+            Request::ListInvites { .. }
+            | Request::CancelInvite { .. }
+            | Request::GroupCreated { .. } => 2,
+        }
+    }
+}
+
+/// An open invite link, as `Response::Invites` lists it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InviteInfo {
+    pub token: Token,
+    /// The group the link leads into; `None` for a server invite.
+    pub group: Option<GroupId>,
+    pub expires_unix: u64,
 }
 
 /// A Welcome for the person who redeemed `token`, with the inviter's voucher.
@@ -181,6 +235,12 @@ pub enum Response {
     Chunk(#[serde(with = "serde_bytes")] Vec<u8>),
     /// Something went wrong on the server or the request made no sense.
     Error(String),
+    /// Protocol 2. Answers `ListInvites`, oldest expiry first.
+    Invites(Vec<InviteInfo>),
+    /// Protocol 2. Answers `GroupCreated`.
+    GroupCreated {
+        created_unix: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -329,6 +389,14 @@ mod tests {
             Request::FileEnd { file: f },
             Request::FileGet { file: f, index: 0 },
             Request::FileDone { file: f },
+            Request::ListInvites {
+                server_tokens: vec![t, Token([4; 16])],
+            },
+            Request::ListInvites {
+                server_tokens: vec![],
+            },
+            Request::CancelInvite { token: t },
+            Request::GroupCreated { group: g },
         ] {
             rt(ClientFrame::Req { id: 42, body });
         }
@@ -376,6 +444,20 @@ mod tests {
             Response::File(FileId([3; 16])),
             Response::Chunk(vec![1; 10]),
             Response::Error("bad".into()),
+            Response::Invites(vec![
+                InviteInfo {
+                    token: Token([1; 16]),
+                    group: Some(g),
+                    expires_unix: 7,
+                },
+                InviteInfo {
+                    token: Token([2; 16]),
+                    group: None,
+                    expires_unix: 8,
+                },
+            ]),
+            Response::Invites(vec![]),
+            Response::GroupCreated { created_unix: 99 },
         ] {
             rt(ServerFrame::Resp { id: 7, body });
         }
@@ -389,6 +471,83 @@ mod tests {
             group: g,
             request: jr,
         }));
+    }
+
+    #[test]
+    fn min_version_marks_protocol_2_requests() {
+        let g = GroupId([9; 16]);
+        let k = Key([1; 32]);
+        let s = Sig([2; 64]);
+        let t = Token([3; 16]);
+        let f = FileId([4; 16]);
+        let v1 = [
+            Request::Challenge,
+            Request::Prove { key: k, sig: s },
+            Request::RegisterAccount {
+                token: t,
+                key: k,
+                sig: s,
+            },
+            Request::RegisterMailbox {
+                token: None,
+                key: k,
+                sig: s,
+            },
+            Request::CreateGroup {
+                group_info: vec![],
+                ratchet_tree: vec![],
+            },
+            Request::Post {
+                group: g,
+                mls: vec![],
+                welcome: None,
+            },
+            Request::Fetch {
+                group: g,
+                after: 0,
+                limit: 1,
+            },
+            Request::Ack { group: g, seq: 1 },
+            Request::Members { group: g },
+            Request::CreateInvite { group: None },
+            Request::RedeemInvite {
+                token: t,
+                key_package: vec![],
+                mac: [0; 32],
+            },
+            Request::PendingJoins {
+                group: g,
+                after: None,
+            },
+            Request::FetchWelcomes,
+            Request::FileBegin { group: g, size: 1 },
+            Request::FileChunk {
+                file: f,
+                index: 0,
+                data: vec![],
+            },
+            Request::FileEnd { file: f },
+            Request::FileGet { file: f, index: 0 },
+            Request::FileDone { file: f },
+        ];
+        for r in v1 {
+            assert_eq!(r.min_version(), 1, "{r:?}");
+        }
+        for r in [
+            Request::ListInvites {
+                server_tokens: vec![],
+            },
+            Request::CancelInvite { token: t },
+            Request::GroupCreated { group: g },
+        ] {
+            assert_eq!(r.min_version(), 2, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn protocol_numbers() {
+        assert_eq!(crate::PROTOCOL_VERSION, 2);
+        assert_eq!(crate::MIN_PROTOCOL_VERSION, 1);
     }
 
     #[test]

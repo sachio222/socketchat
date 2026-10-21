@@ -20,7 +20,7 @@ use std::time::Duration;
 use socketchat_proto::msg::{
     from_body, to_frame, Busy, ClientFrame, Key, Request, Response, ServerFrame,
 };
-use socketchat_proto::{FrameDecoder, MAX_FRAME, PROTOCOL_VERSION};
+use socketchat_proto::{FrameDecoder, MAX_FRAME, MIN_PROTOCOL_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch, Notify, OwnedSemaphorePermit};
@@ -287,6 +287,8 @@ pub struct ConnState {
     pub challenge: Option<[u8; 32]>,
     pub proven: HashSet<Key>,
     pub tx: Tx,
+    /// The protocol the connection said Hello with; 0 until it does.
+    pub version: u16,
 }
 
 struct CountGuard(Arc<State>);
@@ -459,6 +461,7 @@ pub async fn serve(
         challenge: None,
         proven: HashSet::new(),
         tx: tx.clone(),
+        version: 0,
     };
     let _online = OnlineGuard(state.clone(), cs.id);
     let mut dec = FrameDecoder::default();
@@ -484,16 +487,15 @@ pub async fn serve(
                         tx.push_frame(&ServerFrame::Busy(Busy::Full));
                         break 'conn;
                     }
-                    if version != PROTOCOL_VERSION {
+                    if !(MIN_PROTOCOL_VERSION..=state.cfg.protocol_max).contains(&version) {
                         tx.push_frame(&ServerFrame::VersionMismatch {
-                            server: PROTOCOL_VERSION,
+                            server: state.cfg.protocol_max,
                         });
                         break 'conn;
                     }
                     greeted = true;
-                    tx.push_frame(&ServerFrame::HelloOk {
-                        version: PROTOCOL_VERSION,
-                    });
+                    cs.version = version;
+                    tx.push_frame(&ServerFrame::HelloOk { version });
                     deadline = Instant::now() + timing.idle;
                 }
                 ClientFrame::Req { id, body } if greeted => {
@@ -514,7 +516,11 @@ pub async fn serve(
                         _ = close.notified() => break 'conn,
                         _ = tokio::time::sleep_until(deadline) => break 'conn,
                     };
-                    let resp = handle(&state, &mut cs, body).await;
+                    let resp = if body.min_version() > cs.version {
+                        Response::Refused("this server needs a newer app for that".into())
+                    } else {
+                        handle(&state, &mut cs, body).await
+                    };
                     if let Some(b) = encode(&ServerFrame::Resp { id, body: resp }) {
                         reserved.send(permit, b);
                     }
@@ -607,6 +613,9 @@ async fn handle(state: &Arc<State>, cs: &mut ConnState, req: Request) -> Respons
         Request::FileEnd { file } => files::end(state, cs, file),
         Request::FileGet { file, index } => files::get(state, cs, file, index),
         Request::FileDone { file } => files::done(state, cs, file),
+        Request::ListInvites { server_tokens } => groups::list_invites(state, cs, &server_tokens),
+        Request::CancelInvite { token } => groups::cancel_invite(state, cs, token),
+        Request::GroupCreated { group } => groups::group_created(state, cs, group),
     }
 }
 

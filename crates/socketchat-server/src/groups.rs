@@ -15,7 +15,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use socketchat_core::provider::JsonCodec;
 use socketchat_core::suite::{parse_admins, FALLBACK_SUITE, MAX_PAST_EPOCHS, SUITE};
 use socketchat_proto::msg::{
-    Entry, GroupId as Gid, Key, MemberInfo, Push, Response, ServerFrame, Sig, WelcomeIn, WelcomeOut,
+    Entry, GroupId as Gid, InviteInfo, Key, MemberInfo, Push, Response, ServerFrame, Sig,
+    WelcomeIn, WelcomeOut,
 };
 use socketchat_proto::{Token, MAX_FRAME};
 
@@ -725,6 +726,124 @@ pub fn create_invite(state: &State, cs: &ConnState, group: Option<Gid>) -> Respo
     Response::Invite {
         token,
         expires_unix: expires,
+    }
+}
+
+/// Most server invites one `ListInvites` may ask about.
+const LIST_SERVER_TOKENS: usize = 100;
+
+/// Most links one `ListInvites` answers.
+const LIST_INVITES: usize = 500;
+
+const LINK_GONE: &str = "that link was already used, has expired or was cancelled";
+
+/// Open group links made by this connection's keys, plus the open server
+/// links named by `server_tokens`. Oldest expiry first.
+pub fn list_invites(state: &State, cs: &ConnState, server_tokens: &[Token]) -> Response {
+    if server_tokens.len() > LIST_SERVER_TOKENS {
+        return refused("ask about at most 100 links at a time");
+    }
+    let now = state.now() as i64;
+    let db = state.db();
+    let read = || -> rusqlite::Result<Vec<InviteInfo>> {
+        let mut out = Vec::new();
+        let mut by_maker = db.prepare(
+            "SELECT token, group_id, expires_unix FROM invites
+                 WHERE maker = ?1 AND group_id IS NOT NULL AND uses_left > 0 AND expires_unix >= ?2",
+        )?;
+        for key in &cs.proven {
+            let rows = by_maker.query_map(params![key.0.as_slice(), now], invite_row)?;
+            out.extend(rows.filter_map(|r| r.ok().flatten()));
+        }
+        let mut by_token = db.prepare(
+            "SELECT token, group_id, expires_unix FROM invites
+                 WHERE token = ?1 AND group_id IS NULL AND uses_left > 0 AND expires_unix >= ?2",
+        )?;
+        for t in server_tokens {
+            let rows = by_token.query_map(params![t.0.as_slice(), now], invite_row)?;
+            out.extend(rows.filter_map(|r| r.ok().flatten()));
+        }
+        Ok(out)
+    };
+    match read() {
+        Ok(mut v) => {
+            v.sort_by_key(|i| (i.expires_unix, i.token.0));
+            v.dedup_by_key(|i| i.token.0);
+            v.truncate(LIST_INVITES);
+            Response::Invites(v)
+        }
+        Err(_) => Response::Error("could not read the invites".into()),
+    }
+}
+
+fn invite_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<InviteInfo>> {
+    let token: Vec<u8> = r.get(0)?;
+    let group: Option<Vec<u8>> = r.get(1)?;
+    let expires: i64 = r.get(2)?;
+    let Ok(token) = <[u8; 16]>::try_from(token.as_slice()) else {
+        return Ok(None);
+    };
+    let group = match group {
+        None => None,
+        Some(g) => match <[u8; 16]>::try_from(g.as_slice()) {
+            Ok(g) => Some(Gid(g)),
+            Err(_) => return Ok(None),
+        },
+    };
+    Ok(Some(InviteInfo {
+        token: Token(token),
+        group,
+        expires_unix: expires as u64,
+    }))
+}
+
+/// Deletes an open link the connection made: a group link by one of its
+/// proven keys, or a server link while it holds a proven account. A
+/// cancelled server link does not give back invite quota.
+pub fn cancel_invite(state: &State, cs: &ConnState, token: Token) -> Response {
+    let now = state.now() as i64;
+    let db = state.db();
+    let open = "token = ?1 AND uses_left > 0 AND expires_unix >= ?2";
+    let mut gone = 0;
+    for key in &cs.proven {
+        match db.execute(
+            &format!("DELETE FROM invites WHERE {open} AND group_id IS NOT NULL AND maker = ?3"),
+            params![token.0.as_slice(), now, key.0.as_slice()],
+        ) {
+            Ok(n) => gone += n,
+            Err(_) => return Response::Error("could not cancel the invite".into()),
+        }
+    }
+    if gone == 0 && cs.proven.iter().any(|k| is_account(&db, k)) {
+        match db.execute(
+            &format!("DELETE FROM invites WHERE {open} AND group_id IS NULL"),
+            params![token.0.as_slice(), now],
+        ) {
+            Ok(n) => gone += n,
+            Err(_) => return Response::Error("could not cancel the invite".into()),
+        }
+    }
+    if gone == 0 {
+        return refused(LINK_GONE);
+    }
+    Response::Ok
+}
+
+/// When the group was created, for a member.
+pub fn group_created(state: &State, cs: &ConnState, group: Gid) -> Response {
+    let db = state.db();
+    if member_key(&db, cs, &group).is_none() {
+        return refused("you are not a member of this group");
+    }
+    match db.query_row(
+        "SELECT created_unix FROM groups WHERE id = ?1",
+        [group.0.as_slice()],
+        |r| r.get::<_, i64>(0),
+    ) {
+        Ok(t) => Response::GroupCreated {
+            created_unix: t as u64,
+        },
+        Err(_) => Response::Error("could not read the group".into()),
     }
 }
 

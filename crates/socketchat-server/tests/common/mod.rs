@@ -177,6 +177,12 @@ impl Raw {
         ));
     }
 
+    /// Says Hello with `version` and returns the server's first answer.
+    pub async fn hello_as(&mut self, version: u16) -> Option<ServerFrame> {
+        self.send(&ClientFrame::Hello { version }).await;
+        self.recv().await
+    }
+
     pub async fn req(&mut self, body: Request) -> Response {
         let id = self.next_id;
         self.next_id += 1;
