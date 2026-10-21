@@ -107,12 +107,45 @@ pub struct ExtensionRow {
     pub sent_unix: u64,
 }
 
+/// Why this person is no longer in a room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    Left,
+    Removed,
+    Closed,
+}
+
+impl Ended {
+    /// How `ended_rooms.why` stores it.
+    fn code(self) -> i64 {
+        match self {
+            Ended::Left => 0,
+            Ended::Removed => 1,
+            Ended::Closed => 2,
+        }
+    }
+
+    fn from_code(code: i64) -> Ended {
+        match code {
+            0 => Ended::Left,
+            2 => Ended::Closed,
+            _ => Ended::Removed,
+        }
+    }
+}
+
+/// The longest an ended room's unread messages stay on this computer.
+pub const KEEP_UNSEEN_SECS: u64 = 30 * 24 * 3600;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupSummary {
     pub id: GroupId,
     pub name: String,
     pub is_dm: bool,
+    /// Always `ended.is_some()`.
     pub left: bool,
+    /// Why this person is no longer in the room; `None` while they are.
+    pub ended: Option<Ended>,
     /// Stored lines newer than the last time this room was marked seen.
     pub unseen: u32,
     /// Muted on this computer only.
@@ -307,6 +340,15 @@ fn mls_gid(g: &GroupId) -> openmls::group::GroupId {
     openmls::group::GroupId::from_slice(&g.0)
 }
 
+/// Deletes everything OpenMLS keeps for a group: its state, its secrets
+/// and this member's private keys in it.
+fn delete_mls(prov: &Provider, mls: Option<MlsGroup>) -> Result<(), CoreError> {
+    match mls {
+        Some(mut mls) => mls.delete(prov.storage()).map_err(mls_err),
+        None => Ok(()),
+    }
+}
+
 fn key_of(b: &[u8]) -> Option<Key> {
     <[u8; 32]>::try_from(b).ok().map(Key)
 }
@@ -405,14 +447,30 @@ impl Client {
     fn from_parts(store: Store, prov: Provider, profile: Profile) -> Result<Client, CoreError> {
         let mut groups = HashMap::new();
         for row in store.groups()? {
+            let gid = mls_gid(&row.id);
             if row.left {
+                // Left with 0.4.0, which kept everything: it all goes now.
+                // History first, so a stop part way leaves the flag to
+                // finish from.
+                let mls = MlsGroup::load(prov.storage(), &gid).ok().flatten();
+                delete_mls(&prov, mls)?;
+                store.purge_room(&row.id)?;
+                store.end_room(&row.id)?;
                 continue;
             }
-            if let Some(mls) = MlsGroup::load(prov.storage(), &mls_gid(&row.id)).map_err(mls_err)? {
+            if store.is_ended(&row.id)? {
+                // An ending that stopped part way: finish it.
+                let mls = MlsGroup::load(prov.storage(), &gid).ok().flatten();
+                delete_mls(&prov, mls)?;
+                store.end_room(&row.id)?;
+                store.checkpoint()?;
+                continue;
+            }
+            if let Some(mls) = MlsGroup::load(prov.storage(), &gid).map_err(mls_err)? {
                 groups.insert(row.id, Live { row, mls });
             }
         }
-        Ok(Client {
+        let mut c = Client {
             store,
             prov,
             profile,
@@ -429,7 +487,9 @@ impl Client {
             commit_grace: HashSet::new(),
             #[cfg(feature = "test-hooks")]
             hooks: Hooks::default(),
-        })
+        };
+        c.purge_read(None);
+        Ok(c)
     }
 
     pub fn display_name(&self) -> &str {
@@ -1647,7 +1707,7 @@ impl Client {
                 Ok(Response::Entries(es)) => es,
                 Ok(_) => return Ok(()),
                 Err(CoreError::Net(NetError::Refused(why))) if why == NOT_A_MEMBER => {
-                    return self.forget_group(gid);
+                    return self.end_room(gid, Ended::Removed);
                 }
                 Err(CoreError::Net(NetError::Refused(why))) => {
                     let label = self.label(&gid);
@@ -1789,23 +1849,14 @@ impl Client {
         sc: StagedCommit,
     ) -> Result<(), CoreError> {
         let live = self.groups.get_mut(&gid).expect("caller checked");
+        if sc.self_removed() {
+            // Nothing is left to merge into: the group state goes.
+            return self.end_room(gid, Ended::Removed);
+        }
         let (added, removed) = commit_changes(&live.mls, &sc);
-        let me_out = sc.self_removed();
         live.mls
             .merge_staged_commit(&self.prov, sc)
             .map_err(mls_err)?;
-        if me_out {
-            for k in &removed {
-                self.store.remove_member(&gid, k)?;
-            }
-            self.store.set_left(&gid)?;
-            let live = self.groups.remove(&gid).expect("present");
-            if let Some(c) = self.conns.get(&live.row.server_id) {
-                c.forget(&live.row.key.public());
-            }
-            self.emit(Event::Left { group: gid });
-            return Ok(());
-        }
         self.record_changes(gid, seq, &added, &removed)
     }
 
@@ -2104,8 +2155,11 @@ impl Client {
         }
     }
 
+    /// Rooms this person is in, then rooms they are no longer in whose
+    /// messages are still here.
     pub fn groups(&self) -> Vec<GroupSummary> {
-        self.store
+        let live = self
+            .store
             .groups()
             .unwrap_or_default()
             .into_iter()
@@ -2113,11 +2167,53 @@ impl Client {
                 id: g.id,
                 name: g.name,
                 is_dm: g.is_dm,
-                left: g.left,
+                left: false,
+                ended: None,
                 unseen: self.store.unseen(&g.id).unwrap_or(0),
                 muted: self.store.is_muted(&g.id).unwrap_or(false),
-            })
-            .collect()
+            });
+        let ended = self
+            .store
+            .ended_rooms()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| GroupSummary {
+                id: e.id,
+                name: e.name,
+                is_dm: e.is_dm,
+                left: true,
+                ended: Some(Ended::from_code(e.why)),
+                unseen: self.store.unseen(&e.id).unwrap_or(0),
+                muted: false,
+            });
+        live.chain(ended).collect()
+    }
+
+    /// Deletes the history of every ended room that has nothing unseen,
+    /// except `keep` (the room on screen), and of every ended room whose
+    /// unread messages have waited [`KEEP_UNSEEN_SECS`]. Returns the rooms
+    /// deleted.
+    pub fn purge_read(&mut self, keep: Option<GroupId>) -> Vec<GroupId> {
+        let now = self.now();
+        let mut purged = Vec::new();
+        for e in self.store.ended_rooms().unwrap_or_default() {
+            let expired = now.saturating_sub(e.ended_unix) >= KEEP_UNSEEN_SECS;
+            let read = Some(e.id) != keep && self.store.unseen(&e.id).ok() == Some(0);
+            if (expired || read) && self.store.purge_room(&e.id).is_ok() {
+                purged.push(e.id);
+            }
+        }
+        purged
+    }
+
+    /// Deletes a room's messages on this computer only. A live room stays
+    /// live; an ended room goes from the list.
+    pub fn clear_history(&mut self, gid: GroupId) -> Result<(), CoreError> {
+        if self.groups.contains_key(&gid) {
+            self.store.clear_history(&gid)
+        } else {
+            self.store.purge_room(&gid)
+        }
     }
 
     /// Marks everything stored in a room as seen.
@@ -2465,41 +2561,53 @@ impl Client {
         ))
     }
 
-    /// Leaves a group: asks the others to remove this member. The next
-    /// member online makes it happen.
+    /// Leaves a group: asks the others to remove this member (the next
+    /// member online makes it happen), then ends the room here at once.
     pub async fn leave(&mut self, gid: GroupId) -> Result<(), CoreError> {
         self.settle_sent(gid).await?;
-        let alone = self
-            .groups
-            .get(&gid)
-            .is_some_and(|g| g.mls.members().count() <= 1);
-        if alone {
-            return self.forget_group(gid);
-        }
         let server_id = self.server_of(&gid)?;
         let live = self.groups.get_mut(&gid).expect("checked by server_of");
-        let proposal = live
-            .mls
-            .leave_group(&self.prov, &live.row.key)
-            .map_err(mls_err)?;
-        self.request(
-            server_id,
-            Request::Post {
-                group: gid,
-                mls: ser(&proposal)?,
-                welcome: None,
-            },
-        )
-        .await?;
-        Ok(())
+        if live.mls.members().count() > 1 {
+            let proposal = live
+                .mls
+                .leave_group(&self.prov, &live.row.key)
+                .map_err(mls_err)?;
+            self.request(
+                server_id,
+                Request::Post {
+                    group: gid,
+                    mls: ser(&proposal)?,
+                    welcome: None,
+                },
+            )
+            .await?;
+        }
+        self.end_room(gid, Ended::Left)
     }
 
-    fn forget_group(&mut self, gid: GroupId) -> Result<(), CoreError> {
-        self.store.set_left(&gid)?;
-        if let Some(live) = self.groups.remove(&gid) {
-            if let Some(c) = self.conns.get(&live.row.server_id) {
-                c.forget(&live.row.key.public());
-            }
+    /// Ends a room this person is no longer in. Its keys and group state go
+    /// at once; its messages stay until they are read (see
+    /// [`Client::purge_read`]), and go now if nothing is unread.
+    pub(crate) fn end_room(&mut self, gid: GroupId, why: Ended) -> Result<(), CoreError> {
+        let Some(live) = self.groups.remove(&gid) else {
+            return Ok(());
+        };
+        if let Some(c) = self.conns.get(&live.row.server_id) {
+            c.forget(&live.row.key.public());
+        }
+        self.leaves.remove(&gid);
+        self.repost.remove(&gid);
+        self.commit_grace.remove(&gid);
+        self.drifted.remove(&gid);
+        self.dm_offers.retain(|_, (dm, _)| *dm != gid);
+        let now = self.now();
+        self.store.begin_end(&gid, why.code(), now)?;
+        delete_mls(&self.prov, Some(live.mls))?;
+        self.store.end_room(&gid)?;
+        if self.store.unseen(&gid)? == 0 {
+            self.store.purge_room(&gid)?;
+        } else {
+            self.store.checkpoint()?;
         }
         self.emit(Event::Left { group: gid });
         Ok(())
@@ -2912,6 +3020,53 @@ impl Hooks {
 /// built with the `test-hooks` feature, which the shipped binary never has.
 #[cfg(feature = "test-hooks")]
 impl Client {
+    /// Names of the tables still holding rows for a room, plus `"mls"` when
+    /// OpenMLS can still load the group or keeps any row for it.
+    pub fn test_traces(&self, gid: GroupId) -> Vec<&'static str> {
+        use openmls_sqlite_storage::Codec as _;
+        let mut out = self.store.traces(&gid).expect("traces");
+        let loads = MlsGroup::load(self.prov.storage(), &mls_gid(&gid))
+            .ok()
+            .flatten()
+            .is_some();
+        // OpenMLS's own tables key a group by its ID in the storage codec.
+        let key = crate::provider::JsonCodec::to_vec(&mls_gid(&gid)).expect("encodes");
+        let rows = [
+            "openmls_group_data",
+            "openmls_epoch_keys_pairs",
+            "openmls_own_leaf_nodes",
+            "openmls_proposals",
+        ]
+        .iter()
+        .any(|t| {
+            self.store
+                .conn()
+                .query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM {t} WHERE group_id = ?1)"),
+                    [key.as_slice()],
+                    |r| r.get::<_, bool>(0),
+                )
+                .expect("openmls table")
+        });
+        if loads || rows {
+            out.push("mls");
+        }
+        out
+    }
+
+    /// Marks a room as left the way 0.4.0 did: the flag only.
+    pub fn test_mark_left_0_4_0(&self, gid: GroupId) {
+        self.store.set_left(&gid).expect("set left");
+    }
+
+    /// Does only the first step of ending a room, as an app that stopped
+    /// right after it would leave the profile.
+    pub fn test_cut_short_ending(&self, gid: GroupId, why: Ended) {
+        self.store
+            .begin_end(&gid, why.code(), self.now())
+            .expect("begin end");
+    }
+
     /// Later connections say Hello with at most `max`, as an older app would.
     pub fn test_cap_protocol(&mut self, max: u16) {
         self.hooks.protocol_cap = Some(max);

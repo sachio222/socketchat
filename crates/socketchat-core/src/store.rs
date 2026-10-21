@@ -203,7 +203,30 @@ CREATE TABLE IF NOT EXISTS owed_proofs (
     proof BLOB NOT NULL,
     PRIMARY KEY (group_id, token)
 );
+CREATE TABLE IF NOT EXISTS ended_rooms (
+    group_id BLOB PRIMARY KEY,
+    name TEXT NOT NULL,
+    is_dm INTEGER NOT NULL,
+    why INTEGER NOT NULL,
+    ended_unix INTEGER NOT NULL,
+    seen_seq INTEGER NOT NULL
+);
 ";
+
+/// Tables holding a room's state while someone is in it, each keyed by
+/// `group_id`. Ending the room deletes its rows in every one of them at once.
+pub const ROOM_STATE_TABLES: &[&str] = &[
+    "members",
+    "vouchers",
+    "files",
+    "owed_proofs",
+    "expected_joiners",
+];
+
+/// Tables holding a room's history, each keyed by `group_id`. An ended
+/// room keeps these until they are read, then loses them with its
+/// `ended_rooms` row.
+pub const ROOM_HISTORY_TABLES: &[&str] = &["messages", "extensions"];
 
 /// Who this person is on this device.
 #[derive(Clone, Debug)]
@@ -240,6 +263,9 @@ fn open_keyed(path: &Path, key: &[u8; 32]) -> Result<Connection, CoreError> {
     conn.execute_batch("PRAGMA cipher_log_level = NONE;")?;
     let pragma = Zeroizing::new(format!("PRAGMA key = \"x'{}'\";", hex(key)));
     conn.execute_batch(&pragma)?;
+    // Deleted rows are overwritten, not just marked free. SQLCipher does
+    // this already when a key is set; saying so keeps it on regardless.
+    conn.execute_batch("PRAGMA secure_delete = ON;")?;
     if conn
         .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
             r.get::<_, i64>(0)
@@ -465,6 +491,17 @@ pub struct MessageRow {
     pub sent_unix: u64,
 }
 
+/// A room this person is no longer in whose messages are still here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndedRow {
+    pub id: GroupId,
+    pub name: String,
+    pub is_dm: bool,
+    /// Why it ended, as the client numbers it.
+    pub why: i64,
+    pub ended_unix: u64,
+}
+
 /// A join this client lodged and is waiting on.
 #[derive(Clone, Debug)]
 pub struct PendingJoin {
@@ -560,10 +597,15 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Adds a room this person is now in. A room they were in before and
+    /// whose history is still here stops being an ended room and keeps its
+    /// seen mark.
     pub fn add_group(&self, g: &GroupRow) -> Result<(), CoreError> {
-        self.conn.execute(
-            "INSERT INTO groups (id, server_id, group_key, name, is_dm, last_seq, last_update_unix, joined_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO groups (id, server_id, group_key, name, is_dm, last_seq, last_update_unix, joined_unix, seen_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                     COALESCE((SELECT seen_seq FROM ended_rooms WHERE group_id = ?1), 0))",
             params![
                 g.id.0.as_slice(),
                 g.server_id,
@@ -575,6 +617,11 @@ impl Store {
                 g.joined_unix as i64
             ],
         )?;
+        tx.execute(
+            "DELETE FROM ended_rooms WHERE group_id = ?1",
+            [g.id.0.as_slice()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -626,7 +673,8 @@ impl Store {
         Ok(())
     }
 
-    /// Marks every stored line of a room as seen.
+    /// Marks every stored line of a room as seen, whether the room is live
+    /// or ended.
     pub fn mark_seen(&self, g: &GroupId) -> Result<(), CoreError> {
         self.conn.execute(
             "UPDATE groups SET seen_seq = max(seen_seq,
@@ -634,14 +682,24 @@ impl Store {
              WHERE id = ?1",
             params![g.0.as_slice()],
         )?;
+        self.conn.execute(
+            "UPDATE ended_rooms SET seen_seq = max(seen_seq,
+                 COALESCE((SELECT max(seq) FROM messages WHERE group_id = ended_rooms.group_id), 0))
+             WHERE group_id = ?1",
+            params![g.0.as_slice()],
+        )?;
         Ok(())
     }
 
-    /// Stored lines newer than the room's seen mark.
+    /// Stored lines newer than the room's seen mark: the live room's, or
+    /// the ended room's.
     pub fn unseen(&self, g: &GroupId) -> Result<u32, CoreError> {
         let n: i64 = self.conn.query_row(
             "SELECT count(*) FROM messages
-             WHERE group_id = ?1 AND seq > (SELECT seen_seq FROM groups WHERE id = ?1)",
+             WHERE group_id = ?1 AND seq > COALESCE(
+                 (SELECT seen_seq FROM groups WHERE id = ?1),
+                 (SELECT seen_seq FROM ended_rooms WHERE group_id = ?1),
+                 0)",
             params![g.0.as_slice()],
             |r| r.get(0),
         )?;
@@ -683,6 +741,8 @@ impl Store {
         Ok(())
     }
 
+    /// Marks a room as left the way 0.4.0 did, keeping everything. Opening
+    /// the profile deletes such a room with all its history.
     pub fn set_left(&self, g: &GroupId) -> Result<(), CoreError> {
         self.conn.execute(
             "UPDATE groups SET left_group = 1 WHERE id = ?1",
@@ -1124,6 +1184,126 @@ impl Store {
         Ok(())
     }
 
+    /// Records that this person is no longer in a room, with its name,
+    /// kind and seen mark, before its state is deleted. A room whose
+    /// ending stops part way is finished from this row the next time the
+    /// profile opens.
+    pub fn begin_end(&self, g: &GroupId, why: i64, ended_unix: u64) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ended_rooms (group_id, name, is_dm, why, ended_unix, seen_seq)
+             SELECT id, name, is_dm, ?2, ?3, seen_seq FROM groups WHERE id = ?1",
+            params![g.0.as_slice(), why, ended_unix as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Whether a room has an `ended_rooms` row.
+    pub fn is_ended(&self, g: &GroupId) -> Result<bool, CoreError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ended_rooms WHERE group_id = ?1)",
+            [g.0.as_slice()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Deletes a room's state in one transaction: its rows in every
+    /// [`ROOM_STATE_TABLES`] table, then its `groups` row with this
+    /// member's private key for it. History stays.
+    pub fn end_room(&self, g: &GroupId) -> Result<(), CoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for table in ROOM_STATE_TABLES {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE group_id = ?1"),
+                [g.0.as_slice()],
+            )?;
+        }
+        tx.execute("DELETE FROM groups WHERE id = ?1", [g.0.as_slice()])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Deletes an ended room's history and its `ended_rooms` row in one
+    /// transaction, then clears the deleted pages out of the write-ahead
+    /// log.
+    pub fn purge_room(&self, g: &GroupId) -> Result<(), CoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for table in ROOM_HISTORY_TABLES {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE group_id = ?1"),
+                [g.0.as_slice()],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM ended_rooms WHERE group_id = ?1",
+            [g.0.as_slice()],
+        )?;
+        tx.commit()?;
+        self.checkpoint()
+    }
+
+    /// Deletes a live room's messages and extension messages on this
+    /// computer, then clears the deleted pages out of the write-ahead log.
+    pub fn clear_history(&self, g: &GroupId) -> Result<(), CoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for table in ROOM_HISTORY_TABLES {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE group_id = ?1"),
+                [g.0.as_slice()],
+            )?;
+        }
+        tx.commit()?;
+        self.checkpoint()
+    }
+
+    /// Copies the write-ahead log into the database and empties it, so the
+    /// old copies of deleted rows it held are gone from the disk too.
+    pub fn checkpoint(&self) -> Result<(), CoreError> {
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
+    }
+
+    /// Rooms this person is no longer in whose history is still here,
+    /// oldest ending first.
+    pub fn ended_rooms(&self) -> Result<Vec<EndedRow>, CoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT group_id, name, is_dm, why, ended_unix FROM ended_rooms
+             ORDER BY ended_unix, group_id",
+        )?;
+        let rows = st.query_map([], |r| {
+            let id: Vec<u8> = r.get(0)?;
+            Ok(EndedRow {
+                id: GroupId(id.try_into().unwrap_or([0; 16])),
+                name: r.get(1)?,
+                is_dm: r.get(2)?,
+                why: r.get(3)?,
+                ended_unix: r.get::<_, i64>(4)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Names of the tables still holding rows for a room: `groups` first,
+    /// then [`ROOM_STATE_TABLES`], [`ROOM_HISTORY_TABLES`] and `ended_rooms`.
+    pub fn traces(&self, g: &GroupId) -> Result<Vec<&'static str>, CoreError> {
+        let mut out = Vec::new();
+        let tables = std::iter::once(("groups", "id"))
+            .chain(ROOM_STATE_TABLES.iter().map(|t| (*t, "group_id")))
+            .chain(ROOM_HISTORY_TABLES.iter().map(|t| (*t, "group_id")))
+            .chain(std::iter::once(("ended_rooms", "group_id")));
+        for (table, column) in tables {
+            let has: bool = self.conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {column} = ?1)"),
+                [g.0.as_slice()],
+                |r| r.get(0),
+            )?;
+            if has {
+                out.push(table);
+            }
+        }
+        Ok(out)
+    }
+
     /// True once, the first time the expected joiner introduces themselves.
     pub fn take_expected_joiner(&self, g: &GroupId, key: &Key) -> Result<bool, CoreError> {
         let n = self.conn.execute(
@@ -1345,6 +1525,24 @@ mod tests {
             Store::open(d.path(), "k"),
             Err(CoreError::NoProfile)
         ));
+    }
+
+    #[test]
+    fn secure_delete_is_on() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _p) = Store::create(d.path(), "k").unwrap();
+        let on: i64 = s
+            .conn()
+            .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+        drop(s);
+        let (s, _p) = Store::open(d.path(), "k").unwrap();
+        let on: i64 = s
+            .conn()
+            .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
     }
 
     #[test]

@@ -13,6 +13,10 @@ Each release of socketchat has a section here. Version numbers follow [Semantic 
 - Unread counts stay right after you close and reopen the app. Anything you had before this update counts as read.
 - A room can be muted on your own computer. Nobody else sees that you muted it.
 - Room details show the admins, how many people are in the room and when it was made. A server on 0.4.0 cannot say when, so that line is left out.
+- When you leave a room, are removed from it or it closes, socketchat deletes the room's keys from your computer at once. Its messages go as soon as you have read them, and anything unread goes after 30 days.
+- socketchat turns on SQLite's `secure_delete`, so deleted rows are overwritten inside your encrypted profile.
+- Rooms you left with 0.4.0 lose their history the first time 0.5.0 opens your profile.
+- You can delete a room's messages from your computer and stay in the room.
 
 ## 0.4.0 - 2026-10-20
 
