@@ -17,6 +17,8 @@ Each release of socketchat has a section here. Version numbers follow [Semantic 
 - socketchat turns on SQLite's `secure_delete`, so deleted rows are overwritten inside your encrypted profile.
 - Rooms you left with 0.4.0 lose their history the first time 0.5.0 opens your profile.
 - You can delete a room's messages from your computer and stay in the room.
+- An ended room's unread messages still show who wrote them.
+- Joining a room no longer leaves spare keys from the join request on your computer.
 
 ## 0.4.0 - 2026-10-20
 

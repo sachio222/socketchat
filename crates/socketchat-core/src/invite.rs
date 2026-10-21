@@ -13,22 +13,33 @@ use crate::CoreError;
 /// KeyPackages for `key`, one per allowed suite, encoded as one blob. The
 /// private parts land in the provider's storage.
 pub fn key_package_blob(prov: &impl OpenMlsProvider, key: &KeyPair) -> Result<Vec<u8>, CoreError> {
-    signed_key_package_blob(prov, key, None)
+    key_packages(prov, key, None).map(|k| k.blob)
 }
 
-/// [`key_package_blob`] for a join request.
+/// KeyPackages made for one join, and how to find their private parts.
+pub struct KeyPackages {
+    /// The KeyPackages, encoded as one blob for the server.
+    pub blob: Vec<u8>,
+    /// Each KeyPackage's hash reference, TLS-encoded, which keys its private parts in
+    /// the provider's storage. The join uses one; the others are deleted
+    /// once it completes.
+    pub refs: Vec<Vec<u8>>,
+}
+
+/// [`key_package_blob`] with each KeyPackage's hash reference, for a join.
 ///
 /// `join_sig` is the joiner's signature on their join request (see
 /// `keys::sign_join_request`). It rides inside each KeyPackage as a
 /// KeyPackage extension of type [`JOIN_SIG_EXT`], so the blob stays the
 /// plain list of KeyPackages the server checks, and the KeyPackage's own
 /// signature covers it.
-pub fn signed_key_package_blob(
+pub fn key_packages(
     prov: &impl OpenMlsProvider,
     key: &KeyPair,
     join_sig: Option<&Sig>,
-) -> Result<Vec<u8>, CoreError> {
+) -> Result<KeyPackages, CoreError> {
     let mut kps = Vec::new();
+    let mut refs = Vec::new();
     for suite in [SUITE, FALLBACK_SUITE] {
         let mut builder = KeyPackage::builder().leaf_node_capabilities(capabilities());
         if let Some(sig) = join_sig {
@@ -45,8 +56,19 @@ pub fn signed_key_package_blob(
                 .tls_serialize_detached()
                 .map_err(|e| CoreError::Mls(e.to_string()))?,
         );
+        refs.push(
+            bundle
+                .key_package()
+                .hash_ref(prov.crypto())
+                .map_err(|e| CoreError::Mls(e.to_string()))?
+                .tls_serialize_detached()
+                .map_err(|e| CoreError::Mls(e.to_string()))?,
+        );
     }
-    Ok(postcard::to_stdvec(&kps)?)
+    Ok(KeyPackages {
+        blob: postcard::to_stdvec(&kps)?,
+        refs,
+    })
 }
 
 /// The join-request signature a KeyPackage carries, if any.

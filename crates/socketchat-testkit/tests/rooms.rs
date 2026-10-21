@@ -234,7 +234,7 @@ async fn leave_deletes_history_keys_and_group_state() {
     let ev = drain(&mut b).await;
     assert!(
         ev.iter()
-            .any(|e| matches!(e, Event::Left { group } if *group == g)),
+            .any(|e| matches!(e, Event::Left { group, name } if *group == g && name == "Room")),
         "{ev:?}"
     );
     settle(&mut [&mut a, &mut c]).await;
@@ -256,7 +256,7 @@ async fn removed_member_keeps_unread_until_read() {
     let ev = drain(&mut b).await;
     assert!(
         ev.iter()
-            .any(|e| matches!(e, Event::Left { group } if *group == g)),
+            .any(|e| matches!(e, Event::Left { group, name } if *group == g && name == "Room")),
         "{ev:?}"
     );
     let sum = summary(&b, g);
@@ -264,12 +264,18 @@ async fn removed_member_keeps_unread_until_read() {
     assert!(sum.left);
     assert_eq!(sum.name, "Room");
     assert!(sum.unseen >= 2, "{}", sum.unseen);
-    assert_eq!(b.test_traces(g), vec!["messages", "ended_rooms"]);
+    assert_eq!(
+        b.test_traces(g),
+        vec!["messages", "ended_names", "ended_rooms"]
+    );
     let t = texts(&b, g);
     assert!(t.contains(&"one".to_string()) && t.contains(&"two".to_string()));
     // Unread history survives a restart.
     let mut b = b.reopen().await;
-    assert_eq!(b.test_traces(g), vec!["messages", "ended_rooms"]);
+    assert_eq!(
+        b.test_traces(g),
+        vec!["messages", "ended_names", "ended_rooms"]
+    );
     assert_eq!(summary(&b, g).ended, Some(Ended::Removed));
     b.mark_seen(g).unwrap();
     assert_eq!(summary(&b, g).unseen, 0);
@@ -284,7 +290,10 @@ async fn purge_read_keeps_the_open_room() {
     let (g, _a, mut b) = removed_with_unread(&s).await;
     b.mark_seen(g).unwrap();
     assert!(b.purge_read(Some(g)).is_empty());
-    assert_eq!(b.test_traces(g), vec!["messages", "ended_rooms"]);
+    assert_eq!(
+        b.test_traces(g),
+        vec!["messages", "ended_names", "ended_rooms"]
+    );
     assert!(listed(&b, g));
     assert_eq!(b.purge_read(None), vec![g]);
     assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
@@ -326,6 +335,9 @@ async fn rooms_left_before_0_5_are_purged_on_open() {
     b.test_mark_left_0_4_0(g);
     let b = b.reopen().await;
     assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+    // The deleted pages left the write-ahead log too.
+    let wal = b.dir.path().join("socketchat.db-wal");
+    assert_eq!(std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0), 0);
     assert!(!listed(&b, g));
 }
 
@@ -376,10 +388,87 @@ async fn ending_cut_short_is_finished_on_open() {
     a.send_text(g, "one").await.unwrap();
     settle(&mut [&mut a, &mut b]).await;
     b.test_cut_short_ending(g, Ended::Left);
+    // Listed once, as ended, before and after the profile opens again.
+    let rows: Vec<_> = b.groups().into_iter().filter(|x| x.id == g).collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].ended, Some(Ended::Left));
     let b = b.reopen().await;
-    assert_eq!(b.test_traces(g), vec!["messages", "ended_rooms"]);
+    assert_eq!(
+        b.test_traces(g),
+        vec!["messages", "ended_names", "ended_rooms"]
+    );
     let rows: Vec<_> = b.groups().into_iter().filter(|x| x.id == g).collect();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].ended, Some(Ended::Left));
     assert!(texts(&b, g).contains(&"one".to_string()));
+}
+
+#[tokio::test]
+async fn ending_cut_short_inside_openmls_is_finished_on_open() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    a.send_text(g, "one").await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    b.test_cut_short_ending(g, Ended::Removed);
+    // OpenMLS deletes its rows one statement at a time, the tree first.
+    b.test_drop_mls_tree(g);
+    let b = b.reopen().await;
+    assert_eq!(
+        b.test_traces(g),
+        vec!["messages", "ended_names", "ended_rooms"]
+    );
+}
+
+#[tokio::test]
+async fn ended_room_keeps_sender_names() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    b.send_text(g, "from bo").await.unwrap();
+    a.send_text(g, "one").await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    let bk = b.my_group_key(g).unwrap();
+    a.remove_member(g, &bk).await.unwrap();
+    b.sync().await.unwrap();
+    assert_eq!(summary(&b, g).ended, Some(Ended::Removed));
+    let check = |b: &TestClient| {
+        let lines = b.messages(g, 100);
+        let by = |t: &str| lines.iter().find(|l| l.text == t).unwrap().sender.clone();
+        assert_eq!(by("one"), "Ada");
+        assert_eq!(by("from bo"), "Bo");
+    };
+    check(&b);
+    let mut b = b.reopen().await;
+    check(&b);
+    b.mark_seen(g).unwrap();
+    assert_eq!(b.purge_read(None), vec![g]);
+    assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+}
+
+#[tokio::test]
+async fn joining_keeps_no_spare_key_packages() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b, mut c) = trio(&s).await;
+    let bk = b.my_group_key(g).unwrap();
+    assert_eq!(b.test_key_packages_for(bk), 0);
+    let dm = a.dm(g, &bk).await.unwrap();
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    let dk = b.my_group_key(dm).expect("Bo is in the direct message");
+    assert_eq!(b.test_key_packages_for(dk), 0);
+}
+
+#[tokio::test]
+async fn purge_that_fails_says_so() {
+    let s = TestServer::start().await;
+    let (g, _a, mut b) = removed_with_unread(&s).await;
+    b.mark_seen(g).unwrap();
+    drain(&mut b).await;
+    b.test_fail_next_purge();
+    assert!(b.purge_read(None).is_empty());
+    let ev = drain(&mut b).await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Warning(w) if w.contains("Room"))),
+        "{ev:?}"
+    );
+    assert_eq!(b.purge_read(None), vec![g]);
 }

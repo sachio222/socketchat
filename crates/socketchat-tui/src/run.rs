@@ -229,11 +229,15 @@ impl Screen {
                         Some("You joined. The person who invited you is verified.".into());
                 }
             }
-            Event::Left { group } => {
+            Event::Left { group, name } => {
                 if Some(group) == self.app.selected {
                     self.select_first();
                 }
-                self.app.status = Some("You are no longer in that chat.".into());
+                self.app.status = Some(if name.is_empty() {
+                    "You are no longer in that chat.".into()
+                } else {
+                    format!("You are no longer in {name}.")
+                });
             }
             Event::Warning(w) => self.app.status = Some(w),
             Event::NameChanged { old, new, .. } => {

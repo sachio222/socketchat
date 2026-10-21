@@ -245,7 +245,10 @@ async fn sync_and_report(c: &mut Client) -> Result<(), Fail> {
             },
             Event::JoinRequestHandled { group } => println!("Someone you invited joined {}.", group_name(c, group)),
             Event::Message { group, line } => println!("[{}] {}: {}", group_name(c, group), line.sender, line.text),
-            Event::Left { group } => println!("You are no longer in {}.", group_name(c, group)),
+            Event::Left { name, .. } => println!(
+                "You are no longer in {}.",
+                if name.is_empty() { "a chat" } else { &name }
+            ),
             Event::Warning(w) => eprintln!("{}", clean_text(&w)),
             _ => {}
         }

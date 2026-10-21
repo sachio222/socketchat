@@ -203,6 +203,12 @@ CREATE TABLE IF NOT EXISTS owed_proofs (
     proof BLOB NOT NULL,
     PRIMARY KEY (group_id, token)
 );
+CREATE TABLE IF NOT EXISTS ended_names (
+    group_id BLOB NOT NULL,
+    group_key BLOB NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (group_id, group_key)
+);
 CREATE TABLE IF NOT EXISTS ended_rooms (
     group_id BLOB PRIMARY KEY,
     name TEXT NOT NULL,
@@ -225,8 +231,28 @@ pub const ROOM_STATE_TABLES: &[&str] = &[
 
 /// Tables holding a room's history, each keyed by `group_id`. An ended
 /// room keeps these until they are read, then loses them with its
-/// `ended_rooms` row.
-pub const ROOM_HISTORY_TABLES: &[&str] = &["messages", "extensions"];
+/// `ended_rooms` row. `ended_names` keeps the names of the people whose
+/// lines are still here, once the room's `members` rows are gone.
+pub const ROOM_HISTORY_TABLES: &[&str] = &["messages", "extensions", "ended_names"];
+
+/// OpenMLS's tables holding a group's state and secrets, keyed by
+/// `group_id` in the storage codec (see [`openmls_key`]).
+pub const OPENMLS_GROUP_TABLES: &[&str] = &[
+    "openmls_group_data",
+    "openmls_epoch_keys_pairs",
+    "openmls_own_leaf_nodes",
+    "openmls_proposals",
+];
+
+/// How OpenMLS's storage writes a group ID in its `group_id` columns.
+fn openmls_key(g: &GroupId) -> Result<Vec<u8>, CoreError> {
+    use openmls_sqlite_storage::Codec as _;
+    crate::provider::JsonCodec::to_vec(&openmls::group::GroupId::from_slice(&g.0))
+        .map_err(|e| CoreError::Storage(e.to_string()))
+}
+
+/// How many times [`Store::checkpoint`] tries before it gives up.
+const CHECKPOINT_TRIES: usize = 3;
 
 /// Who this person is on this device.
 #[derive(Clone, Debug)]
@@ -288,6 +314,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("groups", "announced_version", "TEXT"),
     ("groups", "seen_seq", "INTEGER NOT NULL DEFAULT 0"),
     ("groups", "muted", "INTEGER NOT NULL DEFAULT 0"),
+    ("pending_joins", "key_package_refs", "BLOB"),
 ];
 
 fn migrate(conn: &Connection) -> Result<(), CoreError> {
@@ -323,8 +350,13 @@ fn lock(dir: &Path) -> Result<std::fs::File, CoreError> {
     }
 }
 
+/// The connection OpenMLS keeps its state on.
+fn provider_conn(path: &Path, key: &[u8; 32]) -> Result<Connection, CoreError> {
+    open_keyed(path, key)
+}
+
 fn provider(path: &Path, key: &[u8; 32]) -> Result<Provider, CoreError> {
-    let conn = open_keyed(path, key)?;
+    let conn = provider_conn(path, key)?;
     let mut storage = Storage::new(conn);
     storage
         .run_migrations()
@@ -510,6 +542,9 @@ pub struct PendingJoin {
     pub link: String,
     pub key: KeyPair,
     pub lodged_unix: u64,
+    /// Hash references of the KeyPackages lodged for this join (see
+    /// `invite::KeyPackages`). Empty for a join lodged before 0.5.0.
+    pub key_package_refs: Vec<Vec<u8>>,
 }
 
 fn key_col(v: Option<Vec<u8>>) -> Option<Key> {
@@ -1075,14 +1110,16 @@ impl Store {
 
     pub fn save_pending_join(&self, p: &PendingJoin) -> Result<(), CoreError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO pending_joins (token, server_id, link, group_key, lodged_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO pending_joins
+                 (token, server_id, link, group_key, lodged_unix, key_package_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 p.token.0.as_slice(),
                 p.server_id,
                 p.link,
                 kp_bytes(&p.key).as_slice(),
-                p.lodged_unix as i64
+                p.lodged_unix as i64,
+                postcard::to_stdvec(&p.key_package_refs)?
             ],
         )?;
         Ok(())
@@ -1091,16 +1128,20 @@ impl Store {
     pub fn pending_joins(&self) -> Result<Vec<PendingJoin>, CoreError> {
         let mut st = self
             .conn
-            .prepare("SELECT token, server_id, link, group_key, lodged_unix FROM pending_joins")?;
+            .prepare("SELECT token, server_id, link, group_key, lodged_unix, key_package_refs FROM pending_joins")?;
         let rows = st.query_map([], |r| {
             let t: Vec<u8> = r.get(0)?;
             let k: Vec<u8> = r.get(3)?;
+            let refs: Option<Vec<u8>> = r.get(5)?;
             Ok(PendingJoin {
                 token: Token(t.try_into().unwrap_or([0; 16])),
                 server_id: r.get(1)?,
                 link: r.get(2)?,
                 key: kp_col(&k)?,
                 lodged_unix: r.get::<_, i64>(4)? as u64,
+                key_package_refs: refs
+                    .and_then(|b| postcard::from_bytes(&b).ok())
+                    .unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -1206,20 +1247,70 @@ impl Store {
         )?)
     }
 
-    /// Deletes a room's state in one transaction: its rows in every
-    /// [`ROOM_STATE_TABLES`] table, then its `groups` row with this
-    /// member's private key for it. History stays.
-    pub fn end_room(&self, g: &GroupId) -> Result<(), CoreError> {
+    /// Deletes a room's state in one transaction. First, while the room
+    /// still has lines, it keeps in `ended_names` the names of the people
+    /// whose lines are still here and of `me` (this member's key in the
+    /// room). Then it deletes the
+    /// room's rows in every [`ROOM_STATE_TABLES`] table, everything OpenMLS
+    /// still holds for the group in [`OPENMLS_GROUP_TABLES`], and its
+    /// `groups` row with this member's private key for it. History stays.
+    pub fn end_room(&self, g: &GroupId, me: &Key) -> Result<(), CoreError> {
+        let mls = openmls_key(g)?;
         let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO ended_names (group_id, group_key, name)
+             SELECT group_id, group_key, COALESCE(local_name, display_name) FROM members
+             WHERE group_id = ?1 AND COALESCE(local_name, display_name) <> ''
+               AND EXISTS(SELECT 1 FROM messages WHERE group_id = ?1)
+               AND (group_key = ?2
+                    OR group_key IN (SELECT sender_group_key FROM messages WHERE group_id = ?1)
+                    OR group_key IN (SELECT sender_group_key FROM extensions WHERE group_id = ?1))",
+            params![g.0.as_slice(), me.0.as_slice()],
+        )?;
         for table in ROOM_STATE_TABLES {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE group_id = ?1"),
                 [g.0.as_slice()],
             )?;
         }
+        for table in OPENMLS_GROUP_TABLES {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE group_id = ?1"),
+                [mls.as_slice()],
+            )?;
+        }
         tx.execute("DELETE FROM groups WHERE id = ?1", [g.0.as_slice()])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The name kept for someone whose lines are still here after the room
+    /// ended.
+    pub fn ended_name(&self, g: &GroupId, key: &Key) -> Result<Option<String>, CoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT name FROM ended_names WHERE group_id = ?1 AND group_key = ?2",
+                params![g.0.as_slice(), key.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Whether OpenMLS keeps any row for a group in [`OPENMLS_GROUP_TABLES`].
+    pub fn has_openmls_rows(&self, g: &GroupId) -> Result<bool, CoreError> {
+        let mls = openmls_key(g)?;
+        for table in OPENMLS_GROUP_TABLES {
+            let has: bool = self.conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE group_id = ?1)"),
+                [mls.as_slice()],
+                |r| r.get(0),
+            )?;
+            if has {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Deletes an ended room's history and its `ended_rooms` row in one
@@ -1256,11 +1347,20 @@ impl Store {
     }
 
     /// Copies the write-ahead log into the database and empties it, so the
-    /// old copies of deleted rows it held are gone from the disk too.
+    /// old copies of deleted rows it held are gone from the disk too. Fails
+    /// when another connection keeps the log in use through every try.
     pub fn checkpoint(&self) -> Result<(), CoreError> {
-        self.conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
-        Ok(())
+        for _ in 0..CHECKPOINT_TRIES {
+            let busy: i64 = self
+                .conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+            if busy == 0 {
+                return Ok(());
+            }
+        }
+        Err(CoreError::Storage(
+            "deleted data is still in the profile's log file, because the profile was busy".into(),
+        ))
     }
 
     /// Rooms this person is no longer in whose history is still here,
@@ -1543,6 +1643,44 @@ mod tests {
             .query_row("PRAGMA secure_delete", [], |r| r.get(0))
             .unwrap();
         assert_eq!(on, 1);
+    }
+
+    /// The raw key of the profile in `dir`, made with passphrase `pass`.
+    fn key_of(dir: &Path, pass: &str) -> Zeroizing<[u8; 32]> {
+        let kdf = Kdf::decode(&std::fs::read(dir.join(SALT_FILE)).unwrap()).unwrap();
+        derive_key(pass, &kdf).unwrap()
+    }
+
+    #[test]
+    fn secure_delete_is_on_for_openmls_too() {
+        let d = tempfile::tempdir().unwrap();
+        drop(Store::create(d.path(), "k").unwrap());
+        let conn = provider_conn(&d.path().join(DB_FILE), &key_of(d.path(), "k")).unwrap();
+        let on: i64 = conn
+            .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+    }
+
+    #[test]
+    fn checkpoint_reports_a_blocked_log() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _p) = Store::create(d.path(), "k").unwrap();
+        s.conn()
+            .busy_timeout(std::time::Duration::from_millis(20))
+            .unwrap();
+        let reader = open_keyed(&d.path().join(DB_FILE), &key_of(d.path(), "k")).unwrap();
+        s.trust(&Key([1; 32])).unwrap();
+        reader.execute_batch("BEGIN;").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT count(*) FROM trusted", [], |r| r.get(0))
+            .unwrap();
+        s.trust(&Key([2; 32])).unwrap();
+        assert!(s.checkpoint().is_err(), "a reader holds the log");
+        reader.execute_batch("COMMIT;").unwrap();
+        s.checkpoint().unwrap();
+        let wal = std::fs::metadata(d.path().join(format!("{DB_FILE}-wal"))).unwrap();
+        assert_eq!(wal.len(), 0);
     }
 
     #[test]
