@@ -418,13 +418,14 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
                         println!(
                             "{}. {}: expires in {}",
                             i + 1,
-                            clean_text(&v.label),
+                            clean_name(&v.label),
                             hours_text(c.hours_until(v.expires_unix))
                         );
                     }
                 }
                 Some(n) => {
                     let Some(v) = n.checked_sub(1).and_then(|i| list.get(i)) else {
+                        c.purge_read(None);
                         report_warnings(&mut c);
                         return Err(Fail(
                             1,
@@ -433,8 +434,17 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
                             ),
                         ));
                     };
-                    c.cancel_invite(v.token).await?;
-                    println!("Cancelled. That link no longer works.");
+                    let done = c.cancel_invite(v.token).await;
+                    if done.is_ok() {
+                        println!(
+                            "Cancelled {} (expires in {}). That link no longer works.",
+                            clean_name(&v.label),
+                            hours_text(c.hours_until(v.expires_unix))
+                        );
+                    }
+                    c.purge_read(None);
+                    report_warnings(&mut c);
+                    return Ok(done?);
                 }
             }
             c.purge_read(None);

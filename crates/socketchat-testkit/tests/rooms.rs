@@ -1405,6 +1405,22 @@ async fn invites_lists_room_and_server_links() {
 }
 
 #[tokio::test]
+async fn invites_sort_by_expiry_then_token_and_name_an_unnamed_room() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("").await.unwrap();
+    for _ in 0..6 {
+        a.invite(Some(g), false).await.unwrap();
+    }
+    let list = a.invites().await.unwrap();
+    assert_eq!(list.len(), 6);
+    assert!(list
+        .windows(2)
+        .all(|w| (w[0].expires_unix, w[0].token.0) < (w[1].expires_unix, w[1].token.0)));
+    assert!(list.iter().all(|i| i.label == "a chat"), "{list:?}");
+}
+
+#[tokio::test]
 async fn cancelled_link_no_longer_works() {
     let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;

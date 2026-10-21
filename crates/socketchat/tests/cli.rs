@@ -477,9 +477,11 @@ fn invites_lists_and_cancels() {
 
     let o = run(&ada, &["invites", "--cancel", "1"]);
     assert!(o.status.success(), "{}", out(&o));
-    assert_eq!(
-        String::from_utf8_lossy(&o.stdout).trim(),
-        "Cancelled. That link no longer works."
+    let said = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(
+        said.starts_with("Cancelled Crew (expires in ")
+            && said.trim().ends_with("). That link no longer works."),
+        "{said}"
     );
     let (_, text) = invites_list(&ada);
     assert_eq!(text.trim(), "You have no open invite links.");
@@ -496,8 +498,9 @@ fn invites_cancel_bad_number_exits_1() {
     for n in ["0", "2"] {
         let o = run(&ada, &["invites", "--cancel", n]);
         assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+        assert!(o.stdout.is_empty(), "{}", out(&o));
         assert!(
-            out(&o).contains(&format!(
+            String::from_utf8_lossy(&o.stderr).contains(&format!(
                 "There is no link {n}. Run socketchat invites to see the list."
             )),
             "{}",
@@ -507,6 +510,55 @@ fn invites_cancel_bad_number_exits_1() {
     // Nothing was cancelled.
     let (_, text) = invites_list(&ada);
     assert!(text.starts_with("1. "), "{text}");
+}
+
+#[test]
+fn invites_cancel_with_no_links_exits_1() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    let o = run(&ada, &["invites", "--cancel", "1"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(o.stdout.is_empty(), "{}", out(&o));
+    assert!(
+        String::from_utf8_lossy(&o.stderr)
+            .contains("There is no link 1. Run socketchat invites to see the list."),
+        "{}",
+        out(&o)
+    );
+}
+
+#[test]
+fn invites_keep_their_order_and_cancel_names_the_link() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    for room in ["Crew", "Band"] {
+        assert!(run(&ada, &["new", room]).status.success());
+        assert!(run(&ada, &["invite", "--group", room]).status.success());
+    }
+    let (_, first) = invites_list(&ada);
+    for _ in 0..3 {
+        assert_eq!(invites_list(&ada).1, first, "same order on every run");
+    }
+    let band = first
+        .lines()
+        .find(|l| l.contains("Band"))
+        .and_then(|l| l.split('.').next())
+        .unwrap()
+        .to_string();
+    let o = run(&ada, &["invites", "--cancel", &band]);
+    assert!(o.status.success(), "{}", out(&o));
+    let said = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(
+        said.starts_with("Cancelled Band (expires in ")
+            && said.trim().ends_with("). That link no longer works."),
+        "{said}"
+    );
+    let (_, rest) = invites_list(&ada);
+    assert!(rest.contains("Crew") && !rest.contains("Band"), "{rest}");
 }
 
 #[test]

@@ -1484,7 +1484,7 @@ impl Client {
             for info in open {
                 let label = match info.group {
                     Some(g) => match self.groups.get(&g) {
-                        Some(l) => l.row.name.clone(),
+                        Some(l) => room_label(&l.row.name, l.row.is_dm),
                         None => continue,
                     },
                     None => "Server invite".to_string(),
@@ -1506,7 +1506,7 @@ impl Client {
                 });
             }
         }
-        out.sort_by_key(|i| i.expires_unix);
+        out.sort_by_key(|i| (i.expires_unix, i.token.0));
         Ok(out)
     }
 
