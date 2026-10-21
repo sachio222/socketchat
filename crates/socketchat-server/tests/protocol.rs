@@ -331,6 +331,31 @@ async fn group_created_returns_creation_time() {
     );
 }
 
+/// Uploads one chunk and returns the file's folder on the server.
+async fn upload(p: &mut Person, d: &std::path::Path) -> std::path::PathBuf {
+    let Response::File(f) = p
+        .conn
+        .req(Request::FileBegin {
+            group: p.gid.unwrap(),
+            size: 3,
+        })
+        .await
+    else {
+        panic!("no file")
+    };
+    let r = p
+        .conn
+        .req(Request::FileChunk {
+            file: f,
+            index: 0,
+            data: vec![1, 2, 3],
+        })
+        .await;
+    assert_eq!(r, Response::Ok);
+    d.join("files")
+        .join(f.0.iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
 fn count(db: &rusqlite::Connection, table: &str, gid: GroupId) -> i64 {
     let col = if table == "groups" { "id" } else { "group_id" };
     db.query_row(
@@ -358,26 +383,7 @@ async fn last_leave_deletes_everything() {
     let mut ada = e.admin().await;
     let gid = ada.gid.unwrap();
     let _open = make_invite(&mut ada).await;
-    let Response::File(f) = ada
-        .conn
-        .req(Request::FileBegin {
-            group: gid,
-            size: 3,
-        })
-        .await
-    else {
-        panic!("no file")
-    };
-    assert_eq!(
-        ada.conn
-            .req(Request::FileChunk {
-                file: f,
-                index: 0,
-                data: vec![1, 2, 3]
-            })
-            .await,
-        Response::Ok
-    );
+    let chunks = upload(&mut ada, e.d.path()).await;
     let db = rusqlite::Connection::open(e.d.path().join("server.db")).unwrap();
     db.execute(
         "INSERT INTO log (group_id, seq, mls, created_unix) VALUES (?1, 1, x'00', 1)",
@@ -389,10 +395,17 @@ async fn last_leave_deletes_everything() {
         [gid.0.as_slice()],
     )
     .unwrap();
-    let chunks =
-        e.d.path()
-            .join("files")
-            .join(f.0.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    db.execute(
+        "INSERT INTO welcomes (mailbox, welcome, voucher, created_unix)
+         SELECT key, x'01', x'02', 1 FROM mailboxes WHERE group_id = ?1",
+        [gid.0.as_slice()],
+    )
+    .unwrap();
+    let welcomes = |db: &rusqlite::Connection| -> i64 {
+        db.query_row("SELECT count(*) FROM welcomes", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(welcomes(&db), 1);
     assert!(chunks.exists());
     for t in ["groups", "log", "mailboxes", "invites", "joins", "files"] {
         assert!(count(&db, t, gid) > 0, "{t} starts empty");
@@ -407,6 +420,7 @@ async fn last_leave_deletes_everything() {
         assert_eq!(count(&db, t, gid), 0, "{t}");
     }
     assert!(!chunks.exists());
+    assert_eq!(welcomes(&db), 0);
     assert!(!mls_group_loads(&db, gid));
 }
 
@@ -433,13 +447,16 @@ async fn last_leave_refused_while_others_remain() {
 #[tokio::test]
 async fn sweep_deletes_group_with_no_members() {
     let e = env().await;
-    let ada = e.admin().await;
+    let mut ada = e.admin().await;
     let gid = ada.gid.unwrap();
+    let chunks = upload(&mut ada, e.d.path()).await;
     let db = rusqlite::Connection::open(e.d.path().join("server.db")).unwrap();
     assert_eq!(count(&db, "groups", gid), 1);
     // A group that still has a member survives the sweep.
     e.h.sweep_now();
     assert_eq!(count(&db, "groups", gid), 1);
+    assert!(chunks.exists());
+    assert_eq!(count(&db, "files", gid), 1);
     db.execute(
         "DELETE FROM mailboxes WHERE group_id = ?1",
         [gid.0.as_slice()],
@@ -448,6 +465,8 @@ async fn sweep_deletes_group_with_no_members() {
     e.h.sweep_now();
     assert_eq!(count(&db, "groups", gid), 0);
     assert_eq!(count(&db, "log", gid), 0);
+    assert_eq!(count(&db, "files", gid), 0);
+    assert!(!chunks.exists());
     assert!(!mls_group_loads(&db, gid));
 }
 

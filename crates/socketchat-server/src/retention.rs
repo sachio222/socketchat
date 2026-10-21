@@ -35,8 +35,9 @@ pub fn sweep(state: &State) {
         "DELETE FROM mailboxes WHERE joined_seq IS NULL AND created_unix < ?1",
         params![mailbox_cutoff],
     );
-    // A room whose last member is gone is deleted whole; the app tells the
-    // server when it leaves alone, and this catches the rest.
+    // A room with no joined member is deleted whole. An app that leaves
+    // alone asks for this itself; the sweep catches rooms where that request
+    // never arrived or the members were removed.
     let empty: Vec<Vec<u8>> = db
         .prepare(
             "SELECT id FROM groups WHERE NOT EXISTS (

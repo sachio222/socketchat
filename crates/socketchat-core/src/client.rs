@@ -302,6 +302,8 @@ struct Hooks {
     announce_version: Option<String>,
     /// The next purge of an ended room's history fails.
     fail_purge: bool,
+    /// The next `leave` treats the room as having one member.
+    alone_leave: bool,
     /// The next ending of a room stops after `begin_end`.
     fail_ending: bool,
 }
@@ -2659,44 +2661,67 @@ impl Client {
     pub async fn leave(&mut self, gid: GroupId) -> Result<(), CoreError> {
         self.settle_sent(gid).await?;
         let server_id = self.server_of(&gid)?;
-        let live = self.groups.get_mut(&gid).expect("checked by server_of");
-        if live.mls.members().count() > 1 {
-            let proposal = live
-                .mls
-                .leave_group(&self.prov, &live.row.key)
-                .map_err(mls_err)?;
-            self.request(
-                server_id,
-                Request::Post {
-                    group: gid,
-                    mls: ser(&proposal)?,
-                    welcome: None,
-                },
-            )
-            .await?;
-        } else if self.protocol_for(gid) != Some(1) {
-            // Alone in the room: the server deletes it. If it cannot (the
-            // connection is gone, or it refuses), the room still ends here.
-            let sent = if self.protocol_for(gid).is_some() {
-                self.request(server_id, Request::LastLeave { group: gid })
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            } else {
-                Err("the connection is down".to_string())
+        let live = self.groups.get(&gid).expect("checked by server_of");
+        #[cfg(feature = "test-hooks")]
+        let force_alone = std::mem::take(&mut self.hooks.alone_leave);
+        #[cfg(not(feature = "test-hooks"))]
+        let force_alone = false;
+        if live.mls.members().count() > 1 && !force_alone {
+            self.post_leave_proposal(gid, server_id).await?;
+        } else {
+            // Alone in the room: the server deletes it. Whatever goes wrong
+            // here, the room still ends on this computer.
+            let sent = match self.conn(server_id).await {
+                Ok(c) if c.protocol() >= 2 => {
+                    match self
+                        .request(server_id, Request::LastLeave { group: gid })
+                        .await
+                    {
+                        Err(CoreError::Net(NetError::Refused(why))) => {
+                            // Others are still in the room: leave the usual
+                            // way, so they see this person go.
+                            let _ = self.post_leave_proposal(gid, server_id).await;
+                            Err(why)
+                        }
+                        Err(e) => Err(e.to_string()),
+                        Ok(_) => Ok(()),
+                    }
+                }
+                // A server on protocol 1 has no such request.
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.to_string()),
             };
-            if let Err(e) = sent {
+            if let Err(why) = sent {
                 let name = self
                     .groups
                     .get(&gid)
                     .map(|g| room_label(&g.row.name, g.row.is_dm))
                     .unwrap_or_default();
                 self.emit(Event::Warning(format!(
-                    "Left {name}, but the server could not delete it: {e}"
+                    "Left {name}, but the server could not delete it: {why}"
                 )));
             }
         }
         self.end_room(gid, Ended::Left)
+    }
+
+    /// Posts this person's request to leave the group.
+    async fn post_leave_proposal(&mut self, gid: GroupId, server_id: i64) -> Result<(), CoreError> {
+        let live = self.groups.get_mut(&gid).expect("checked by caller");
+        let proposal = live
+            .mls
+            .leave_group(&self.prov, &live.row.key)
+            .map_err(mls_err)?;
+        self.request(
+            server_id,
+            Request::Post {
+                group: gid,
+                mls: ser(&proposal)?,
+                welcome: None,
+            },
+        )
+        .await?;
+        Ok(())
     }
 
     /// Ends a room this person is no longer in. Its keys and group state go
@@ -3214,6 +3239,18 @@ impl Client {
     /// Makes the next checkpoint of the profile's log find it busy.
     pub fn test_busy_next_checkpoint(&self) {
         self.store.test_busy_next_checkpoint();
+    }
+
+    /// Makes the next `leave` act as if this person were alone in the room,
+    /// as an app whose member list is out of date would.
+    pub fn test_leave_as_if_alone(&mut self) {
+        self.hooks.alone_leave = true;
+    }
+
+    /// Drops the connection to every server, as a sleep or a server restart
+    /// would; the next request connects again.
+    pub fn test_drop_connections(&mut self) {
+        self.conns.clear();
     }
 
     /// Makes the next room `purge_read` deletes fail.

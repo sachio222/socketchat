@@ -11,6 +11,7 @@ use openmls::prelude::tls_codec::Deserialize as _;
 use openmls::prelude::*;
 use openmls_rust_crypto::RustCrypto;
 use openmls_sqlite_storage::SqliteStorageProvider;
+use openmls_traits::public_storage::PublicStorageProvider as _;
 use rusqlite::{params, Connection, OptionalExtension};
 use socketchat_core::provider::JsonCodec;
 use socketchat_core::suite::{parse_admins, FALLBACK_SUITE, MAX_PAST_EPOCHS, SUITE};
@@ -882,11 +883,10 @@ pub(crate) fn delete_group(db: &Connection, state: &State, group: &Gid) -> rusql
         .prepare("SELECT id FROM files WHERE group_id = ?1")?
         .query_map([g], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    for id in files {
-        if let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) {
-            crate::files::delete(state, &t, &FileId(id));
-        }
+    for id in &files {
+        t.execute("DELETE FROM file_done WHERE file_id = ?1", [id])?;
     }
+    t.execute("DELETE FROM files WHERE group_id = ?1", [g])?;
     t.execute("DELETE FROM log WHERE group_id = ?1", [g])?;
     t.execute(
         "DELETE FROM welcomes WHERE mailbox IN (SELECT key FROM mailboxes WHERE group_id = ?1)",
@@ -896,9 +896,27 @@ pub(crate) fn delete_group(db: &Connection, state: &State, group: &Gid) -> rusql
     t.execute("DELETE FROM invites WHERE group_id = ?1", [g])?;
     t.execute("DELETE FROM mailboxes WHERE group_id = ?1", [g])?;
     t.execute("DELETE FROM groups WHERE id = ?1", [g])?;
-    let storage = Storage::new(&*t);
-    PublicGroup::delete(&storage, &mls_gid(group)).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    t.commit()
+    {
+        let storage = Storage::new(&*t);
+        PublicGroup::delete(&storage, &mls_gid(group)).map_err(to_sql_error)?;
+        storage
+            .clear_proposal_queue::<GroupId, openmls::prelude::hash_ref::ProposalRef>(&mls_gid(
+                group,
+            ))
+            .map_err(to_sql_error)?;
+    }
+    t.commit()?;
+    // The chunks go once the rows are gone for good.
+    for id in files {
+        if let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) {
+            let _ = std::fs::remove_dir_all(crate::files::file_dir(state, &FileId(id)));
+        }
+    }
+    Ok(())
+}
+
+fn to_sql_error(e: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(e))
 }
 
 /// Days in an account's server-invite window: long enough that every link

@@ -629,3 +629,39 @@ async fn alone_leaver_ends_locally_when_the_server_is_gone() {
         "{ev:?}"
     );
 }
+
+#[tokio::test]
+async fn alone_leaver_reconnects_after_a_dropped_connection() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Room").await.unwrap();
+    drain(&mut a).await;
+    a.test_drop_connections();
+    a.leave(g).await.unwrap();
+    assert_eq!(server_rows(&s, g), (0, 0));
+    assert!(a.test_traces(g).is_empty(), "{:?}", a.test_traces(g));
+    let ev = drain(&mut a).await;
+    assert!(!ev.iter().any(|e| matches!(e, Event::Warning(_))), "{ev:?}");
+}
+
+#[tokio::test]
+async fn refused_last_leave_still_posts_the_leave_request() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    drain(&mut b).await;
+    // Bo's list of members is out of date: he believes he is alone.
+    b.test_leave_as_if_alone();
+    b.leave(g).await.unwrap();
+    assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+    assert!(!listed(&b, g));
+    // The server kept the room, and Ada sees Bo go.
+    assert_eq!(server_rows(&s, g).0, 1);
+    settle(&mut [&mut a]).await;
+    assert_eq!(a.members(g).len(), 1);
+    let ev = drain(&mut b).await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Warning(w) if w.contains("other people are still"))),
+        "{ev:?}"
+    );
+}
