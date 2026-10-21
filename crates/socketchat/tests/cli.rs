@@ -445,3 +445,106 @@ fn second_process_on_one_profile_is_told_and_exits_1() {
     let o = run(&ada, &["new", "Later"]);
     assert!(o.status.success(), "{}", out(&o));
 }
+
+/// What `socketchat invites` prints, with the run's exit success.
+fn invites_list(home: &Path) -> (bool, String) {
+    let o = run(home, &["invites"]);
+    (
+        o.status.success(),
+        String::from_utf8_lossy(&o.stdout).to_string(),
+    )
+}
+
+#[test]
+fn invites_lists_and_cancels() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    assert!(run(&ada, &["new", "Crew"]).status.success());
+    let (ok, text) = invites_list(&ada);
+    assert!(ok);
+    assert_eq!(text.trim(), "You have no open invite links.");
+
+    let o = run(&ada, &["invite", "--group", "Crew"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let (ok, text) = invites_list(&ada);
+    assert!(ok);
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(rows.len(), 1, "{text}");
+    assert!(rows[0].starts_with("1. "), "{text}");
+    assert!(rows[0].contains(": expires in "), "{text}");
+
+    let o = run(&ada, &["invites", "--cancel", "1"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        "Cancelled. That link no longer works."
+    );
+    let (_, text) = invites_list(&ada);
+    assert_eq!(text.trim(), "You have no open invite links.");
+}
+
+#[test]
+fn invites_cancel_bad_number_exits_1() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    assert!(run(&ada, &["new", "Crew"]).status.success());
+    assert!(run(&ada, &["invite", "--group", "Crew"]).status.success());
+    for n in ["0", "2"] {
+        let o = run(&ada, &["invites", "--cancel", n]);
+        assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+        assert!(
+            out(&o).contains(&format!(
+                "There is no link {n}. Run socketchat invites to see the list."
+            )),
+            "{}",
+            out(&o)
+        );
+    }
+    // Nothing was cancelled.
+    let (_, text) = invites_list(&ada);
+    assert!(text.starts_with("1. "), "{text}");
+}
+
+#[test]
+fn log_marks_room_seen() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let (ada, bo) = (home.path().join("Ada"), home.path().join("Bo"));
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    assert!(run(&ada, &["new", "Crew"]).status.success());
+    let o = run(&ada, &["invite", "--group", "Crew"]);
+    let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    assert!(run(&bo, &["join", &link]).status.success());
+    assert!(run(&ada, &["sync"]).status.success());
+    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&ada, &["send", "--group", "Crew", "are you there"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(run(&bo, &["sync"]).status.success());
+    assert_eq!(unseen_in(&bo, "Crew"), 1, "sync alone leaves it unread");
+
+    let o = run(&bo, &["log", "--group", "Crew"]);
+    assert!(out(&o).contains("Ada: are you there"), "{}", out(&o));
+    assert_eq!(unseen_in(&bo, "Crew"), 0, "log marks the room read");
+}
+
+/// The unread count of a room in a profile no program has open.
+fn unseen_in(home: &Path, room: &str) -> u32 {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let c = socketchat_core::client::Client::open(home, pass())
+            .await
+            .unwrap();
+        c.groups()
+            .into_iter()
+            .find(|g| g.name == room)
+            .unwrap()
+            .unseen
+    })
+}

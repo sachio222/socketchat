@@ -54,6 +54,12 @@ enum Cmd {
         #[arg(long)]
         dm: bool,
     },
+    /// See your open invite links, or cancel one.
+    Invites {
+        /// Stop the link at this number in the list from working.
+        #[arg(long, value_name = "NUMBER")]
+        cancel: Option<usize>,
+    },
     /// Send a message to a group (for scripts).
     Send {
         #[arg(long)]
@@ -61,7 +67,7 @@ enum Cmd {
         #[arg(required = true)]
         text: Vec<String>,
     },
-    /// Print a group's recent messages (for scripts).
+    /// Print a group's recent messages and mark the group read (for scripts).
     Log {
         #[arg(long)]
         group: String,
@@ -401,6 +407,40 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             eprintln!("Send this to one person. It works once and expires in {hours}.");
             Ok(())
         }
+        Some(Cmd::Invites { cancel }) => {
+            let mut c = open().await?;
+            c.sync().await?;
+            let list = c.invites().await?;
+            match cancel {
+                None if list.is_empty() => println!("You have no open invite links."),
+                None => {
+                    for (i, v) in list.iter().enumerate() {
+                        println!(
+                            "{}. {}: expires in {}",
+                            i + 1,
+                            clean_text(&v.label),
+                            hours_text(c.hours_until(v.expires_unix))
+                        );
+                    }
+                }
+                Some(n) => {
+                    let Some(v) = n.checked_sub(1).and_then(|i| list.get(i)) else {
+                        report_warnings(&mut c);
+                        return Err(Fail(
+                            1,
+                            format!(
+                                "There is no link {n}. Run socketchat invites to see the list."
+                            ),
+                        ));
+                    };
+                    c.cancel_invite(v.token).await?;
+                    println!("Cancelled. That link no longer works.");
+                }
+            }
+            c.purge_read(None);
+            report_warnings(&mut c);
+            Ok(())
+        }
         Some(Cmd::Send { group, text }) => {
             let mut c = open().await?;
             c.sync().await?;
@@ -421,6 +461,7 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
                     println!("{}: {}", l.sender, l.text);
                 }
             }
+            c.mark_seen(gid)?;
             c.purge_read(None);
             report_warnings(&mut c);
             Ok(())

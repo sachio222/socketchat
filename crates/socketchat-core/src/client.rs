@@ -3094,7 +3094,8 @@ impl Client {
         if why == Ended::Left && self.store.unseen(&gid)? == 0 {
             self.store.delete_room(&gid)?;
         }
-        // The room is deleted; a busy log only delays the tidy-up.
+        // Any history left stays until `purge_read`. A busy log only delays
+        // clearing old copies of deleted rows.
         self.tidy_log(&room_label(&live.row.name, live.row.is_dm));
         Ok(())
     }

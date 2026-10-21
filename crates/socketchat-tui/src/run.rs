@@ -684,9 +684,13 @@ impl Screen {
                         // Leaving deletes them: show them first.
                         self.leave_shown = Some(g);
                         self.select(g);
-                        let messages = if n == 1 { "message" } else { "messages" };
+                        let (messages, them) = if n == 1 {
+                            ("message", "it")
+                        } else {
+                            ("messages", "them")
+                        };
                         self.app.status = Some(format!(
-                            "You have {n} new {messages} in {room}. Read them, then type /leave again to leave."
+                            "You have {n} new {messages} in {room}. Read {them}, then type /leave again to leave."
                         ));
                     }
                     LeaveStep::Confirm => {
@@ -1269,7 +1273,7 @@ mod tests {
         bo.act(Action::Command(Command::Leave)).await;
         assert_eq!(
             bo.app.status.as_deref(),
-            Some("You have 1 new message in Room. Read them, then type /leave again to leave.")
+            Some("You have 1 new message in Room. Read it, then type /leave again to leave.")
         );
         bo.act(Action::Command(Command::Leave)).await;
         assert!(
