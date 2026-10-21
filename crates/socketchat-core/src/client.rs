@@ -2293,11 +2293,20 @@ impl Client {
     /// live; an ended room goes from the list, with anything its ending
     /// had not deleted yet.
     pub fn clear_history(&mut self, gid: GroupId) -> Result<(), CoreError> {
+        let what = self
+            .groups()
+            .into_iter()
+            .find(|x| x.id == gid)
+            .map(|x| room_label(&x.name, x.is_dm))
+            .unwrap_or_else(|| "a chat".into());
         if !self.groups.contains_key(&gid) && self.store.is_ended(&gid)? {
-            self.store.purge_room(&gid)
+            self.store.delete_room(&gid)?;
+            self.tidy_log(&what);
         } else {
-            self.store.clear_history(&gid)
+            self.store.clear_history(&gid)?;
+            self.tidy_log(&format!("the messages of {what}"));
         }
+        Ok(())
     }
 
     /// Marks everything stored in a room as seen.
@@ -2706,10 +2715,11 @@ impl Client {
         let _ = live.mls.delete(self.prov.storage());
         self.store.end_room(&gid, &me)?;
         if self.store.unseen(&gid)? == 0 {
-            self.store.purge_room(&gid)
-        } else {
-            self.store.checkpoint()
+            self.store.delete_room(&gid)?;
         }
+        // The room is deleted; a busy log only delays the tidy-up.
+        self.tidy_log(&room_label(&live.row.name, live.row.is_dm));
+        Ok(())
     }
 
     /// Commits members' requests to leave. When the last admin leaves, the
@@ -3178,6 +3188,11 @@ impl Client {
     /// the room's keys and group state still on disk.
     pub fn test_fail_next_ending(&mut self) {
         self.hooks.fail_ending = true;
+    }
+
+    /// Makes the next checkpoint of the profile's log find it busy.
+    pub fn test_busy_next_checkpoint(&self) {
+        self.store.test_busy_next_checkpoint();
     }
 
     /// Makes the next room `purge_read` deletes fail.

@@ -508,3 +508,68 @@ async fn clearing_a_failed_ending_deletes_its_keys_too() {
     assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
     assert!(!listed(&b, g));
 }
+
+/// Warnings that say deleted rows still have old copies in the log file.
+fn old_copies(ev: &[Event]) -> usize {
+    ev.iter()
+        .filter(|e| matches!(e, Event::Warning(w) if w.contains("old copies")))
+        .count()
+}
+
+#[tokio::test]
+async fn busy_log_after_leaving_warns_and_succeeds() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    a.send_text(g, "one").await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    b.mark_seen(g).unwrap();
+    drain(&mut b).await;
+    b.test_busy_next_checkpoint();
+    b.leave(g).await.unwrap();
+    assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+    assert!(!listed(&b, g));
+    let ev = drain(&mut b).await;
+    assert_eq!(old_copies(&ev), 1, "{ev:?}");
+}
+
+#[tokio::test]
+async fn busy_log_after_removal_with_unread_warns() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    a.send_text(g, "one").await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    drain(&mut b).await;
+    let bk = b.my_group_key(g).unwrap();
+    a.remove_member(g, &bk).await.unwrap();
+    b.test_busy_next_checkpoint();
+    b.sync().await.unwrap();
+    assert_eq!(summary(&b, g).ended, Some(Ended::Removed));
+    assert_eq!(
+        b.test_traces(g),
+        vec!["messages", "ended_names", "ended_rooms"]
+    );
+    let ev = drain(&mut b).await;
+    assert_eq!(old_copies(&ev), 1, "{ev:?}");
+}
+
+#[tokio::test]
+async fn busy_log_after_clearing_warns_and_succeeds() {
+    let s = TestServer::start().await;
+    let (g, _a, mut b) = removed_with_unread(&s).await;
+    drain(&mut b).await;
+    b.test_busy_next_checkpoint();
+    b.clear_history(g).unwrap();
+    assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+    assert!(!listed(&b, g));
+    assert_eq!(old_copies(&drain(&mut b).await), 1);
+    // A live room too.
+    let (g, mut a, mut b) = pair(&s).await;
+    a.send_text(g, "one").await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    drain(&mut b).await;
+    b.test_busy_next_checkpoint();
+    b.clear_history(g).unwrap();
+    assert!(b.messages(g, 100).is_empty());
+    assert_eq!(summary(&b, g).ended, None);
+    assert_eq!(old_copies(&drain(&mut b).await), 1);
+}

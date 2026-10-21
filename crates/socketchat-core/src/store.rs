@@ -283,6 +283,9 @@ pub struct Store {
     dir: PathBuf,
     /// Locked for as long as this store is open; dropping it unlocks.
     _lock: std::fs::File,
+    /// The next checkpoint reports a busy log, for tests.
+    #[cfg(feature = "test-hooks")]
+    busy_next_checkpoint: std::cell::Cell<bool>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -404,6 +407,8 @@ impl Store {
                 conn,
                 dir: dir.to_path_buf(),
                 _lock: lock,
+                #[cfg(feature = "test-hooks")]
+                busy_next_checkpoint: std::cell::Cell::new(false),
             },
             p,
         ))
@@ -427,6 +432,8 @@ impl Store {
                 conn,
                 dir: dir.to_path_buf(),
                 _lock: lock,
+                #[cfg(feature = "test-hooks")]
+                busy_next_checkpoint: std::cell::Cell::new(false),
             },
             p,
         ))
@@ -1255,6 +1262,13 @@ impl Store {
         Ok(())
     }
 
+    /// Makes the next [`Store::checkpoint`] find the log busy, as another
+    /// reader holding it would.
+    #[cfg(feature = "test-hooks")]
+    pub fn test_busy_next_checkpoint(&self) {
+        self.busy_next_checkpoint.set(true);
+    }
+
     /// Whether a room has an `ended_rooms` row.
     pub fn is_ended(&self, g: &GroupId) -> Result<bool, CoreError> {
         Ok(self.conn.query_row(
@@ -1340,15 +1354,8 @@ impl Store {
         Ok(())
     }
 
-    /// [`Store::delete_room`], then clears the deleted pages out of the
-    /// write-ahead log.
-    pub fn purge_room(&self, g: &GroupId) -> Result<(), CoreError> {
-        self.delete_room(g)?;
-        self.checkpoint()
-    }
-
-    /// Deletes a live room's messages and extension messages on this
-    /// computer, then clears the deleted pages out of the write-ahead log.
+    /// Deletes a live room's history on this computer in one transaction.
+    /// [`Store::checkpoint`] then clears the old copies out of the log.
     pub fn clear_history(&self, g: &GroupId) -> Result<(), CoreError> {
         let tx = self.conn.unchecked_transaction()?;
         for table in ROOM_HISTORY_TABLES {
@@ -1358,14 +1365,21 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        self.checkpoint()
+        Ok(())
     }
 
     /// Copies the write-ahead log into the database and empties it, so the
     /// old copies of deleted rows it held are gone from the disk too. Fails
     /// when another connection keeps the log in use through every try.
     pub fn checkpoint(&self) -> Result<(), CoreError> {
+        #[cfg(feature = "test-hooks")]
+        let busy = self.busy_next_checkpoint.take();
+        #[cfg(not(feature = "test-hooks"))]
+        let busy = false;
         for _ in 0..CHECKPOINT_TRIES {
+            if busy {
+                break;
+            }
             let busy: i64 = self
                 .conn
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
