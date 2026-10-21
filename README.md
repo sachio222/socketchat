@@ -1,10 +1,10 @@
 # socketchat
 
-socketchat is a full-featured encrypted chat with a server you run yourself. The server runs anywhere, from a cloud server or a home computer down to a small device such as a Raspberry Pi, and you invite people with a link. The server passes messages along but cannot read them: messages, files and group changes are end-to-end encrypted, which means only the people in a chat can read them.
+socketchat is a full-featured encrypted chat with a server you run yourself. The server runs anywhere, from a cloud server or a home computer down to a small device such as a Raspberry Pi, and you invite people with a link. The server passes messages along but cannot read them: messages, files and changes to who is in a room are end-to-end encrypted, which means only the people in a chat can read them.
 
 What you get:
 
-- Group chats and direct messages.
+- Rooms, which are group chats, and direct messages.
 - Invite links, shown as text and as a QR code.
 - Verification with safety numbers, so you can check that nobody sits between you and a friend.
 - Files, photos and videos. Photos lose their location and device data before they leave.
@@ -89,7 +89,7 @@ On your own computer, use the link. The first time, socketchat asks for a displa
 socketchat join "socketchat://chat.example.com:7444/j/..."
 ```
 
-The chat screen opens. Start a group and invite a friend:
+The chat screen opens. Start a room and invite a friend:
 
 ```
 /new Friends
@@ -106,13 +106,13 @@ Type `/help` in the chat screen to see every command. `/switch` opens another ro
 
 ## What leaving and closing delete
 
-When you leave a room, are removed from it or it closes, socketchat deletes the room's keys from your computer at once. Its messages go once you have read them. After your own leave they go at once; after a removal or a close they go when you open another room or quit. Messages you have not read stay until you read them, 30 days at most. `/clear` deletes a room's messages from your computer while you stay in it. Deletion happens in each person's own app, so other members keep their copies, and anyone can photograph a screen. On a 0.5.0 server, the server deletes everything it holds for a room once the last person leaves or an admin closes it. [SECURITY.md](SECURITY.md) has the details.
+When you leave a room, socketchat deletes the room's keys from your computer at once. When you are removed or the room closes, it deletes them as soon as your app learns of it, which for an app that was not running is its next sync with the server. The room's messages go once you have read them: after your own leave at once, and after a removal or a close when you open another room or quit. Messages you have not read stay until you read them. Once 30 days have passed since the room ended for you, socketchat deletes them anyway the next time it opens, you open another room or it quits. `/clear` deletes a room's messages from your computer while you stay in it. Deletion happens in each person's own app, so other members keep their copies, and anyone can photograph a screen. A 0.5.0 server deletes everything it holds for a room once the last member's app leaves while alone in it, as an admin's app does at the end of a close. [SECURITY.md](SECURITY.md) has the details.
 
 ## Screenshots
 
-A group chat with three people:
+A room with three people:
 
-![A group chat with three people](docs/images/chat.png)
+![A room with three people](docs/images/chat.png)
 
 The invite box with its QR code:
 
@@ -132,7 +132,7 @@ Joining from the command line:
 
 ## What the server sees
 
-The server stores and forwards encrypted data. It never sees message text, file contents, display names, group names, or any key that can decrypt them. It does see the size and timing of encrypted messages and files, the IP addresses of connected apps, and for each group a list of random keys and the signed changes to that list. A person gets a fresh random key in every group, so no key or ID in the server's records ties one person's groups together. Someone watching the server live can still link a person's groups by IP address and connection.
+The server stores and forwards encrypted data. It never sees message text, file contents, display names, room names, or any key that can decrypt them. It does see the size and timing of encrypted messages and files, the IP addresses of connected apps, and for each room a list of random keys and the signed changes to that list. A person gets a fresh random key in every room, so no key or ID in the server's records ties one person's rooms together. Someone watching the server live can still link a person's rooms by IP address and connection.
 
 [SECURITY.md](SECURITY.md) has the full list, the cryptography, and what socketchat does not protect.
 

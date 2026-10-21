@@ -148,7 +148,7 @@ Every hour, starting one hour after the server starts, a cleanup task deletes:
 - join requests nobody acted on within 7 days, and mailboxes made for joins that never finished;
 - rooms with no members, with everything the server holds for them.
 
-Messages and files also go sooner: the server deletes a message once every member's app confirms it has it, and a file once every member has saved it. A room also goes at once when its last member leaves it with socketchat 0.5.0 or later, as happens when an admin closes a room. The server then deletes its messages, files, invite links, join requests, mailboxes and group state together.
+Messages and files also go sooner: the server deletes a message once every member's app confirms it has it, and a file once every member has saved it. A room also goes at once when the last member's app, on socketchat 0.5.0 or later, leaves while alone in the room, as an admin's app does at the end of a close. The server then deletes its messages, files, invite links, join requests, mailboxes and its list of members' public keys together.
 
 ## Back up
 
@@ -168,7 +168,7 @@ If you restore to a different path, change `data_dir` in `socketchat-server.toml
 2. Back up the data directory, as above.
 3. `sudo systemctl stop socketchat`, then `sudo install -m 755 ~/.local/bin/socketchat /usr/local/bin/socketchat` (or `~/.cargo/bin/socketchat` after a source build), then `sudo systemctl start socketchat`.
 
-Apps and servers send a protocol number when they connect: 2 in socketchat 0.5.0, 1 in 0.4.0. A 0.5.0 server serves apps on either, and a 0.5.0 app talks to a 0.4.0 server over protocol 1, so you can upgrade the server before or after your members. Some features need a 0.5.0 server: listing and cancelling open invite links, a room's creation date in its details, and deleting a room when its last member leaves. With an older server the app says the server runs an older version where it matters, and everything else works as before.
+Apps and servers send a protocol number when they connect: 2 in socketchat 0.5.0, 1 in 0.4.0. A 0.5.0 server serves apps on either, and a 0.5.0 app talks to a 0.4.0 server over protocol 1, so you can upgrade the server before or after your members. Some features need a 0.5.0 server: listing and cancelling open invite links, a room's creation date in its details, and deleting a room when the last member's app leaves it. With an older server the app says the server runs an older version where it matters, and everything else works as before.
 
 ## Measured numbers
 
