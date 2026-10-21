@@ -218,3 +218,22 @@ async fn oversize_file_refused_before_upload() {
     );
     assert_eq!(server_chunk_files(&s), 0);
 }
+
+/// Clearing a room's messages also drops its files list and the keys to
+/// those files.
+#[tokio::test]
+async fn clearing_a_room_drops_its_files_list() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    a.send_file(g, &fixture("gps.png"), false).await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    assert_eq!(b.files(g).len(), 1);
+    b.clear_history(g).unwrap();
+    assert!(b.files(g).is_empty());
+    assert!(
+        !b.test_traces(g).contains(&"files"),
+        "{:?}",
+        b.test_traces(g)
+    );
+    assert!(b.messages(g, 100).is_empty());
+}

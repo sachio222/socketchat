@@ -600,3 +600,37 @@ fn unseen_in(home: &Path, room: &str) -> u32 {
             .unseen
     })
 }
+
+#[test]
+fn log_marks_only_the_lines_it_printed() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let (ada, bo) = (home.path().join("Ada"), home.path().join("Bo"));
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    assert!(run(&ada, &["new", "Crew"]).status.success());
+    let o = run(&ada, &["invite", "--group", "Crew"]);
+    let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    assert!(run(&bo, &["join", &link]).status.success());
+    assert!(run(&ada, &["sync"]).status.success());
+    assert!(run(&bo, &["sync"]).status.success());
+    assert!(run(&bo, &["log", "--group", "Crew"]).status.success());
+    for text in ["one", "two", "three"] {
+        let o = run(&ada, &["send", "--group", "Crew", text]);
+        assert!(o.status.success(), "{}", out(&o));
+    }
+    assert!(run(&bo, &["sync"]).status.success());
+    assert_eq!(unseen_in(&bo, "Crew"), 3);
+
+    let o = run(&bo, &["log", "--group", "Crew", "--limit", "2"]);
+    let text = out(&o);
+    assert!(
+        text.contains("Ada: one") && text.contains("Ada: two"),
+        "{text}"
+    );
+    assert!(!text.contains("Ada: three"), "{text}");
+    assert_eq!(unseen_in(&bo, "Crew"), 1, "the unprinted line stays unread");
+
+    let o = run(&bo, &["log", "--group", "Crew", "--limit", "2"]);
+    assert!(out(&o).contains("Ada: three"), "{}", out(&o));
+    assert_eq!(unseen_in(&bo, "Crew"), 0);
+}

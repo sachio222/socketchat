@@ -288,6 +288,51 @@ async fn out_of_step_chat_warns_once() {
     assert_eq!(out.len(), 1, "{w:?}");
 }
 
+/// A chat that fell out of step is not told this app's version: the
+/// message could not reach the others anyway.
+#[tokio::test]
+async fn out_of_step_chat_is_not_told_the_app_version() {
+    let (_s, proxy, mut a, mut b, g) = proxied_pair().await;
+    proxy.arm();
+    assert!(a.update_keys(g).await.is_err());
+    a.test_drop_pending_commit(g);
+    b.send_text(g, "one").await.unwrap();
+    a.sync().await.unwrap();
+    assert!(warnings(&drain(&mut a).await)
+        .iter()
+        .any(|w| w.contains("fell out of step")));
+    a.test_announce_version("9.9.9");
+    for _ in 0..3 {
+        a.sync().await.unwrap();
+    }
+    let me = a.members(g).into_iter().find(|m| m.me).unwrap();
+    assert_ne!(me.app_version.as_deref(), Some("9.9.9"));
+    let w = warnings(&drain(&mut a).await);
+    assert!(!w.iter().any(|w| w.contains("app version")), "{w:?}");
+}
+
+/// A room the server will not take the version message in says so once
+/// per session, not on every sync.
+#[tokio::test]
+async fn refused_version_message_warns_once() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    a.sync().await.unwrap();
+    drain(&mut a).await;
+    a.test_announce_version("9.9.9");
+    a.test_refuse_posts(g);
+    for _ in 0..4 {
+        a.sync().await.unwrap();
+    }
+    let w = warnings(&drain(&mut a).await);
+    let shared: Vec<_> = w
+        .iter()
+        .filter(|w| w.starts_with("Could not share your app version in Crew"))
+        .collect();
+    assert_eq!(shared.len(), 1, "{w:?}");
+}
+
 // ---------- sync keeps going ----------
 
 /// One broken group does not stop the others on the same server.

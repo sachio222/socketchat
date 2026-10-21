@@ -67,7 +67,8 @@ enum Cmd {
         #[arg(required = true)]
         text: Vec<String>,
     },
-    /// Print a group's recent messages and mark the group read (for scripts).
+    /// Print a group's recent messages, or its oldest unread ones when more
+    /// are unread than --limit, and mark them read (for scripts).
     Log {
         #[arg(long)]
         group: String,
@@ -464,14 +465,17 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             let mut c = open().await?;
             c.sync().await?;
             let gid = group_by_name(&c, &group)?;
-            for l in c.messages(gid, limit) {
+            let lines = c.lines_to_read(gid, limit);
+            for l in &lines {
                 if l.notice {
                     println!("· {}", l.text);
                 } else {
                     println!("{}: {}", l.sender, l.text);
                 }
             }
-            c.mark_seen(gid)?;
+            if let Some(newest) = lines.last() {
+                c.mark_seen_upto(gid, newest.seq)?;
+            }
             c.purge_read(None);
             report_warnings(&mut c);
             Ok(())

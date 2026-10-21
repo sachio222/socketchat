@@ -360,6 +360,17 @@ fn open_keyed(path: &Path, key: &[u8; 32]) -> Result<Connection, CoreError> {
     Ok(conn)
 }
 
+/// A `messages` row read as seq, sender, kind, body and sent time.
+fn message_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRow> {
+    Ok(MessageRow {
+        seq: r.get::<_, i64>(0)? as u64,
+        sender: key_col(r.get(1)?),
+        kind: r.get(2)?,
+        body: r.get(3)?,
+        sent_unix: r.get::<_, i64>(4)? as u64,
+    })
+}
+
 /// Columns added after the first release, for profiles made before them.
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("vouchers", "mine", "INTEGER NOT NULL DEFAULT 0"),
@@ -383,11 +394,15 @@ fn migrate(conn: &Connection) -> Result<(), CoreError> {
             |r| r.get(0),
         )?;
         if !has {
-            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
+            // A column and its start value arrive together, or neither does
+            // and the next open tries again.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
             if *column == "seen_seq" {
                 // History from before seen marks counts as read, once.
-                conn.execute_batch("UPDATE groups SET seen_seq = last_seq;")?;
+                tx.execute_batch("UPDATE groups SET seen_seq = last_seq;")?;
             }
+            tx.commit()?;
         }
     }
     Ok(())
@@ -787,6 +802,30 @@ impl Store {
         Ok(())
     }
 
+    /// Moves the seen mark of a live or ended room up to `seq`. It never
+    /// moves back.
+    pub fn mark_seen_upto(&self, g: &GroupId, seq: u64) -> Result<(), CoreError> {
+        self.set_seen_seq(g, seq)?;
+        self.conn.execute(
+            "UPDATE ended_rooms SET seen_seq = max(seen_seq, ?1) WHERE group_id = ?2",
+            params![seq as i64, g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// The seen mark of a live or ended room.
+    pub fn seen_mark(&self, g: &GroupId) -> Result<u64, CoreError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COALESCE(
+                 (SELECT seen_seq FROM groups WHERE id = ?1),
+                 (SELECT seen_seq FROM ended_rooms WHERE group_id = ?1),
+                 0)",
+            params![g.0.as_slice()],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
     /// Stored lines newer than the room's seen mark: the live room's, or
     /// the ended room's.
     pub fn unseen(&self, g: &GroupId) -> Result<u32, CoreError> {
@@ -1057,6 +1096,37 @@ impl Store {
         Ok(())
     }
 
+    /// A sequence number for a notice this app writes itself after reading
+    /// the log up to `last_seq`: past the log and past every stored line,
+    /// so it never replaces one, such as this person's own line that the
+    /// log has not given back yet.
+    pub fn notice_seq(&self, g: &GroupId, last_seq: u64) -> Result<u64, CoreError> {
+        let stored: i64 = self.conn.query_row(
+            "SELECT COALESCE(max(seq), 0) FROM messages WHERE group_id = ?1",
+            [g.0.as_slice()],
+            |r| r.get(0),
+        )?;
+        Ok(last_seq.max(stored as u64) + 1)
+    }
+
+    /// The first `limit` messages after `after`, oldest first.
+    pub fn messages_after(
+        &self,
+        g: &GroupId,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>, CoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT seq, sender_group_key, kind, body, sent_unix FROM messages
+             WHERE group_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+        )?;
+        let rows = st.query_map(
+            params![g.0.as_slice(), after as i64, limit as i64],
+            message_row,
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// The newest `limit` messages, oldest first.
     pub fn messages(&self, g: &GroupId, limit: usize) -> Result<Vec<MessageRow>, CoreError> {
         let mut st = self.conn.prepare(
@@ -1064,15 +1134,7 @@ impl Store {
                  SELECT * FROM messages WHERE group_id = ?1 ORDER BY seq DESC LIMIT ?2
              ) ORDER BY seq",
         )?;
-        let rows = st.query_map(params![g.0.as_slice(), limit as i64], |r| {
-            Ok(MessageRow {
-                seq: r.get::<_, i64>(0)? as u64,
-                sender: key_col(r.get(1)?),
-                kind: r.get(2)?,
-                body: r.get(3)?,
-                sent_unix: r.get::<_, i64>(4)? as u64,
-            })
-        })?;
+        let rows = st.query_map(params![g.0.as_slice(), limit as i64], message_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -1169,7 +1231,8 @@ impl Store {
         Ok(())
     }
 
-    /// Forgets a link this client made, and the voucher kept for it.
+    /// Forgets a link this client made, and the voucher kept for it. Only
+    /// for a link the server has just cancelled, which nobody used.
     pub fn forget_invite(&self, token: &Token) -> Result<(), CoreError> {
         self.conn.execute(
             "DELETE FROM invites_made WHERE token = ?1",
@@ -1472,11 +1535,13 @@ impl Store {
         Ok(())
     }
 
-    /// Deletes a live room's history on this computer in one transaction.
-    /// [`Store::checkpoint`] then clears the old copies out of the log.
+    /// Deletes a live room's history on this computer in one transaction,
+    /// with its files list and the keys to those files: the lines that
+    /// offered them go too. [`Store::checkpoint`] then clears the old
+    /// copies out of the log.
     pub fn clear_history(&self, g: &GroupId) -> Result<(), CoreError> {
         let tx = self.conn.unchecked_transaction()?;
-        for table in ROOM_HISTORY_TABLES {
+        for table in ROOM_HISTORY_TABLES.iter().chain(&["files"]) {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE group_id = ?1"),
                 [g.0.as_slice()],
@@ -1951,8 +2016,24 @@ mod tests {
 
     #[test]
     fn old_profile_starts_with_history_seen() {
+        let conn = old_groups_table();
+        migrate(&conn).unwrap();
+        let seen: i64 = conn
+            .query_row("SELECT seen_seq FROM groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(seen, 7);
+        // A second run does not move it again.
+        conn.execute("UPDATE groups SET last_seq = 9", []).unwrap();
+        migrate(&conn).unwrap();
+        let seen: i64 = conn
+            .query_row("SELECT seen_seq FROM groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(seen, 7);
+    }
+
+    /// A 0.4.0 groups table with one room whose log was read up to 7.
+    fn old_groups_table() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        // The 0.4.0 groups table: no seen_seq, no muted.
         conn.execute_batch(
             "CREATE TABLE servers (
                  id INTEGER PRIMARY KEY, host TEXT NOT NULL, port INTEGER NOT NULL,
@@ -1972,17 +2053,55 @@ mod tests {
                  VALUES (x'01', 1, x'00', 7, 1);",
         )
         .unwrap();
+        conn
+    }
+
+    #[test]
+    fn seen_mark_column_and_its_start_value_arrive_together() {
+        let conn = old_groups_table();
+        // The first run stops after adding seen_seq, before it is set.
+        conn.execute_batch(
+            "CREATE TRIGGER stop BEFORE UPDATE ON groups
+             BEGIN SELECT RAISE(ABORT, 'stopped for a test'); END;",
+        )
+        .unwrap();
+        assert!(migrate(&conn).is_err());
+        conn.execute_batch("DROP TRIGGER stop;").unwrap();
         migrate(&conn).unwrap();
         let seen: i64 = conn
             .query_row("SELECT seen_seq FROM groups", [], |r| r.get(0))
             .unwrap();
         assert_eq!(seen, 7);
-        // A second run does not move it again.
-        conn.execute("UPDATE groups SET last_seq = 9", []).unwrap();
-        migrate(&conn).unwrap();
-        let seen: i64 = conn
-            .query_row("SELECT seen_seq FROM groups", [], |r| r.get(0))
+    }
+
+    #[test]
+    fn notice_slot_is_above_every_stored_line() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _p) = Store::create(d.path(), "k").unwrap();
+        s.conn
+            .execute_batch(
+                "INSERT INTO servers (id, host, port, cert_fpr) VALUES (1, 'h', 1, x'00');
+                 INSERT INTO groups (id, server_id, group_key, last_seq, joined_unix)
+                     VALUES (x'01010101010101010101010101010101', 1, x'00', 4, 1);",
+            )
             .unwrap();
-        assert_eq!(seen, 7);
+        let g = GroupId([1; 16]);
+        // An empty room: the slot follows the log.
+        assert_eq!(s.notice_seq(&g, 4).unwrap(), 5);
+        // This person's own line at 5, posted but not yet read back.
+        s.add_message(&g, 5, Some(&Key([2; 32])), 0, "mine", 1)
+            .unwrap();
+        let slot = s.notice_seq(&g, 4).unwrap();
+        assert_eq!(slot, 6);
+        s.add_message(&g, slot, None, 1, "notice", 1).unwrap();
+        let bodies: Vec<String> = s
+            .messages(&g, 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.body)
+            .collect();
+        assert_eq!(bodies, ["mine", "notice"]);
+        // A log read further than any stored line still wins.
+        assert_eq!(s.notice_seq(&g, 9).unwrap(), 10);
     }
 }

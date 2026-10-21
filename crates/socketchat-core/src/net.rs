@@ -458,6 +458,12 @@ impl Conn {
         self.keys.lock().unwrap().retain(|k| &k.public() != key);
     }
 
+    /// Marks the connection dropped without closing it.
+    #[cfg(feature = "test-hooks")]
+    pub fn test_mark_dead(&self) {
+        self.link.alive.store(false, Ordering::SeqCst);
+    }
+
     /// A push that already arrived, without waiting.
     pub fn try_push(&mut self) -> Option<Push> {
         self.pushes.try_recv().ok()

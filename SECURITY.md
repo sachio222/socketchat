@@ -54,7 +54,7 @@ socketchat keeps its data in one encrypted profile on your computer (see "Local 
   - When you leave with everything read, they go at once. The chat screen first shows any messages you have not read and asks you to type `/leave` again.
   - When you were removed or the room closed, they go when you open another room or quit socketchat.
   - A room with messages you have not read keeps its messages until you read them. Once 30 days have passed since the room ended, socketchat deletes them, read or not, the next time it opens, you open another room, or it or one of its commands finishes. The names of the people who wrote those messages stay with them until they go.
-- **`/clear`** deletes a room's messages from your computer while you stay in it.
+- **`/clear`** deletes a room's messages and its files list from your computer while you stay in it. Files shared there before then can no longer be saved with `/save`.
 - **Spare join keys.** A join request carries one KeyPackage for each kind of encryption socketchat allows (see "Cryptography"). For a join request made with 0.5.0, socketchat deletes the ones the join did not use, with their private keys, once you join. A request lodged with 0.4.0 keeps its spare keys.
 - **Deleted rows are overwritten** inside the encrypted file (SQLite's `secure_delete`). socketchat then clears old copies of them out of the profile's log file (SQLite's write-ahead log). If the profile is busy at that moment, old copies can stay in that log file until a later tidy-up, and the app warns when that happens.
 - **Files you saved** stay where you saved them.

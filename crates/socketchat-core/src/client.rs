@@ -23,7 +23,7 @@ use crate::keys::{
 };
 use crate::net::{Conn, NetError};
 use crate::provider::Provider;
-use crate::store::{Closing, GroupRow, PendingJoin, Profile, Store, StoredVoucher};
+use crate::store::{Closing, GroupRow, MessageRow, PendingJoin, Profile, Store, StoredVoucher};
 use crate::suite::{
     admins_from, group_context_extensions, group_create_config, group_join_config, SUITE,
 };
@@ -302,6 +302,9 @@ pub struct Client {
     dm_todo: Vec<DmTodo>,
     /// Groups already reported as out of step since this client opened.
     drifted: HashSet<GroupId>,
+    /// Rooms that already showed, this session, that this app's version
+    /// could not be shared there.
+    version_unshared: HashSet<GroupId>,
     /// Join requests already reported as failing their check since this
     /// client opened.
     bad_requests: HashSet<Token>,
@@ -360,6 +363,8 @@ struct Hooks {
     fail_close_check: bool,
     /// The server refuses the next remove commit of a close.
     refuse_close_commit: bool,
+    /// Groups whose every message post the server refuses.
+    refuse_posts: HashSet<GroupId>,
 }
 
 enum DmTodo {
@@ -522,6 +527,7 @@ impl Client {
             dm_offers: HashMap::new(),
             dm_todo: Vec::new(),
             drifted: HashSet::new(),
+            version_unshared: HashSet::new(),
             bad_requests: HashSet::new(),
             commit_grace: HashSet::new(),
             pushed: HashMap::new(),
@@ -687,6 +693,8 @@ impl Client {
     async fn conn(&mut self, server_id: i64) -> Result<&mut Conn, CoreError> {
         let alive = self.conns.get(&server_id).is_some_and(|c| c.is_alive());
         if !alive {
+            // Entries the old connection already received stay readable.
+            self.drain_pushes(server_id);
             let had = self.conns.remove(&server_id).is_some();
             let row = self
                 .store
@@ -1170,6 +1178,16 @@ impl Client {
             if bytes.len() > MAX_MLS_BYTES {
                 return Err(too_large());
             }
+            #[cfg(feature = "test-hooks")]
+            if self.hooks.refuse_posts.contains(&gid) {
+                if attempt == 0 {
+                    self.fetch_group(gid).await?;
+                    continue;
+                }
+                return Err(CoreError::Net(NetError::Refused(
+                    "refused for a test".into(),
+                )));
+            }
             match self
                 .request(
                     server_id,
@@ -1470,7 +1488,9 @@ impl Client {
                     }
                 }
             }
-            // Forget only links whose question was answered.
+            // Stop listing only links whose question was answered. A room
+            // link's voucher stays: the server stops listing a link once
+            // someone uses it, and the join it starts still needs it.
             for (token, group, _) in &made {
                 let was_asked = if group.is_some() {
                     rooms_answered
@@ -1478,7 +1498,7 @@ impl Client {
                     answered.contains(token)
                 };
                 if was_asked && !open.iter().any(|i| i.token == *token) {
-                    self.store.forget_invite(token)?;
+                    self.store.drop_invite_made(token)?;
                 }
             }
             for info in open {
@@ -1524,8 +1544,10 @@ impl Client {
             Ok(_) => {}
             // The server no longer has it: used, expired or cancelled
             // already. This computer stops listing it, and the refusal shows.
+            // A used link's join may still be under way, so its voucher
+            // stays until the room ends.
             Err(CoreError::Net(NetError::Refused(why))) if why == CANCEL_GONE => {
-                self.store.forget_invite(&token)?;
+                self.store.drop_invite_made(&token)?;
                 return Err(CoreError::Net(NetError::Refused(why)));
             }
             Err(e) => return Err(e),
@@ -1651,7 +1673,8 @@ impl Client {
     }
 
     /// Tells every live room on this server the version this app runs, if
-    /// the room has not heard it yet.
+    /// the room has not heard it yet. A room that fell out of step is
+    /// skipped, and a room that would not take it says so once a session.
     async fn announce_versions(&mut self, server_id: i64) -> Result<(), CoreError> {
         let Some(version) = self.version_to_announce() else {
             return Ok(());
@@ -1664,6 +1687,7 @@ impl Client {
             .collect();
         for gid in gids {
             if !self.groups.contains_key(&gid)
+                || self.drifted.contains(&gid)
                 || self.holds_commit(&gid)
                 || self.store.announced_version(&gid)?.as_deref() == Some(version.as_str())
             {
@@ -1677,13 +1701,21 @@ impl Client {
                     },
                 )
                 .await;
-            if r.is_ok() {
-                self.store.set_announced_version(&gid, &version)?;
-                let me = self.groups[&gid].row.key.public();
-                self.store.set_member_app_version(&gid, &me, &version)?;
+            match r {
+                Ok(_) => {
+                    self.store.set_announced_version(&gid, &version)?;
+                    let me = self.groups[&gid].row.key.public();
+                    self.store.set_member_app_version(&gid, &me, &version)?;
+                }
+                Err(e) if connection_lost(&e) => return Err(e),
+                Err(e) => {
+                    if self.version_unshared.insert(gid) {
+                        let what =
+                            format!("Could not share your app version in {}", self.label(&gid));
+                        self.group_step(Err(e), &what)?;
+                    }
+                }
             }
-            let what = format!("Could not share your app version in {}", self.label(&gid));
-            self.group_step(r.map(|_| ()), &what)?;
         }
         Ok(())
     }
@@ -2642,6 +2674,12 @@ impl Client {
         self.store.mark_seen(&gid)
     }
 
+    /// Marks a room's lines up to `seq` as seen, whether the room is live
+    /// or ended. Lines after it stay unseen.
+    pub fn mark_seen_upto(&mut self, gid: GroupId, seq: u64) -> Result<(), CoreError> {
+        self.store.mark_seen_upto(&gid, seq)
+    }
+
     /// Mutes or unmutes a room on this computer only. Nothing is sent.
     pub fn set_muted(&mut self, gid: GroupId, muted: bool) -> Result<(), CoreError> {
         self.store.set_muted(&gid, muted)
@@ -2743,22 +2781,41 @@ impl Client {
             .collect()
     }
 
+    /// The lines to show someone reading a room, at most `limit`, oldest
+    /// first: the newest ones, or, when more than `limit` are unseen, the
+    /// oldest unseen ones, so that marking what was shown as seen never
+    /// passes over a line nobody showed.
+    pub fn lines_to_read(&self, gid: GroupId, limit: usize) -> Vec<ChatLine> {
+        let unseen = self.store.unseen(&gid).unwrap_or(0) as usize;
+        if unseen <= limit {
+            return self.messages(gid, limit);
+        }
+        self.store
+            .messages_after(&gid, self.store.seen_mark(&gid).unwrap_or(0), limit)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| self.chat_line(&gid, m))
+            .collect()
+    }
+
     pub fn messages(&self, gid: GroupId, limit: usize) -> Vec<ChatLine> {
         self.store
             .messages(&gid, limit)
             .unwrap_or_default()
             .into_iter()
-            .map(|m| {
-                self.line(
-                    &gid,
-                    m.seq,
-                    m.sender,
-                    m.body,
-                    m.sent_unix,
-                    matches!(m.kind, kind::NOTICE | kind::FILE),
-                )
-            })
+            .map(|m| self.chat_line(&gid, m))
             .collect()
+    }
+
+    fn chat_line(&self, gid: &GroupId, m: MessageRow) -> ChatLine {
+        self.line(
+            gid,
+            m.seq,
+            m.sender,
+            m.body,
+            m.sent_unix,
+            matches!(m.kind, kind::NOTICE | kind::FILE),
+        )
     }
 
     /// This client's own key in a group.
@@ -3073,6 +3130,7 @@ impl Client {
         self.commit_grace.remove(&gid);
         self.pushed.remove(&gid);
         self.drifted.remove(&gid);
+        self.version_unshared.remove(&gid);
         self.dm_offers.retain(|_, (dm, _)| *dm != gid);
         self.emit(Event::Left {
             group: gid,
@@ -3681,7 +3739,8 @@ impl Client {
         let Some(last) = self.groups.get(&gid).map(|l| l.row.last_seq) else {
             return Ok(());
         };
-        self.end_removed(gid, last + 1, None)
+        let slot = self.store.notice_seq(&gid, last)?;
+        self.end_removed(gid, slot, None)
     }
 
     // ---------- direct messages ----------
@@ -4230,6 +4289,19 @@ impl Client {
     pub fn test_drop_pending_commit(&mut self, gid: GroupId) {
         if let Some(live) = self.groups.get_mut(&gid) {
             let _ = live.mls.clear_pending_commit(self.prov.storage());
+        }
+    }
+
+    /// Makes the server refuse every message this app posts in a group.
+    pub fn test_refuse_posts(&mut self, gid: GroupId) {
+        self.hooks.refuse_posts.insert(gid);
+    }
+
+    /// Ends every connection's life without closing it, as a dropped
+    /// network would leave it: pushes that already came stay queued.
+    pub fn test_kill_connections(&mut self) {
+        for c in self.conns.values() {
+            c.test_mark_dead();
         }
     }
 

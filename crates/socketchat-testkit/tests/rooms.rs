@@ -1457,7 +1457,7 @@ async fn used_link_drops_off_the_list() {
     assert_eq!(list[0].token, spare.token);
     // Cancelling the used link says so, and leaves the other alone.
     let err = a.cancel_invite(link.token).await.unwrap_err();
-    assert!(err.to_string().contains("isn't one of yours"), "{err}");
+    assert!(err.to_string().contains("already used"), "{err}");
     assert_eq!(a.invites().await.unwrap().len(), 1);
 }
 
@@ -1584,4 +1584,69 @@ async fn cancelling_a_gone_link_forgets_it_here() {
     let err = a.cancel_invite(link.token).await.unwrap_err();
     assert!(err.to_string().contains("already used"), "{err}");
     assert_eq!(a.test_invite_rows(), 0);
+}
+
+/// Entries the server pushed on a connection that then died are kept when
+/// the app connects again.
+#[tokio::test]
+async fn reconnecting_keeps_pushes_from_the_old_connection() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    assert_eq!(a.test_pushed(g).0, 0);
+    b.send_text(g, "pushed").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    a.test_kill_connections();
+    a.invites().await.unwrap();
+    assert!(a.connected());
+    assert_eq!(a.test_pushed(g).0, 1);
+}
+
+// ---------- reading a room from a script ----------
+
+/// More unread lines than a reader asks for: the oldest unread come first,
+/// and only the lines read count as seen, so an ended room keeps the rest.
+#[tokio::test]
+async fn reading_part_of_an_ended_room_keeps_the_rest() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    b.mark_seen(g).unwrap();
+    for i in 0..60 {
+        a.send_text(g, &format!("line {i}")).await.unwrap();
+    }
+    settle(&mut [&mut a, &mut b]).await;
+    let bk = b.my_group_key(g).unwrap();
+    a.remove_member(g, &bk).await.unwrap();
+    b.sync().await.unwrap();
+    assert!(summary(&b, g).ended.is_some());
+    assert_eq!(summary(&b, g).unseen, 60);
+    let read = b.lines_to_read(g, 50);
+    assert_eq!(read.len(), 50);
+    assert_eq!(read[0].text, "line 0");
+    assert_eq!(read[49].text, "line 49");
+    b.mark_seen_upto(g, read[49].seq).unwrap();
+    b.purge_read(None);
+    assert_eq!(summary(&b, g).unseen, 10);
+    let rest = b.lines_to_read(g, 50);
+    assert_eq!(rest.first().map(|l| l.text.as_str()), Some("line 10"));
+    assert_eq!(rest.last().map(|l| l.text.as_str()), Some("line 59"));
+}
+
+/// With everything unread fitting in the window, the newest lines show and
+/// the room ends up read.
+#[tokio::test]
+async fn reading_a_room_with_few_unread_shows_the_newest() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    for i in 0..5 {
+        a.send_text(g, &format!("line {i}")).await.unwrap();
+    }
+    settle(&mut [&mut a, &mut b]).await;
+    b.mark_seen(g).unwrap();
+    a.send_text(g, "new").await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    let read = b.lines_to_read(g, 3);
+    let got: Vec<_> = read.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(got, ["line 3", "line 4", "new"]);
+    b.mark_seen_upto(g, read[2].seq).unwrap();
+    assert_eq!(summary(&b, g).unseen, 0);
 }

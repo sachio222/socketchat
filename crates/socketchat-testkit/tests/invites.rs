@@ -212,3 +212,59 @@ async fn two_admins_race_on_one_join() {
         assert!(!ev.iter().any(|e| matches!(e, Event::Warning(_))), "{ev:?}");
     }
 }
+
+fn bo_verified_in(a: &TestClient, g: socketchat_proto::msg::GroupId) -> bool {
+    a.members(g).iter().any(|m| m.name == "Bo" && m.verified)
+}
+
+/// The server stops listing a link once it is used, but the inviter still
+/// needs what it kept for the link to let the joiner in.
+#[tokio::test]
+async fn listing_links_before_the_join_request_is_handled_keeps_the_join() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let (link, _) = a.invite(Some(g), false).await.unwrap();
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    assert!(a.invites().await.unwrap().is_empty());
+    settle(&mut [&mut a, &mut b]).await;
+    assert_eq!(b.groups().len(), 1, "Bo never got in");
+    assert!(bo_verified_in(&a, g), "{:?}", a.members(g));
+}
+
+/// The joiner's proof that they hold the link comes after the add; listing
+/// links in between still lets the inviter mark them verified.
+#[tokio::test]
+async fn listing_links_before_the_joiners_proof_keeps_the_verified_mark() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let (link, _) = a.invite(Some(g), false).await.unwrap();
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    a.sync().await.unwrap();
+    assert_eq!(a.members(g).len(), 2, "Ada let Bo in");
+    assert!(!bo_verified_in(&a, g));
+    assert!(a.invites().await.unwrap().is_empty());
+    settle(&mut [&mut a, &mut b]).await;
+    assert!(bo_verified_in(&a, g), "{:?}", a.members(g));
+}
+
+/// Cancelling a link that was just used says so, and the join still
+/// completes.
+#[tokio::test]
+async fn cancelling_a_used_link_keeps_the_join() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let (link, _) = a.invite(Some(g), false).await.unwrap();
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    let err = a.cancel_invite(link.token).await.unwrap_err();
+    assert!(err.to_string().contains("already used"), "{err}");
+    assert!(a.invites().await.unwrap().is_empty());
+    settle(&mut [&mut a, &mut b]).await;
+    assert_eq!(b.groups().len(), 1, "Bo never got in");
+    assert!(bo_verified_in(&a, g), "{:?}", a.members(g));
+}
