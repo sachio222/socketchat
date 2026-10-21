@@ -68,6 +68,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  crate-age:
+    name: Crate release ages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check crate release ages when Cargo.lock or the allow list changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if git cat-file -e "$BASE^{commit}" 2>/dev/null &&
+             git diff --quiet "$BASE" HEAD -- Cargo.lock scripts/crate-age-allow.txt; then
+            echo "Cargo.lock and the allow list are unchanged."
+          else
+            sh scripts/crate-age-check.sh
+          fi
+      - run: sh scripts/crate-age-check-test.sh
+
   aarch64:
     name: Build for Linux aarch64 (Raspberry Pi)
     runs-on: ubuntu-24.04-arm
