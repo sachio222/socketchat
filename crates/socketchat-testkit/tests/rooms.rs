@@ -303,6 +303,61 @@ async fn purge_read_keeps_the_open_room() {
     assert!(!listed(&b, g));
 }
 
+/// Only history tables, never keys or group state.
+fn history_only(traces: &[&str]) -> bool {
+    traces.contains(&"ended_rooms")
+        && traces
+            .iter()
+            .all(|t| ["messages", "ended_names", "ended_rooms"].contains(t))
+}
+
+#[tokio::test]
+async fn removed_with_nothing_unread_stays_until_purge() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    b.mark_seen(g).unwrap();
+    let bk = b.my_group_key(g).unwrap();
+    a.remove_member(g, &bk).await.unwrap();
+    b.sync().await.unwrap();
+    // Keys go at once; the room stays, listed as ended, until a purge.
+    assert!(history_only(&b.test_traces(g)), "{:?}", b.test_traces(g));
+    let sum = summary(&b, g);
+    assert_eq!(sum.ended, Some(Ended::Removed));
+    assert_eq!(sum.unseen, 0);
+    assert!(b.purge_read(Some(g)).is_empty(), "the open room stays");
+    assert_eq!(b.purge_read(None), vec![g]);
+    assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+    assert!(!listed(&b, g));
+}
+
+#[tokio::test]
+async fn closed_with_nothing_unread_stays_until_purge() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    a.vote_close(g, true).await.unwrap();
+    b.sync().await.unwrap();
+    b.mark_seen(g).unwrap();
+    assert!(history_only(&b.test_traces(g)), "{:?}", b.test_traces(g));
+    assert_eq!(summary(&b, g).ended, Some(Ended::Closed));
+    assert_eq!(b.purge_read(None), vec![g]);
+    assert!(!listed(&b, g));
+    // The admin who closed it keeps the room until a purge too.
+    assert_eq!(summary(&a, g).ended, Some(Ended::Closed));
+    a.mark_seen(g).unwrap();
+    assert_eq!(a.purge_read(None), vec![g]);
+    assert!(a.test_traces(g).is_empty(), "{:?}", a.test_traces(g));
+}
+
+#[tokio::test]
+async fn own_leave_with_nothing_unread_goes_at_once() {
+    let s = TestServer::start().await;
+    let (g, _a, mut b) = pair(&s).await;
+    b.mark_seen(g).unwrap();
+    b.leave(g).await.unwrap();
+    assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+    assert!(!listed(&b, g));
+}
+
 #[tokio::test]
 async fn unread_history_of_ended_room_goes_after_30_days() {
     let s = TestServer::start().await;
@@ -725,6 +780,9 @@ async fn one_admin_closes_at_once() {
     drain(&mut b).await;
     drain(&mut c).await;
     assert_eq!(a.vote_close(g, true).await.unwrap(), CloseOutcome::Closed);
+    // Keys go at once; the history waits for a purge.
+    assert!(history_only(&a.test_traces(g)), "{:?}", a.test_traces(g));
+    assert_eq!(a.purge_read(None), vec![g]);
     assert!(a.test_traces(g).is_empty(), "{:?}", a.test_traces(g));
     assert!(!listed(&a, g));
     settle(&mut [&mut b, &mut c]).await;

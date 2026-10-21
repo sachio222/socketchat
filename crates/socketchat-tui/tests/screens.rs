@@ -738,6 +738,7 @@ fn screen_invites_modal() {
             invite_row(2, "Climbing Saturdays", 23),
             invite_row(3, "Server invite", 24),
         ],
+        offset: 0,
     });
     let s = render(&app, &crew(), 80, 24);
     assert!(s.contains(" Open invite links "), "{s}");
@@ -752,6 +753,7 @@ fn screen_invites_modal() {
     insta::assert_snapshot!(s);
     app.modal = Some(Modal::Invites {
         rows: vec!["You have no open invite links.".into()],
+        offset: 0,
     });
     let empty = render(&app, &crew(), 80, 24);
     assert!(empty.contains("You have no open invite links."), "{empty}");
@@ -1004,4 +1006,113 @@ fn help_lists_the_new_commands_in_order() {
         ]
     );
     assert_eq!(HELP[at].1, "leave this chat and delete its history here");
+}
+
+#[test]
+fn confirm_ignores_a_stray_y_inside_other_typing() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.modal = Some(confirm_leave());
+    let mut acts = vec![];
+    for c in "okay".chars() {
+        acts.extend(app.handle_key(key(KeyCode::Char(c)), &vm));
+    }
+    assert!(acts.is_empty(), "{acts:?}");
+    assert!(app.modal.is_none(), "the first other key says no");
+    assert_eq!(app.input, "okay", "the typing goes on in the message box");
+    app.input.clear();
+    app.modal = Some(confirm_leave());
+    assert!(
+        app.handle_key(ctrl('y'), &vm).is_empty(),
+        "Ctrl+Y is not yes"
+    );
+    assert!(app.modal.is_none());
+    app.modal = Some(confirm_leave());
+    let shift_y = KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT);
+    assert_eq!(
+        app.handle_key(shift_y, &vm),
+        vec![Action::LeaveRoom(g(1))],
+        "a capital Y is yes"
+    );
+}
+
+#[test]
+fn invites_scroll_to_every_link_at_80x24() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let rows: Vec<String> = (1..=30)
+        .map(|n| invite_row(n, &format!("Room {n}"), 24))
+        .collect();
+    app.modal = Some(Modal::Invites { rows, offset: 0 });
+    let first = render(&app, &vm, 80, 24);
+    assert!(
+        modal_text(&first).last().unwrap().contains("↓ more"),
+        "{first}"
+    );
+    insta::assert_snapshot!("invites_30_links_80x24", first);
+    let mut presses = 0;
+    while !render(&app, &vm, 80, 24).contains("30. Room 30: expires in 24 hours") {
+        presses += 1;
+        assert!(presses < 40, "Down never reached link 30");
+        app.handle_key(key(KeyCode::Down), &vm);
+    }
+    let end = render(&app, &vm, 80, 24);
+    assert!(!end.contains("↓ more"), "{end}");
+    app.handle_key(key(KeyCode::PageUp), &vm);
+    app.handle_key(key(KeyCode::PageUp), &vm);
+    assert_eq!(render(&app, &vm, 80, 24), first);
+    app.handle_key(key(KeyCode::PageDown), &vm);
+    assert!(render(&app, &vm, 80, 24).contains("20. Room 20"));
+}
+
+#[test]
+fn tab_pick_holds_when_two_rooms_share_a_name() {
+    let mut vm = crew();
+    vm.groups = vec![
+        room(1, "Book club"),
+        room(2, "Bo"),
+        room(3, "Climbing"),
+        room(5, "Bo"),
+    ];
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/switch bo");
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Tab), &vm);
+    }
+    assert_eq!(app.input, "/switch Bo");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Select(g(5))],
+        "Enter opens the Bo that Tab showed"
+    );
+    // Edited after Tab: the text decides again.
+    type_text(&mut app, &vm, "/switch bo");
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Tab), &vm);
+    }
+    app.handle_key(key(KeyCode::Backspace), &vm);
+    app.handle_key(key(KeyCode::Char('o')), &vm);
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Select(g(2))]
+    );
+    // The switcher highlights, and opens, the Bo Tab picked.
+    app.handle_key(ctrl('k'), &vm);
+    type_text(&mut app, &vm, "bo");
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Tab), &vm);
+    }
+    assert_eq!(app.switcher.as_deref(), Some("Bo"));
+    let buf = buffer(&app, &vm, 80, 24);
+    // Box at rows 6..18: "> Bo", then Book club, Bo (g2), Bo (g5).
+    assert_eq!(find_in_row(&buf, 9, "Bo"), Some(21));
+    assert_eq!(find_in_row(&buf, 10, "Bo"), Some(21));
+    assert!(!buf[(21, 9)].modifier.contains(Modifier::REVERSED));
+    assert!(buf[(21, 10)].modifier.contains(Modifier::REVERSED));
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Select(g(5))]
+    );
 }

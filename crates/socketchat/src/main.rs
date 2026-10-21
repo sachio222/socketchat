@@ -234,6 +234,8 @@ async fn sync_and_report(c: &mut Client) -> Result<(), Fail> {
     for _ in 0..3 {
         c.sync().await?;
     }
+    // Rooms that ended and are read go before this program exits.
+    c.purge_read(None);
     for e in c.take_events() {
         match e {
             Event::Joined { group, verification } => match verification {
@@ -393,6 +395,8 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
                 _ => return Err(Fail(1, "Use --group <name>, or --dm on its own.".into())),
             };
             let hours = hours_text(c.hours_until(expires_unix));
+            c.purge_read(None);
+            report_warnings(&mut c);
             println!("{link}");
             eprintln!("Send this to one person. It works once and expires in {hours}.");
             Ok(())
@@ -402,6 +406,8 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             c.sync().await?;
             let gid = group_by_name(&c, &group)?;
             c.send_text(gid, &text.join(" ")).await?;
+            c.purge_read(None);
+            report_warnings(&mut c);
             Ok(())
         }
         Some(Cmd::Log { group, limit }) => {
@@ -415,6 +421,8 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
                     println!("{}: {}", l.sender, l.text);
                 }
             }
+            c.purge_read(None);
+            report_warnings(&mut c);
             Ok(())
         }
         Some(Cmd::Sync) => {

@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: first
+---
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+│#┌ Open invite links ───────────────────────────────────────────────────────┐ │
+│@│1. Room 1: expires in 24 hours                                            │ │
+│#│2. Room 2: expires in 24 hours                                            │ │
+│ │3. Room 3: expires in 24 hours                                            │ │
+│ │4. Room 4: expires in 24 hours                                            │ │
+│ │5. Room 5: expires in 24 hours                                            │ │
+│ │6. Room 6: expires in 24 hours                                            │ │
+│ │7. Room 7: expires in 24 hours                                            │ │
+│ │8. Room 8: expires in 24 hours                                            │ │
+│ │9. Room 9: expires in 24 hours                                            │ │
+│ │10. Room 10: expires in 24 hours                                          │ │
+│ │11. Room 11: expires in 24 hours                                          │ │
+│ │12. Room 12: expires in 24 hours                                          │ │
+│ │13. Room 13: expires in 24 hours                                          │ │
+│ │14. Room 14: expires in 24 hours                                          │ │
+│ │15. Room 15: expires in 24 hours                                          │ │
+│ │16. Room 16: expires in 24 hours                                          │ │
+│ │17. Room 17: expires in 24 hours                                          │ │
+└─│18. Room 18: expires in 24 hours                                          │─┘
+┌─│19. Room 19: expires in 24 hours                                          │─┐
+│ │↓ more                                                                    │s│
+└─└──────────────────────────────────────────────────────────────────────────┘─┘
+/cancel <number> stops a link · Esc close

@@ -22,7 +22,7 @@ Each release of socketchat has a section here. Version numbers follow [Semantic 
 - When the last person leaves a room with 0.5.0, the server deletes everything it holds for that room. Its hourly sweep also removes rooms that have no members.
 - Admins can close a room for everyone once they agree: every admin when the room has up to three, more than half of them when it has more. A room with one admin closes at once. A request to close stays open for seven days.
 - You can see the invite links you made that are still open, and cancel one so it stops working.
-- The chat screen has new commands: `/switch` (Tab completes room names), `/title`, `/close`, `/keep`, `/invites`, `/cancel`, `/mute`, `/unmute`, `/details` and `/clear`. `/leave` shows unread messages before it asks, and a room you left, were removed from or that closed stays in the list until you have read it.
+- The chat screen has new commands: `/switch` opens another room (Tab completes its name), `/title` renames the room for everyone, `/close` closes it once its admins agree, `/keep` says no to closing it, `/invites` lists your open invite links, `/cancel` stops one of them, `/mute` and `/unmute` hide and show its new-message count, `/details` shows its admins, size and age, and `/clear` deletes its messages from your computer. `/leave` shows new messages before it asks. A room you were removed from or that closed stays on screen, saying so, until you open another room.
 
 ## 0.4.0 - 2026-10-20
 

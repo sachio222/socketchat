@@ -80,9 +80,11 @@ pub enum Modal {
         question: String,
         yes: Box<Action>,
     },
-    /// The person's open invite links, one row each, numbered for `/cancel`.
+    /// The person's open invite links, one row each, numbered for
+    /// `/cancel`, scrolled down by `offset` rows.
     Invites {
         rows: Vec<String>,
+        offset: usize,
     },
     Details {
         lines: Vec<String>,
@@ -239,14 +241,42 @@ pub struct App {
     pub warning: Option<String>,
     pub member_cursor: usize,
     /// While Tab completes a room name: the text typed before the first
-    /// Tab, and the index in its matches that Tab last picked.
-    pub completion: Option<(String, usize)>,
+    /// Tab, the index in its matches that Tab last picked, and that room,
+    /// which Enter opens even when another room shows the same name.
+    pub completion: Option<(String, usize, GroupId)>,
     /// The links the last `/invites` box listed; `/cancel <n>` takes the
-    /// nth.
-    pub invite_tokens: Vec<Token>,
-    /// Set as the help box is drawn: the furthest it can scroll, and how
-    /// many rows it shows at once.
-    pub(crate) help_scroll: Cell<(usize, usize)>,
+    /// nth. A cancelled link keeps its number and becomes `None`.
+    pub invite_tokens: Vec<Option<Token>>,
+    /// Set as a scrolling box (help or invite links) is drawn: the
+    /// furthest it can scroll, and how many rows it shows at once.
+    pub(crate) box_scroll: Cell<(usize, usize)>,
+}
+
+/// The room Tab picked, while the text still shows its name.
+fn tab_pick(
+    comp: &Option<(String, usize, GroupId)>,
+    text: &str,
+    vm: &ViewModel,
+) -> Option<GroupId> {
+    let (_, _, id) = comp.as_ref()?;
+    vm.groups
+        .iter()
+        .find(|g| g.id == *id && g.name == text.trim())
+        .map(|g| g.id)
+}
+
+/// Up, Down, PgUp and PgDn move a scrolling box's `offset`, at most to
+/// `max`; a page is the rows it shows, less one.
+fn scrolled(offset: usize, code: KeyCode, (max, rows): (usize, usize)) -> Option<usize> {
+    let page = rows.saturating_sub(1).max(1);
+    let next = match code {
+        KeyCode::Up => offset.saturating_sub(1),
+        KeyCode::Down => offset + 1,
+        KeyCode::PageUp => offset.saturating_sub(page),
+        KeyCode::PageDown => offset + page,
+        _ => return None,
+    };
+    Some(next.min(max))
 }
 
 impl Default for App {
@@ -269,8 +299,14 @@ impl App {
             member_cursor: 0,
             completion: None,
             invite_tokens: Vec::new(),
-            help_scroll: Cell::new((0, 0)),
+            box_scroll: Cell::new((0, 0)),
         }
+    }
+
+    /// The room Enter in the switcher opens, which the switcher highlights.
+    pub fn switcher_pick(&self, vm: &ViewModel) -> Option<GroupId> {
+        let q = self.switcher.as_deref().unwrap_or("");
+        tab_pick(&self.completion, q, vm).or_else(|| pick_room(q, &vm.groups).map(|g| g.id))
     }
 
     /// Chats whose names contain the switcher's text, in list order.
@@ -286,7 +322,7 @@ impl App {
     /// to the next match and wraps round.
     fn complete(&mut self, typed: &str, vm: &ViewModel) -> Option<String> {
         let (typed, next) = match self.completion.take() {
-            Some((t, i)) => (t, i + 1),
+            Some((t, i, _)) => (t, i + 1),
             None => (typed.to_string(), 0),
         };
         let matches = completions(&typed, &vm.groups);
@@ -295,43 +331,49 @@ impl App {
             return None;
         }
         let i = next % matches.len();
-        let name = matches[i].name.clone();
-        self.completion = Some((typed, i));
+        let (name, id) = (matches[i].name.clone(), matches[i].id);
+        self.completion = Some((typed, i, id));
         Some(name)
     }
 
     /// Keys while a box is open. `None` passes the key on to the message
-    /// box: typing over the invite list closes it and starts a command.
-    fn modal_key(&mut self, m: Modal, k: KeyEvent, ctrl: bool) -> Option<Vec<Action>> {
-        let yes = matches!(k.code, KeyCode::Char('y' | 'Y'));
+    /// box: typing over the invite list or a question closes it and goes
+    /// on as typing.
+    fn modal_key(&mut self, m: Modal, k: KeyEvent) -> Option<Vec<Action>> {
+        // Shift makes a capital Y; Ctrl or Alt with y is not an answer.
+        let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
+        let yes = plain && matches!(k.code, KeyCode::Char('y' | 'Y'));
+        let typing = plain && matches!(k.code, KeyCode::Char(_));
         let act = match (m, yes) {
-            (Modal::Help { offset }, _)
-                if matches!(
-                    k.code,
-                    KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
-                ) =>
-            {
-                let (max, rows) = self.help_scroll.get();
-                let page = rows.saturating_sub(1).max(1);
-                let offset = match k.code {
-                    KeyCode::Up => offset.saturating_sub(1),
-                    KeyCode::Down => offset + 1,
-                    KeyCode::PageUp => offset.saturating_sub(page),
-                    _ => offset + page,
-                };
-                self.modal = Some(Modal::Help {
-                    offset: offset.min(max),
-                });
-                return Some(vec![]);
+            (Modal::Help { offset }, _) => match scrolled(offset, k.code, self.box_scroll.get()) {
+                Some(offset) => {
+                    self.modal = Some(Modal::Help { offset });
+                    return Some(vec![]);
+                }
+                None => None,
+            },
+            (Modal::Invites { rows, offset }, _) => {
+                if let Some(offset) = scrolled(offset, k.code, self.box_scroll.get()) {
+                    self.modal = Some(Modal::Invites { rows, offset });
+                    return Some(vec![]);
+                }
+                if typing {
+                    self.modal = None;
+                    return None;
+                }
+                None
             }
-            (Modal::Invites { .. }, _) if matches!(k.code, KeyCode::Char(_)) && !ctrl => {
+            (Modal::Confirm { yes, .. }, true) => Some(*yes),
+            // Anything but y is no: a stray y later in a word must not
+            // confirm. Other letters go on into the message box.
+            (Modal::Confirm { .. }, false) => {
                 self.modal = None;
-                return None;
+                let no = matches!(k.code, KeyCode::Char('n' | 'N'));
+                return if typing && !no { None } else { Some(vec![]) };
             }
             (Modal::Verify { key, .. }, true) => Some(Action::MarkVerified(key)),
             (Modal::ConfirmVideo { path }, true) => Some(Action::ConfirmVideo(path)),
             (Modal::NewCertificate { link, .. }, true) => Some(Action::AcceptCertificate(link)),
-            (Modal::Confirm { yes, .. }, true) => Some(*yes),
             (Modal::Invite { link, .. }, _) if matches!(k.code, KeyCode::Char('c' | 'C')) => {
                 self.status = Some("Link copied. Paste it to the person you are inviting.".into());
                 return Some(vec![Action::Copy(link)]);
@@ -356,12 +398,15 @@ impl App {
         }
         // A status message stays on the help line until the next key.
         self.status = None;
-        // Each Tab moves on to the next room name; any other key ends that.
-        if k.code != KeyCode::Tab {
-            self.completion = None;
-        }
+        // Each Tab moves on to the next room name; any other key ends that,
+        // and Enter opens the room Tab picked.
+        let picked = if k.code == KeyCode::Tab {
+            None
+        } else {
+            self.completion.take()
+        };
         if let Some(m) = self.modal.clone() {
-            if let Some(acts) = self.modal_key(m, k, ctrl) {
+            if let Some(acts) = self.modal_key(m, k) {
                 return acts;
             }
         }
@@ -384,7 +429,8 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    let pick = pick_room(&q, &vm.groups).map(|g| g.id);
+                    let pick = tab_pick(&picked, &q, vm)
+                        .or_else(|| pick_room(&q, &vm.groups).map(|g| g.id));
                     self.switcher = None;
                     return pick.map(Action::Select).into_iter().collect();
                 }
@@ -459,8 +505,10 @@ impl App {
                 if line.starts_with('/') {
                     match parse_command(line) {
                         Ok(Command::Switch(None)) => self.switcher = Some(String::new()),
-                        Ok(Command::Switch(Some(text))) => match pick_room(&text, &vm.groups) {
-                            Some(g) => return vec![Action::Select(g.id)],
+                        Ok(Command::Switch(Some(text))) => match tab_pick(&picked, &text, vm)
+                            .or_else(|| pick_room(&text, &vm.groups).map(|g| g.id))
+                        {
+                            Some(id) => return vec![Action::Select(id)],
                             None => {
                                 self.input = line.to_string();
                                 self.status = Some(no_room(&text));

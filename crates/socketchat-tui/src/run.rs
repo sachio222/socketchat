@@ -21,8 +21,8 @@ use socketchat_proto::InviteLink;
 use tokio::sync::mpsc;
 
 use crate::app::{
-    details_lines, ended_hint, invite_row, leave_step, pick_room, sent_file_status, Action, App,
-    LeaveStep, Modal,
+    details_lines, ended_hint, invite_row, leave_step, sent_file_status, Action, App, LeaveStep,
+    Modal,
 };
 use crate::commands::Command;
 use crate::ui::{draw, fit, GroupView, LineView, MemberLine, ViewModel};
@@ -254,10 +254,25 @@ impl Screen {
     /// Opens room `g`. Ended rooms that are read go from this computer,
     /// except the one now open.
     fn select(&mut self, g: GroupId) {
+        if self.app.selected != Some(g) {
+            // A warning is about the room it came with.
+            self.app.warning = None;
+            self.leave_shown = None;
+        }
         self.app.selected = Some(g);
         self.app.scroll = 0;
         self.mark_seen(g);
         self.client.purge_read(Some(g));
+    }
+
+    /// Marks the open room seen when its newest line is on screen.
+    fn seen_if_at_bottom(&mut self) {
+        let Some(g) = self.app.selected else {
+            return;
+        };
+        if self.app.scroll == 0 && self.summary(g).is_some_and(|s| s.unseen > 0) {
+            self.mark_seen(g);
+        }
     }
 
     /// Opens the first room this person is still in, or else the first
@@ -330,11 +345,12 @@ impl Screen {
             Event::Left { group, name } => {
                 // "Closed" already said why.
                 if !self.closed_note.remove(&group) {
-                    self.app.status = Some(if name.is_empty() {
+                    let text = if name.is_empty() {
                         "You are no longer in that chat.".into()
                     } else {
                         format!("You are no longer in {name}.")
-                    });
+                    };
+                    self.tell(group, text);
                 }
             }
             Event::Closed { group, name, by } => {
@@ -344,7 +360,7 @@ impl Screen {
                 } else {
                     name
                 };
-                self.app.status = Some(format!("{by} closed {name}."));
+                self.tell(group, format!("{by} closed {name}."));
             }
             Event::CloseVote { group, .. } if Some(group) == self.app.selected => {
                 // The vote's notice is the newest notice in the room.
@@ -370,11 +386,23 @@ impl Screen {
             .selected
             .filter(|g| groups.iter().any(|x| x.id == *g));
         match open {
-            // Whatever arrived for the open room is on screen.
-            Some(g) if about == Some(g) => self.mark_seen(g),
+            // What arrived for the open room is on screen, unless the
+            // person has scrolled up.
+            Some(g) if about == Some(g) && self.app.scroll == 0 => self.mark_seen(g),
             Some(_) => {}
             // The open room is gone from this computer.
             None => self.select_first(),
+        }
+    }
+
+    /// Says how room `g` ended: on the open room, which stays on screen,
+    /// as a warning that stays until the person moves on; otherwise on
+    /// the status line.
+    fn tell(&mut self, g: GroupId, text: String) {
+        if Some(g) == self.app.selected && self.summary(g).is_some() {
+            self.app.warning = Some(text);
+        } else {
+            self.app.status = Some(text);
         }
     }
 
@@ -411,6 +439,13 @@ impl Screen {
     }
 
     async fn act(&mut self, a: Action) {
+        // `/leave` shows new lines once; anything else in between, and the
+        // next `/leave` checks again.
+        if matches!(&a, Action::Send(..) | Action::Command(_))
+            && a != Action::Command(Command::Leave)
+        {
+            self.leave_shown = None;
+        }
         let r: Result<(), String> = match a {
             Action::Quit => {
                 self.quit = true;
@@ -491,7 +526,12 @@ impl Screen {
     async fn close_room(&mut self, g: GroupId) -> Result<(), String> {
         let room = self.room_name(g);
         let said = match self.client.vote_close(g, true).await {
-            Ok(CloseOutcome::Closed) => format!("Closed {room}."),
+            Ok(CloseOutcome::Closed) => {
+                self.say_after_events(format!("Closed {room}."));
+                // The status says it; the room's hint says the rest.
+                self.app.warning = None;
+                return Ok(());
+            }
             Ok(CloseOutcome::Waiting { yes, needed }) => {
                 format!("Asked. {yes} of {needed} admins agree so far.")
             }
@@ -552,19 +592,8 @@ impl Screen {
         match c {
             Command::Quit => self.quit = true,
             Command::Help => self.app.modal = Some(Modal::Help { offset: 0 }),
-            Command::Switch(text) => {
-                // The keys already handle both forms; this is the same.
-                match text {
-                    None => self.app.switcher = Some(String::new()),
-                    Some(t) => {
-                        let vm = self.view();
-                        let g = pick_room(&t, &vm.groups).map(|g| g.id).ok_or_else(|| {
-                            format!("No room called {t}. Type /switch to see them all.")
-                        })?;
-                        self.select(g);
-                    }
-                }
-            }
+            // The keys open the switcher or the room before this is reached.
+            Command::Switch(_) => {}
             Command::Invite { dm } => {
                 let (link, expires_unix) = if dm {
                     self.client.invite(None, true).await.map_err(e)?
@@ -713,12 +742,17 @@ impl Screen {
                 self.app.status = Some(ASKING.into());
             }
             Command::Cancel(n) => {
-                let token = n
+                let slot = n
                     .checked_sub(1)
-                    .and_then(|i| self.app.invite_tokens.get(i))
-                    .copied()
+                    .and_then(|i| self.app.invite_tokens.get(i).map(|t| (i, *t)))
                     .ok_or("Type /invites first, then /cancel with a number from that list.")?;
+                let (i, token) = match slot {
+                    (i, Some(token)) => (i, token),
+                    (_, None) => return Err("That link is already cancelled.".into()),
+                };
                 self.client.cancel_invite(token).await.map_err(e)?;
+                // The numbers stay as the box showed them.
+                self.app.invite_tokens[i] = None;
                 self.app.status = Some("Cancelled. That link no longer works.".into());
             }
             Command::Mute | Command::Unmute => {
@@ -770,7 +804,7 @@ impl Screen {
         if !said.is_empty() {
             self.app.status = Some(said.join(" "));
         }
-        self.app.invite_tokens = list.iter().map(|i| i.token).collect();
+        self.app.invite_tokens = list.iter().map(|i| Some(i.token)).collect();
         let rows = if list.is_empty() {
             vec!["You have no open invite links.".into()]
         } else {
@@ -785,7 +819,7 @@ impl Screen {
                 })
                 .collect()
         };
-        self.app.modal = Some(Modal::Invites { rows });
+        self.app.modal = Some(Modal::Invites { rows, offset: 0 });
         Ok(())
     }
 
@@ -887,6 +921,8 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
                     for a in s.app.handle_key(k, &vm) {
                         s.act(a).await;
                     }
+                    // Scrolled back down: the newest lines are on screen.
+                    s.seen_if_at_bottom();
                 }
                 Some(None) => {}
                 None => {
@@ -987,7 +1023,8 @@ mod tests {
         for _ in 0..3 {
             bo.sync().await;
         }
-        assert_eq!(bo.app.status.as_deref(), Some("Ada closed Room."));
+        // On the open room, the news stays in the warning until Bo moves on.
+        assert_eq!(bo.app.warning.as_deref(), Some("Ada closed Room."));
         let closed = row(&bo, g).expect("listed while unread or open");
         assert_eq!(closed.ended, Some(Ended::Closed));
         assert_eq!(bo.app.selected, Some(g), "it stays open to read");
@@ -1035,8 +1072,12 @@ mod tests {
         assert_eq!(question, "Close Mine? Everyone is removed, and each app deletes the room's messages once they are read. Press y to close or n to keep it.");
         bo.act(*yes).await;
         assert_eq!(bo.app.status.as_deref(), Some("Closed Mine."));
-        assert!(row(&bo, mine).is_none());
-        assert_eq!(bo.app.selected, Some(g), "the next room opens");
+        // The closed room stays open, saying so, until Bo moves on.
+        assert_eq!(bo.app.selected, Some(mine));
+        assert_eq!(row(&bo, mine).unwrap().ended, Some(Ended::Closed));
+        assert_eq!(bo.app.warning, None, "his own close needs no warning");
+        bo.act(Action::Select(g)).await;
+        assert!(row(&bo, mine).is_none(), "gone once another room opens");
         // Bo is not an admin in Ada's room.
         bo.act(Action::Command(Command::Close)).await;
         assert_eq!(
@@ -1122,14 +1163,15 @@ mod tests {
         assert_eq!(
             bo.app.modal,
             Some(Modal::Invites {
-                rows: vec!["You have no open invite links.".into()]
+                rows: vec!["You have no open invite links.".into()],
+                offset: 0,
             })
         );
         bo.app.modal = None;
         bo.client.invite(Some(g), false).await.unwrap();
         bo.act(Action::Command(Command::Invites)).await;
         bo.run_pending().await;
-        let Some(Modal::Invites { rows }) = bo.app.modal.take() else {
+        let Some(Modal::Invites { rows, .. }) = bo.app.modal.take() else {
             panic!("no list: {:?}", bo.app.status);
         };
         assert_eq!(rows.len(), 1);
@@ -1145,6 +1187,96 @@ mod tests {
             Some("Cancelled. That link no longer works.")
         );
         assert!(bo.client.invites().await.unwrap().is_empty());
+        bo.act(Action::Command(Command::Cancel(1))).await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("That link is already cancelled.")
+        );
+    }
+
+    #[tokio::test]
+    async fn removal_from_the_open_room_stays_on_it() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_bo(&srv).await;
+        bo.client.create_group("Other").await.unwrap();
+        bo.act(Action::Select(g)).await;
+        bo.app.input = "half a thou".into();
+        let bk = bo.client.my_group_key(g).unwrap();
+        a.remove_member(g, &bk).await.unwrap();
+        for _ in 0..3 {
+            bo.sync().await;
+        }
+        assert_eq!(bo.app.selected, Some(g), "no jump to another room");
+        assert_eq!(row(&bo, g).unwrap().ended, Some(Ended::Removed));
+        assert_eq!(bo.app.input, "half a thou");
+        assert_eq!(
+            bo.app.warning.as_deref(),
+            Some("You are no longer in Room.")
+        );
+        // The screen shows the ended hint, and Enter keeps the words.
+        let vm = bo.view();
+        let acts = bo.app.handle_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &vm,
+        );
+        assert!(acts.is_empty(), "{acts:?}");
+        assert_eq!(bo.app.input, "half a thou");
+        // Moving on clears the warning and deletes the read room.
+        let other = row_named(&bo, "Other");
+        bo.act(Action::Select(other)).await;
+        assert_eq!(bo.app.warning, None);
+        assert!(row(&bo, g).is_none());
+    }
+
+    fn row_named(s: &Screen, name: &str) -> GroupId {
+        s.view()
+            .groups
+            .into_iter()
+            .find(|x| x.name == name)
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn leave_shows_lines_that_arrived_while_scrolled_up() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_bo(&srv).await;
+        bo.act(Action::Select(g)).await;
+        bo.app.scroll = 3;
+        a.send_text(g, "one").await.unwrap();
+        a.send_text(g, "two").await.unwrap();
+        for _ in 0..3 {
+            bo.sync().await;
+        }
+        assert_eq!(row(&bo, g).unwrap().unread, 2, "not on screen: unread");
+        bo.act(Action::Command(Command::Leave)).await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("You have 2 new messages in Room. Read them, then type /leave again to leave.")
+        );
+        assert_eq!(bo.app.scroll, 0, "scrolled to the newest");
+        assert!(bo.app.modal.is_none());
+        // Anything else in between: /leave shows new lines again first.
+        bo.app.scroll = 3;
+        a.send_text(g, "three").await.unwrap();
+        for _ in 0..3 {
+            bo.sync().await;
+        }
+        bo.act(Action::Command(Command::Mute)).await;
+        bo.act(Action::Command(Command::Leave)).await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("You have 1 new message in Room. Read them, then type /leave again to leave.")
+        );
+        bo.act(Action::Command(Command::Leave)).await;
+        assert!(
+            matches!(bo.app.modal, Some(Modal::Confirm { .. })),
+            "{:?}",
+            bo.app.status
+        );
     }
 
     #[tokio::test]

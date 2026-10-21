@@ -3052,8 +3052,8 @@ impl Client {
     }
 
     /// Ends a room this person is no longer in. Its keys and group state go
-    /// at once; its messages stay until they are read (see
-    /// [`Client::purge_read`]), and go now if nothing is unread.
+    /// at once; its messages stay until [`Client::purge_read`] finds them
+    /// read. After the person's own leave with nothing unread, they go now.
     ///
     /// Once the `ended_rooms` row is written the room counts as ended, even
     /// if a later step fails: it is listed once, as ended, and the next
@@ -3088,7 +3088,10 @@ impl Client {
         // store's transaction below deletes in one go.
         let _ = live.mls.delete(self.prov.storage());
         self.store.end_room(&gid, &me)?;
-        if self.store.unseen(&gid)? == 0 {
+        // A room this person left with nothing unread goes now. A room they
+        // were removed from or that closed stays, so a screen showing it
+        // can say what happened; `purge_read` deletes it once they move on.
+        if why == Ended::Left && self.store.unseen(&gid)? == 0 {
             self.store.delete_room(&gid)?;
         }
         // The room is deleted; a busy log only delays the tidy-up.

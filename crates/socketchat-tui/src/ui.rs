@@ -12,7 +12,7 @@ use socketchat_core::invite::hours_text;
 use socketchat_core::keys::Key;
 use socketchat_proto::msg::GroupId;
 
-use crate::app::{ended_hint, pick_room, App, Focus, Modal};
+use crate::app::{ended_hint, App, Focus, Modal};
 use crate::commands::HELP;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -472,7 +472,7 @@ fn draw_switcher(f: &mut Frame, app: &App, vm: &ViewModel, area: Rect) {
         app.switcher.as_deref().unwrap_or("")
     ))];
     // The room Enter would open stands out.
-    let pick = pick_room(app.switcher.as_deref().unwrap_or(""), &vm.groups).map(|g| g.id);
+    let pick = app.switcher_pick(vm);
     for g in app.switcher_matches(vm).iter().take(8) {
         let style = if Some(g.id) == pick {
             Style::default().add_modifier(Modifier::REVERSED)
@@ -535,34 +535,47 @@ fn wrapped(lines: &[String], w: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// The rows of a scrolling box that fit in `max_h` rows of screen, frame
+/// included, starting `offset` rows down. While rows below are hidden,
+/// the last row says so. Tells `app` how far the box can scroll.
+fn scroll_window(
+    app: &App,
+    all: Vec<Line<'static>>,
+    offset: usize,
+    max_h: usize,
+) -> Vec<Line<'static>> {
+    // Rows inside the box at most, with a frame above and below.
+    let fits = max_h.saturating_sub(2).max(2);
+    let max = all.len().saturating_sub(fits);
+    app.box_scroll.set((max, fits));
+    let top = offset.min(max);
+    if top < max {
+        let mut v: Vec<Line> = all[top..top + fits - 1].to_vec();
+        v.push(Line::from(Span::styled(
+            "↓ more",
+            Style::default().fg(Color::DarkGray),
+        )));
+        v
+    } else {
+        all[top..].to_vec()
+    }
+}
+
 fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
     let width = area.width.saturating_sub(4).min(76);
     let inner_w = width.saturating_sub(2) as usize;
     let max_h = area.height.saturating_sub(2) as usize;
     let (title, mut lines): (String, Vec<Line>) = match m {
         Modal::Confirm { question, .. } => (String::new(), wrapped(std::slice::from_ref(question), inner_w)),
-        Modal::Invites { rows } => (" Open invite links ".into(), wrapped(rows, inner_w)),
+        Modal::Invites { rows, offset } => (
+            " Open invite links ".into(),
+            scroll_window(app, wrapped(rows, inner_w), *offset, max_h),
+        ),
         Modal::Details { lines } => (" Room details ".into(), wrapped(lines, inner_w)),
-        Modal::Help { offset } => {
-            let all = help_rows(inner_w);
-            // Rows inside the box at most, with a frame above and below.
-            let fits = max_h.saturating_sub(2).max(2);
-            let max = all.len().saturating_sub(fits);
-            app.help_scroll.set((max, fits));
-            let top = (*offset).min(max);
-            let shown: Vec<Line> = if top < max {
-                // Rows below are cut off: the last row says so.
-                let mut v: Vec<Line> = all[top..top + fits - 1].to_vec();
-                v.push(Line::from(Span::styled(
-                    "↓ more",
-                    Style::default().fg(Color::DarkGray),
-                )));
-                v
-            } else {
-                all[top..].to_vec()
-            };
-            (" Commands ".into(), shown)
-        }
+        Modal::Help { offset } => (
+            " Commands ".into(),
+            scroll_window(app, help_rows(inner_w), *offset, max_h),
+        ),
         Modal::Invite { link, hours } => {
             let mut v: Vec<Line> = wrap(
                 &format!(
