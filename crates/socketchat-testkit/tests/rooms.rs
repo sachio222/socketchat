@@ -3,7 +3,7 @@ use socketchat_core::client::{Ended, Event, KEEP_UNSEEN_SECS};
 use socketchat_core::close::{CloseOutcome, CLOSE_ASK_SECS};
 use socketchat_core::net::NetError;
 use socketchat_core::CoreError;
-use socketchat_proto::msg::GroupId;
+use socketchat_proto::msg::{Entry, GroupId, Push};
 use socketchat_testkit::{drain, settle, TestClient, TestServer};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -925,11 +925,22 @@ async fn two_admins_finish_at_once_closes_once() {
         sc.unwrap();
     }
     settle_all(&mut cs).await;
-    for c in cs.iter_mut() {
+    let mut closers = Vec::new();
+    for (i, c) in cs.iter_mut().enumerate() {
         closed_for(c, g);
         let ev = drain(c).await;
         assert!(warnings(&ev).is_empty(), "{}: {ev:?}", c.display_name());
+        if i == 1 || i == 2 {
+            closers.extend(ev.into_iter().filter_map(|e| match e {
+                Event::Closed { by, .. } => Some(by),
+                _ => None,
+            }));
+        }
     }
+    // The admin whose commit lost the race names the one whose commit
+    // landed, as that one names itself.
+    assert_eq!(closers.len(), 2, "{closers:?}");
+    assert_eq!(closers[0], closers[1], "{closers:?}");
     assert_eq!(server_rows(&s, g), (0, 0));
 }
 
@@ -1013,4 +1024,193 @@ async fn member_whose_app_was_waiting_sees_the_close() {
     b.sync().await.unwrap();
     assert_eq!(summary(&b, g).ended, Some(Ended::Closed));
     assert!(texts(&b, g).contains(&"Ada closed this room.".to_string()));
+}
+
+fn closed_events(ev: &[Event]) -> usize {
+    ev.iter()
+        .filter(|e| matches!(e, Event::Closed { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn forged_close_then_a_removal_ends_as_removed() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b, mut c) = trio(&s).await;
+    a.test_send_app(g, &AppMsg::Closed { close_id: [7; 16] })
+        .await
+        .unwrap();
+    a.send_text(g, "one").await.unwrap();
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    drain(&mut b).await;
+    let bk = b.my_group_key(g).unwrap();
+    a.remove_member(g, &bk).await.unwrap();
+    b.sync().await.unwrap();
+    let ev = drain(&mut b).await;
+    assert_eq!(closed_events(&ev), 0, "{ev:?}");
+    assert_eq!(summary(&b, g).ended, Some(Ended::Removed));
+}
+
+#[tokio::test]
+async fn remembered_close_is_forgotten_after_a_group_change() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    a.test_send_app(g, &AppMsg::Closed { close_id: [7; 16] })
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    a.update_keys(g).await.unwrap();
+    a.send_text(g, "one").await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    drain(&mut b).await;
+    // Removing Bo leaves only Ada, as a close would, but weeks later.
+    let bk = b.my_group_key(g).unwrap();
+    a.remove_member(g, &bk).await.unwrap();
+    b.sync().await.unwrap();
+    let ev = drain(&mut b).await;
+    assert_eq!(closed_events(&ev), 0, "{ev:?}");
+    assert_eq!(summary(&b, g).ended, Some(Ended::Removed));
+}
+
+#[tokio::test]
+async fn close_retry_posts_closed_once() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b, mut c) = trio(&s).await;
+    a.test_drop_after_closed();
+    assert!(a.vote_close(g, true).await.is_err());
+    assert!(a.my_group_key(g).is_some());
+    a.sync().await.unwrap();
+    assert!(a.my_group_key(g).is_none());
+    assert_eq!(a.test_closed_posts(), 1);
+    settle(&mut [&mut b, &mut c]).await;
+    closed_for(&b, g);
+    closed_for(&c, g);
+    assert_eq!(server_rows(&s, g), (0, 0));
+}
+
+#[tokio::test]
+async fn half_finished_close_without_admin_rights_warns_once() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b, mut c) = trio(&s).await;
+    drain(&mut c).await;
+    // Cy is not an admin, yet its app holds a close it started.
+    c.test_set_closing(g, [5; 16]);
+    c.sync().await.unwrap();
+    c.sync().await.unwrap();
+    let ev = drain(&mut c).await;
+    assert_eq!(warnings(&ev).len(), 1, "{ev:?}");
+    assert_eq!(c.test_closed_posts(), 0);
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    for m in [&a, &b, &c] {
+        assert_eq!(summary(m, g).ended, None, "{}", m.display_name());
+    }
+}
+
+#[tokio::test]
+async fn expired_request_never_closes_by_itself() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Cy"], 2).await;
+    assert_eq!(
+        cs[0].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Waiting { yes: 1, needed: 2 }
+    );
+    settle_all(&mut cs).await;
+    cs[0].advance_clock(CLOSE_ASK_SECS + 60);
+    // With Bo gone, Ada's old yes would be enough on its own.
+    cs[1].leave(g).await.unwrap();
+    for _ in 0..3 {
+        cs[0].sync().await.unwrap();
+        cs[2].sync().await.unwrap();
+    }
+    assert_eq!(cs[0].members(g).len(), 2);
+    assert_eq!(summary(&cs[0], g).ended, None);
+    assert_eq!(summary(&cs[2], g).ended, None);
+    assert_eq!(server_rows(&s, g).0, 1);
+}
+
+#[tokio::test]
+async fn member_who_joined_after_the_votes_learns_who_closed() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Cy", "Di"], 4).await;
+    cs[0].vote_close(g, true).await.unwrap();
+    settle_all(&mut cs).await;
+    cs[1].vote_close(g, true).await.unwrap();
+    settle_all(&mut cs).await;
+    let mut eve = TestClient::new(&s, "Eve").await;
+    let link = cs[0].invite(Some(g), false).await.unwrap().0;
+    eve.join(&link).await.unwrap();
+    cs.push(eve);
+    settle_all(&mut cs).await;
+    assert_eq!(
+        cs[2].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Closed
+    );
+    settle_all(&mut cs).await;
+    let eve = &mut cs[4];
+    closed_for(eve, g);
+    assert!(
+        texts(eve, g).contains(&"Cy closed this room.".to_string()),
+        "{:?}",
+        texts(eve, g)
+    );
+    let ev = drain(eve).await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Closed { by, .. } if by == "Cy")),
+        "{ev:?}"
+    );
+}
+
+fn entry(seq: u64, len: usize) -> Entry {
+    Entry {
+        seq,
+        mls: vec![0; len],
+    }
+}
+
+#[tokio::test]
+async fn pushes_from_another_server_are_not_kept() {
+    let s = TestServer::start().await;
+    let (g, mut a, _b) = pair(&s).await;
+    let home = a.test_server_of(g);
+    let push = |seq| Push::Entry {
+        group: g,
+        entry: entry(seq, 10),
+    };
+    a.test_inject_push(home + 1, push(1000));
+    assert_eq!(a.test_pushed(g).0, 0);
+    a.test_inject_push(home, push(1001));
+    assert_eq!(a.test_pushed(g).0, 1);
+}
+
+#[tokio::test]
+async fn pushed_entries_kept_up_to_a_byte_cap() {
+    let s = TestServer::start().await;
+    let (g, mut a, _b) = pair(&s).await;
+    let home = a.test_server_of(g);
+    for i in 0..20 {
+        a.test_inject_push(
+            home,
+            Push::Entry {
+                group: g,
+                entry: entry(1000 + i, 1 << 20),
+            },
+        );
+    }
+    let (n, bytes) = a.test_pushed(g);
+    assert!(bytes <= 8 << 20, "{n} entries, {bytes} bytes");
+    // The oldest stay: a replay starts from them.
+    assert!(n >= 7, "{n}");
+}
+
+#[tokio::test]
+async fn failed_close_check_is_one_rooms_warning() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    drain(&mut b).await;
+    b.test_fail_next_close_check();
+    a.send_text(g, "one").await.unwrap();
+    b.sync().await.unwrap();
+    let ev = drain(&mut b).await;
+    assert_eq!(warnings(&ev).len(), 1, "{ev:?}");
+    assert!(texts(&b, g).contains(&"one".to_string()));
 }

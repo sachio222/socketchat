@@ -54,7 +54,8 @@ impl Request {
         self.admins.saturating_sub(self.no) < self.needed
     }
 
-    fn live(&self, now: u64) -> bool {
+    /// Inside its seven days.
+    pub fn live(&self, now: u64) -> bool {
         now < self.first_unix.saturating_add(CLOSE_ASK_SECS)
     }
 

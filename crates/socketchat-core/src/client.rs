@@ -23,7 +23,7 @@ use crate::keys::{
 };
 use crate::net::{Conn, NetError};
 use crate::provider::Provider;
-use crate::store::{GroupRow, PendingJoin, Profile, Store, StoredVoucher};
+use crate::store::{CloseStep, GroupRow, PendingJoin, Profile, Store, StoredVoucher};
 use crate::suite::{
     admins_from, group_context_extensions, group_create_config, group_join_config, SUITE,
 };
@@ -301,8 +301,11 @@ pub struct Client {
     hooks: Hooks,
 }
 
-/// The most pushed entries kept for one room between fetches.
+/// The most pushed entries kept for one room between fetches, and the
+/// most bytes. A removed member replays only the few entries just before
+/// its removal; the oldest are kept, as a replay starts from them.
 const MAX_PUSHED: usize = 500;
+const MAX_PUSHED_BYTES: usize = 8 << 20;
 
 /// What tests ask a client to do wrong on purpose.
 #[cfg(feature = "test-hooks")]
@@ -331,6 +334,13 @@ struct Hooks {
     alone_leave: bool,
     /// The next ending of a room stops after `begin_end`.
     fail_ending: bool,
+    /// The next close this app finishes stops right after posting
+    /// `Closed`, as a dropped connection would leave it.
+    drop_after_closed: bool,
+    /// How many `Closed` messages this app has posted.
+    closed_posts: usize,
+    /// The next check for a close to finish fails.
+    fail_close_check: bool,
 }
 
 enum DmTodo {
@@ -556,10 +566,10 @@ impl Client {
             return Wake::Timeout;
         }
         let poll = std::future::poll_fn(|cx| {
-            for c in self.conns.values_mut() {
+            for (server_id, c) in self.conns.iter_mut() {
                 match c.poll_push(cx) {
                     std::task::Poll::Ready(Some(p)) => {
-                        return std::task::Poll::Ready((Wake::Push, Some(p)))
+                        return std::task::Poll::Ready((Wake::Push, Some((*server_id, p))))
                     }
                     std::task::Poll::Ready(None) => {
                         return std::task::Poll::Ready((Wake::Dropped, None))
@@ -571,8 +581,8 @@ impl Client {
         });
         match tokio::time::timeout(max, poll).await {
             Ok((wake, push)) => {
-                if let Some(p) = push {
-                    self.keep_push(p);
+                if let Some((server_id, p)) = push {
+                    self.keep_push(server_id, p);
                 }
                 wake
             }
@@ -580,17 +590,33 @@ impl Client {
         }
     }
 
-    /// Keeps a pushed log entry for a room this client is in; other pushes
-    /// need nothing kept (join requests are listed again on every sync).
-    fn keep_push(&mut self, p: Push) {
+    /// Keeps a log entry `server_id` pushed for a room this client is in
+    /// there; other pushes need nothing kept (join requests are listed
+    /// again on every sync).
+    fn keep_push(&mut self, server_id: i64, p: Push) {
         if let Push::Entry { group, entry } = p {
-            if !self.groups.contains_key(&group) {
+            let ours = self
+                .groups
+                .get(&group)
+                .is_some_and(|l| l.row.server_id == server_id);
+            if !ours {
                 return;
             }
             let kept = self.pushed.entry(group).or_default();
-            if kept.len() < MAX_PUSHED {
+            let bytes: usize = kept.values().map(Vec::len).sum();
+            if kept.len() < MAX_PUSHED && bytes + entry.mls.len() <= MAX_PUSHED_BYTES {
                 kept.insert(entry.seq, entry.mls);
             }
+        }
+    }
+
+    /// Notes an entry this app posted itself. The server never pushes it
+    /// back, so an empty stand-in keeps the kept run unbroken; reading it
+    /// only moves past it.
+    fn note_own_entry(&mut self, gid: GroupId, seq: u64) {
+        let kept = self.pushed.entry(gid).or_default();
+        if kept.len() < MAX_PUSHED {
+            kept.insert(seq, Vec::new());
         }
     }
 
@@ -603,7 +629,7 @@ impl Client {
             }
         }
         for p in ps {
-            self.keep_push(p);
+            self.keep_push(server_id, p);
         }
     }
 
@@ -1136,7 +1162,10 @@ impl Client {
                 )
                 .await
             {
-                Ok(Response::Posted { seq }) => return Ok(seq),
+                Ok(Response::Posted { seq }) => {
+                    self.note_own_entry(gid, seq);
+                    return Ok(seq);
+                }
                 Err(CoreError::Net(NetError::Refused(_))) if attempt == 0 => {
                     self.fetch_group(gid).await?;
                 }
@@ -1189,6 +1218,7 @@ impl Client {
                 live.mls.merge_pending_commit(&self.prov).map_err(mls_err)?;
                 live.row.last_update_unix = now;
                 self.store.set_last_update(&gid, now)?;
+                self.note_own_entry(gid, seq);
                 Ok(Some(seq))
             }
             Err(CoreError::Net(
@@ -1599,7 +1629,7 @@ impl Client {
             }
         }
         for p in entries {
-            self.keep_push(p);
+            self.keep_push(server_id, p);
         }
         if let Response::Welcomes(ws) = self.request(server_id, Request::FetchWelcomes).await? {
             for w in ws {
@@ -1627,9 +1657,9 @@ impl Client {
         // Closes this member agreed to and that have enough votes, and any
         // this app started and did not finish.
         for gid in &gids {
-            if let Some(close_id) = self.close_to_finish(*gid)? {
+            if self.groups.contains_key(gid) {
                 let what = format!("Could not finish closing {}", self.label(gid));
-                let r = self.finish_close(*gid, close_id).await;
+                let r = self.finish_if_due(*gid).await;
                 self.group_step(r, &what)?;
             }
         }
@@ -1921,7 +1951,7 @@ impl Client {
             ProcessedMessageContent::StagedCommitMessage(sc) => {
                 // Someone else's commit for this epoch: merging it also drops
                 // any commit of this client's own still staged.
-                self.apply_commit(gid, e.seq, *sc).await?;
+                self.apply_commit(gid, e.seq, sender, *sc).await?;
             }
             ProcessedMessageContent::OwnPendingCommit => {
                 // This client's own commit, whose reply never came. It gets
@@ -1962,18 +1992,35 @@ impl Client {
         &mut self,
         gid: GroupId,
         seq: u64,
+        committer: Option<Key>,
         sc: StagedCommit,
     ) -> Result<(), CoreError> {
         let live = self.groups.get_mut(&gid).expect("caller checked");
         if sc.self_removed() {
-            // Nothing is left to merge into: the group state goes. A room
-            // this app knows was closed ends as closed.
-            return self.end_removed(gid, seq);
+            // Nothing is left to merge into: the group state goes. A commit
+            // that leaves only its committer is how a close ends; with a
+            // `Closed` known here, the room ends as closed by that admin.
+            let gone: HashSet<LeafNodeIndex> = sc
+                .remove_proposals()
+                .map(|r| r.remove_proposal().removed())
+                .collect();
+            let closer = committer.filter(|c| {
+                live.mls
+                    .members()
+                    .all(|m| m.signature_key == c.0 || gone.contains(&m.index))
+            });
+            return self.end_removed(gid, seq, closer);
         }
         let (added, removed) = commit_changes(&live.mls, &sc);
         live.mls
             .merge_staged_commit(&self.prov, sc)
             .map_err(mls_err)?;
+        // The room changed and stayed open: a `Closed` this app only
+        // remembers did not lead to a close.
+        let me = self.my_group_key(gid);
+        if self.store.closing(&gid)?.is_some_and(|c| Some(c.by) != me) {
+            self.store.clear_closing(&gid)?;
+        }
         self.record_changes(gid, seq, &added, &removed)
     }
 
@@ -2238,7 +2285,7 @@ impl Client {
                 let closing = self.store.closing(&gid)?;
                 // This app is closing the room too: it carries on, and its
                 // own commit or its removal ends the room.
-                if closing.is_some_and(|(_, by)| Some(by) == me) {
+                if closing.is_some_and(|c| Some(c.by) == me && c.step != CloseStep::GaveUp) {
                     return Ok(());
                 }
                 let met = self
@@ -2250,8 +2297,9 @@ impl Client {
                 }
                 // Too few votes seen here, as for someone who joined after
                 // them. If this member is removed next, the room was closed.
-                if closing.is_none() {
-                    self.store.set_closing(&gid, &close_id, &sender)?;
+                if closing.is_none_or(|c| c.step == CloseStep::GaveUp) {
+                    self.store
+                        .set_closing(&gid, &close_id, &sender, CloseStep::Started)?;
                 }
             }
         }
@@ -3151,42 +3199,92 @@ impl Client {
     /// The close this app should finish in a room, if any: one it started
     /// and did not finish, or one with enough votes that this admin said
     /// yes to.
-    fn close_to_finish(&self, gid: GroupId) -> Result<Option<[u8; 16]>, CoreError> {
+    fn close_to_finish(&mut self, gid: GroupId) -> Result<Option<[u8; 16]>, CoreError> {
+        #[cfg(feature = "test-hooks")]
+        if std::mem::take(&mut self.hooks.fail_close_check) {
+            return Err(CoreError::Other(
+                "the check was made to fail for a test".into(),
+            ));
+        }
         let Some(me) = self.my_group_key(gid) else {
             return Ok(None);
         };
-        if let Some((close_id, by)) = self.store.closing(&gid)? {
-            if by == me {
-                return Ok(Some(close_id));
-            }
+        let mut gave_up = None;
+        match self.store.closing(&gid)? {
+            Some(c) if c.by == me && c.step == CloseStep::GaveUp => gave_up = Some(c.close_id),
+            Some(c) if c.by == me => return Ok(Some(c.close_id)),
+            _ => {}
         }
         if !self.current_admins(&gid).contains(&me) {
             return Ok(None);
         }
+        // Votes close a room only while their request is live: one that ran
+        // out, or was kept, never closes it later with nobody acting.
+        let now = self.now();
         Ok(self
             .close_requests(&gid)?
             .into_iter()
-            .find(|r| r.met() && r.my_vote == Some(true))
+            .find(|r| {
+                r.met() && r.live(now) && r.my_vote == Some(true) && Some(r.close_id) != gave_up
+            })
             .map(|r| r.close_id))
+    }
+
+    /// Finishes the close this app owes in a room, if any.
+    async fn finish_if_due(&mut self, gid: GroupId) -> Result<(), CoreError> {
+        match self.close_to_finish(gid)? {
+            Some(close_id) => self.finish_close(gid, close_id).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Stops trying to finish a close that cannot go through, so the next
+    /// sync does not try again; returns `e` to say why, once.
+    fn give_up_close(
+        &mut self,
+        gid: GroupId,
+        close_id: [u8; 16],
+        me: Key,
+        e: CoreError,
+    ) -> Result<(), CoreError> {
+        self.store
+            .set_closing(&gid, &close_id, &me, CloseStep::GaveUp)?;
+        Err(e)
     }
 
     /// Closes a room whose close has enough votes, this admin's among them:
     /// tells the room, removes everyone else in one commit, has the server
-    /// delete the room, then ends it here. A step that fails leaves
-    /// `closing` set and the next sync carries on. If another admin's close
-    /// removes this member first, it stops quietly.
+    /// delete the room, then ends it here. A step that fails on the way
+    /// (a dropped connection) leaves `closing` set and the next sync
+    /// carries on, without posting `Closed` again. A close the server
+    /// refuses, or one this member is no longer an admin for, is given up
+    /// and said once. If another admin's close removes this member first,
+    /// it stops quietly.
     async fn finish_close(&mut self, gid: GroupId, close_id: [u8; 16]) -> Result<(), CoreError> {
         let Some(me) = self.my_group_key(gid) else {
             return Ok(());
         };
         let server_id = self.server_of(&gid)?;
-        self.store.set_closing(&gid, &close_id, &me)?;
+        if !self.current_admins(&gid).contains(&me) {
+            let e = CoreError::Other("you are no longer one of its admins".into());
+            return self.give_up_close(gid, close_id, me, e);
+        }
+        // `Closed` goes out once per close, even when a later step fails
+        // and the next sync carries on.
+        let posted = self
+            .store
+            .closing(&gid)?
+            .is_some_and(|c| c.close_id == close_id && c.by == me && c.step == CloseStep::Posted);
+        if !posted {
+            self.store
+                .set_closing(&gid, &close_id, &me, CloseStep::Started)?;
+        }
         let others = |c: &Client| {
             c.groups
                 .get(&gid)
                 .map(|l| l.mls.members().any(|m| m.signature_key != me.0))
         };
-        if others(self) == Some(true) {
+        if others(self) == Some(true) && !posted {
             // No message goes out while a commit of this app's waits.
             let mut r = self.settle_sent(gid).await;
             if r.is_ok() {
@@ -3198,7 +3296,25 @@ impl Client {
             if !self.groups.contains_key(&gid) {
                 return Ok(());
             }
-            r?;
+            match r {
+                Ok(()) => {
+                    self.store
+                        .set_closing(&gid, &close_id, &me, CloseStep::Posted)?;
+                    #[cfg(feature = "test-hooks")]
+                    {
+                        self.hooks.closed_posts += 1;
+                        if std::mem::take(&mut self.hooks.drop_after_closed) {
+                            return Err(CoreError::Net(NetError::Disconnected));
+                        }
+                    }
+                }
+                Err(e @ CoreError::Net(NetError::Refused(_))) => {
+                    return self.give_up_close(gid, close_id, me, e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if others(self) == Some(true) {
             let mut removed = false;
             for _ in 0..3 {
                 let r = self.settle_sent(gid).await;
@@ -3238,6 +3354,11 @@ impl Client {
                         return self.removed_from(gid).await;
                     }
                     Err(_) if !self.groups.contains_key(&gid) => return Ok(()),
+                    // The server will not take the change: trying again
+                    // on every sync would not help.
+                    Err(e @ CoreError::Net(NetError::Refused(_))) => {
+                        return self.give_up_close(gid, close_id, me, e);
+                    }
                     Err(e) => return Err(e),
                 }
                 if !self.groups.contains_key(&gid) {
@@ -3290,12 +3411,25 @@ impl Client {
         self.end_room(gid, Ended::Closed)
     }
 
-    /// Ends a room this member was removed from: as closed when this app
-    /// knows of a `Closed` message in it, with the notice at `seq`.
-    fn end_removed(&mut self, gid: GroupId, seq: u64) -> Result<(), CoreError> {
-        match self.store.closing(&gid)? {
-            Some((_, by)) => self.end_closed(gid, by, seq),
-            None => self.end_room(gid, Ended::Removed),
+    /// Ends a room this member was removed from. `closer` is the admin
+    /// whose commit removed everyone but themselves, when the removal came
+    /// as such a commit. The room ends as closed, with the notice at `seq`,
+    /// when this app was closing it itself, or when it remembers a
+    /// `Closed` message and the removal looks like a close.
+    fn end_removed(
+        &mut self,
+        gid: GroupId,
+        seq: u64,
+        closer: Option<Key>,
+    ) -> Result<(), CoreError> {
+        let me = self.my_group_key(gid);
+        match (self.store.closing(&gid)?, closer) {
+            (Some(c), _) if Some(c.by) == me && c.step != CloseStep::GaveUp => {
+                // Whichever admin's commit landed closed the room.
+                self.end_closed(gid, closer.unwrap_or(c.by), seq)
+            }
+            (Some(c), Some(by)) if Some(c.by) != me => self.end_closed(gid, by, seq),
+            _ => self.end_room(gid, Ended::Removed),
         }
     }
 
@@ -3322,7 +3456,7 @@ impl Client {
         let Some(last) = self.groups.get(&gid).map(|l| l.row.last_seq) else {
             return Ok(());
         };
-        self.end_removed(gid, last + 1)
+        self.end_removed(gid, last + 1, None)
     }
 
     // ---------- direct messages ----------
@@ -3714,6 +3848,49 @@ impl Client {
     /// Makes the next checkpoint of the profile's log find it busy.
     pub fn test_busy_next_checkpoint(&self) {
         self.store.test_busy_next_checkpoint();
+    }
+
+    /// Makes the next close this app finishes stop right after it posts
+    /// `Closed`, as a dropped connection would.
+    pub fn test_drop_after_closed(&mut self) {
+        self.hooks.drop_after_closed = true;
+    }
+
+    /// How many `Closed` messages this app has posted.
+    pub fn test_closed_posts(&self) -> usize {
+        self.hooks.closed_posts
+    }
+
+    /// Makes the next check for a close to finish fail.
+    pub fn test_fail_next_close_check(&mut self) {
+        self.hooks.fail_close_check = true;
+    }
+
+    /// Marks a room as being closed by this app, as one that stopped part
+    /// way through a close would leave it.
+    pub fn test_set_closing(&mut self, gid: GroupId, close_id: [u8; 16]) {
+        let me = self.my_group_key(gid).expect("in the room");
+        self.store
+            .set_closing(&gid, &close_id, &me, CloseStep::Started)
+            .expect("set closing");
+    }
+
+    /// Hands this client a push as if server `server_id` had sent it.
+    pub fn test_inject_push(&mut self, server_id: i64, push: Push) {
+        self.keep_push(server_id, push);
+    }
+
+    /// The server a room is on.
+    pub fn test_server_of(&self, gid: GroupId) -> i64 {
+        self.server_of(&gid).expect("in the room")
+    }
+
+    /// How many pushed entries are kept for a room, and their bytes.
+    pub fn test_pushed(&self, gid: GroupId) -> (usize, usize) {
+        self.pushed
+            .get(&gid)
+            .map(|k| (k.len(), k.values().map(Vec::len).sum()))
+            .unwrap_or((0, 0))
     }
 
     /// Makes the next `leave` act as if this person were alone in the room,

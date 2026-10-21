@@ -277,6 +277,26 @@ fn delete_state(tx: &rusqlite::Transaction, g: &GroupId, mls: &[u8]) -> Result<(
     Ok(())
 }
 
+/// A `Closed` message this app knows of in a room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Closing {
+    pub close_id: [u8; 16],
+    /// Who sent it: this member's own key while it closes the room itself.
+    pub by: Key,
+    pub step: CloseStep,
+}
+
+/// How far this app got with a close of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseStep {
+    /// Started, or a `Closed` from someone else this app remembers.
+    Started = 0,
+    /// This app's `Closed` went out.
+    Posted = 1,
+    /// This app stopped trying, and said so.
+    GaveUp = 2,
+}
+
 /// How many times [`Store::checkpoint`] tries before it gives up.
 const CHECKPOINT_TRIES: usize = 3;
 
@@ -1495,12 +1515,19 @@ impl Store {
     }
 
     /// Records a `Closed` message this app knows of: request `close_id`,
-    /// sent by `by` (this member's own key when it is finishing the close).
-    /// Stored in `groups.closing` as the 16-byte request ID then the
-    /// 32-byte key.
-    pub fn set_closing(&self, g: &GroupId, close_id: &[u8; 16], by: &Key) -> Result<(), CoreError> {
+    /// sent by `by` (this member's own key when it is closing the room
+    /// itself), at step `step`. Stored in `groups.closing` as the 16-byte
+    /// request ID, the 32-byte key, then one byte for the step.
+    pub fn set_closing(
+        &self,
+        g: &GroupId,
+        close_id: &[u8; 16],
+        by: &Key,
+        step: CloseStep,
+    ) -> Result<(), CoreError> {
         let mut blob = close_id.to_vec();
         blob.extend_from_slice(&by.0);
+        blob.push(step as u8);
         self.conn.execute(
             "UPDATE groups SET closing = ?1 WHERE id = ?2",
             params![blob, g.0.as_slice()],
@@ -1508,8 +1535,17 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets the `Closed` message this app knew of in a room.
+    pub fn clear_closing(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE groups SET closing = NULL WHERE id = ?1",
+            [g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
     /// The `Closed` message this app knows of in a room, if any.
-    pub fn closing(&self, g: &GroupId) -> Result<Option<([u8; 16], Key)>, CoreError> {
+    pub fn closing(&self, g: &GroupId) -> Result<Option<Closing>, CoreError> {
         let blob: Option<Vec<u8>> = self
             .conn
             .query_row(
@@ -1520,9 +1556,15 @@ impl Store {
             .optional()?
             .flatten();
         Ok(blob.and_then(|b| {
-            let id: [u8; 16] = b.get(..16)?.try_into().ok()?;
-            let by = key_col(Some(b.get(16..)?.to_vec()))?;
-            Some((id, by))
+            Some(Closing {
+                close_id: b.get(..16)?.try_into().ok()?,
+                by: key_col(Some(b.get(16..48)?.to_vec()))?,
+                step: match b.get(48) {
+                    Some(1) => CloseStep::Posted,
+                    Some(2) => CloseStep::GaveUp,
+                    _ => CloseStep::Started,
+                },
+            })
         }))
     }
 
