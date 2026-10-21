@@ -1906,6 +1906,11 @@ impl Client {
                     });
                 }
             }
+            // Behaviour arrives with the extension, app version and close tasks.
+            AppMsg::Extension(_)
+            | AppMsg::AppInfo { .. }
+            | AppMsg::CloseVote { .. }
+            | AppMsg::Closed { .. } => {}
         }
         Ok(())
     }

@@ -90,9 +90,29 @@ pub fn clean_text(s: &str) -> String {
     cleaned[..end].to_string()
 }
 
+/// An extension's one-line summary: message text cleaned, every run of
+/// whitespace (newlines included) turned into one space, trimmed and
+/// capped.
+pub fn clean_summary(s: &str) -> String {
+    clean_text(s)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(crate::appmsg::MAX_SUMMARY_CHARS)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_is_one_clean_line() {
+        assert_eq!(clean_summary("a\nb\u{202e}c"), "a bc");
+        assert_eq!(clean_summary(&"x".repeat(300)).chars().count(), 200);
+        assert_eq!(clean_summary("  a \t\r\n  b  "), "a b");
+    }
 
     #[test]
     fn strips_escape_sequences() {
