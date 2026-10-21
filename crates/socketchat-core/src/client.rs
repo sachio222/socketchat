@@ -3,7 +3,7 @@
 //! Every screen, and every test, drives this. It keeps its state in the
 //! encrypted store and reports what happened as [`Event`]s.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -15,6 +15,7 @@ use socketchat_proto::msg::{Entry, Push, Request, Response, WelcomeIn, WelcomeOu
 use socketchat_proto::{InviteLink, Token};
 
 use crate::appmsg::{AppMsg, Extension};
+use crate::close::{CloseOutcome, CloseView};
 use crate::invite::{join_sig, key_packages, pick_key_package};
 use crate::keys::{
     fingerprint, invite_proof, invite_signing_key, join_request_ok, open_voucher, proof_matches,
@@ -163,6 +164,9 @@ pub struct RoomDetails {
     pub created_unix: Option<u64>,
     pub joined_unix: u64,
     pub muted: bool,
+    /// The request to close this room, while one is open or was kept in
+    /// the last seven days.
+    pub close: Option<CloseView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,6 +213,19 @@ pub enum Event {
     Warning(String),
     Disconnected,
     Reconnected,
+    /// An admin voted on closing the room.
+    CloseVote {
+        group: GroupId,
+        view: CloseView,
+    },
+    /// The room was closed. [`Event::Left`] follows.
+    Closed {
+        group: GroupId,
+        /// The room's name; empty for a room with no name.
+        name: String,
+        /// Who closed it.
+        by: String,
+    },
 }
 
 /// A group this client is in. A commit it sent whose reply never came
@@ -275,9 +292,17 @@ pub struct Client {
     /// be working on it, so it stays staged through one more sync round
     /// even when the log ends without it.
     commit_grace: HashSet<GroupId>,
+    /// Log entries the server pushed, by group and sequence, kept until a
+    /// fetch covers them. A member removed from a room can no longer fetch
+    /// its log, so these are how it reads what came just before: the
+    /// notice that the room was closed.
+    pushed: HashMap<GroupId, BTreeMap<u64, Vec<u8>>>,
     #[cfg(feature = "test-hooks")]
     hooks: Hooks,
 }
+
+/// The most pushed entries kept for one room between fetches.
+const MAX_PUSHED: usize = 500;
 
 /// What tests ask a client to do wrong on purpose.
 #[cfg(feature = "test-hooks")]
@@ -470,6 +495,7 @@ impl Client {
             drifted: HashSet::new(),
             bad_requests: HashSet::new(),
             commit_grace: HashSet::new(),
+            pushed: HashMap::new(),
             #[cfg(feature = "test-hooks")]
             hooks: Hooks::default(),
         };
@@ -532,16 +558,53 @@ impl Client {
         let poll = std::future::poll_fn(|cx| {
             for c in self.conns.values_mut() {
                 match c.poll_push(cx) {
-                    std::task::Poll::Ready(Some(_)) => return std::task::Poll::Ready(Wake::Push),
-                    std::task::Poll::Ready(None) => return std::task::Poll::Ready(Wake::Dropped),
+                    std::task::Poll::Ready(Some(p)) => {
+                        return std::task::Poll::Ready((Wake::Push, Some(p)))
+                    }
+                    std::task::Poll::Ready(None) => {
+                        return std::task::Poll::Ready((Wake::Dropped, None))
+                    }
                     std::task::Poll::Pending => {}
                 }
             }
             std::task::Poll::Pending
         });
-        tokio::time::timeout(max, poll)
-            .await
-            .unwrap_or(Wake::Timeout)
+        match tokio::time::timeout(max, poll).await {
+            Ok((wake, push)) => {
+                if let Some(p) = push {
+                    self.keep_push(p);
+                }
+                wake
+            }
+            Err(_) => Wake::Timeout,
+        }
+    }
+
+    /// Keeps a pushed log entry for a room this client is in; other pushes
+    /// need nothing kept (join requests are listed again on every sync).
+    fn keep_push(&mut self, p: Push) {
+        if let Push::Entry { group, entry } = p {
+            if !self.groups.contains_key(&group) {
+                return;
+            }
+            let kept = self.pushed.entry(group).or_default();
+            if kept.len() < MAX_PUSHED {
+                kept.insert(entry.seq, entry.mls);
+            }
+        }
+    }
+
+    /// Keeps every entry already pushed on a server's connection.
+    fn drain_pushes(&mut self, server_id: i64) {
+        let mut ps = Vec::new();
+        if let Some(c) = self.conns.get_mut(&server_id) {
+            while let Some(p) = c.try_push() {
+                ps.push(p);
+            }
+        }
+        for p in ps {
+            self.keep_push(p);
+        }
     }
 
     /// Whether every server this client uses is connected right now.
@@ -1049,7 +1112,11 @@ impl Client {
     pub(crate) async fn send_app(&mut self, gid: GroupId, msg: &AppMsg) -> Result<u64, CoreError> {
         let server_id = self.server_of(&gid)?;
         for attempt in 0..2 {
-            let live = self.groups.get_mut(&gid).expect("checked by server_of");
+            // The catch-up after a refusal can end the room.
+            let live = self
+                .groups
+                .get_mut(&gid)
+                .ok_or_else(|| CoreError::Other("you are not in that group".into()))?;
             let out = live
                 .mls
                 .create_message(&self.prov, &live.row.key, &msg.encode())
@@ -1521,13 +1588,18 @@ impl Client {
 
     async fn sync_server_round(&mut self, server_id: i64) -> Result<(), CoreError> {
         let mut pushed: Vec<(GroupId, socketchat_proto::msg::JoinRequest)> = Vec::new();
+        let mut entries = Vec::new();
         {
             let c = self.conn(server_id).await?;
             while let Some(p) = c.try_push() {
-                if let Push::JoinRequest { group, request } = p {
-                    pushed.push((group, request));
+                match p {
+                    Push::JoinRequest { group, request } => pushed.push((group, request)),
+                    p => entries.push(p),
                 }
             }
+        }
+        for p in entries {
+            self.keep_push(p);
         }
         if let Response::Welcomes(ws) = self.request(server_id, Request::FetchWelcomes).await? {
             for w in ws {
@@ -1549,6 +1621,15 @@ impl Client {
             if self.groups.contains_key(gid) {
                 let r = self.fetch_group(*gid).await;
                 let what = format!("Could not fetch new messages in {}", self.label(gid));
+                self.group_step(r, &what)?;
+            }
+        }
+        // Closes this member agreed to and that have enough votes, and any
+        // this app started and did not finish.
+        for gid in &gids {
+            if let Some(close_id) = self.close_to_finish(*gid)? {
+                let what = format!("Could not finish closing {}", self.label(gid));
+                let r = self.finish_close(*gid, close_id).await;
                 self.group_step(r, &what)?;
             }
         }
@@ -1737,7 +1818,7 @@ impl Client {
                 Ok(Response::Entries(es)) => es,
                 Ok(_) => return Ok(()),
                 Err(CoreError::Net(NetError::Refused(why))) if why == NOT_A_MEMBER => {
-                    return self.end_room(gid, Ended::Removed);
+                    return self.removed_from(gid).await;
                 }
                 Err(CoreError::Net(NetError::Refused(why))) => {
                     let label = self.label(&gid);
@@ -1757,6 +1838,11 @@ impl Client {
                     live.mls
                         .clear_pending_commit(self.prov.storage())
                         .map_err(mls_err)?;
+                }
+                // The log covered every entry pushed so far.
+                let through = live.row.last_seq;
+                if let Some(kept) = self.pushed.get_mut(&gid) {
+                    kept.retain(|seq, _| *seq > through);
                 }
                 return Ok(());
             };
@@ -1880,8 +1966,9 @@ impl Client {
     ) -> Result<(), CoreError> {
         let live = self.groups.get_mut(&gid).expect("caller checked");
         if sc.self_removed() {
-            // Nothing is left to merge into: the group state goes.
-            return self.end_room(gid, Ended::Removed);
+            // Nothing is left to merge into: the group state goes. A room
+            // this app knows was closed ends as closed.
+            return self.end_removed(gid, seq);
         }
         let (added, removed) = commit_changes(&live.mls, &sc);
         live.mls
@@ -2138,8 +2225,35 @@ impl Client {
                     self.emit(Event::MembersChanged { group: gid });
                 }
             }
-            // Behaviour arrives with the close task.
-            AppMsg::CloseVote { .. } | AppMsg::Closed { .. } => {}
+            AppMsg::CloseVote { close_id, yes } => {
+                if let Some(view) = self.record_vote(gid, seq, sender, close_id, yes)? {
+                    self.emit(Event::CloseVote { group: gid, view });
+                }
+            }
+            AppMsg::Closed { close_id } => {
+                if !self.current_admins(&gid).contains(&sender) {
+                    return Ok(());
+                }
+                let me = self.my_group_key(gid);
+                let closing = self.store.closing(&gid)?;
+                // This app is closing the room too: it carries on, and its
+                // own commit or its removal ends the room.
+                if closing.is_some_and(|(_, by)| Some(by) == me) {
+                    return Ok(());
+                }
+                let met = self
+                    .close_requests(&gid)?
+                    .iter()
+                    .any(|r| r.close_id == close_id && r.met());
+                if met {
+                    return self.end_closed(gid, sender, seq);
+                }
+                // Too few votes seen here, as for someone who joined after
+                // them. If this member is removed next, the room was closed.
+                if closing.is_none() {
+                    self.store.set_closing(&gid, &close_id, &sender)?;
+                }
+            }
         }
         Ok(())
     }
@@ -2386,6 +2500,7 @@ impl Client {
             created_unix,
             joined_unix: row.joined_unix,
             muted: self.store.is_muted(&gid).unwrap_or(false),
+            close: self.close_state(gid),
         })
     }
 
@@ -2744,6 +2859,7 @@ impl Client {
         self.leaves.remove(&gid);
         self.repost.remove(&gid);
         self.commit_grace.remove(&gid);
+        self.pushed.remove(&gid);
         self.drifted.remove(&gid);
         self.dm_offers.retain(|_, (dm, _)| *dm != gid);
         self.emit(Event::Left {
@@ -2848,6 +2964,365 @@ impl Client {
             }
         }
         Ok(())
+    }
+
+    // ---------- closing ----------
+
+    /// The admins still in a room.
+    fn current_admins(&self, gid: &GroupId) -> Vec<Key> {
+        let Some(live) = self.groups.get(gid) else {
+            return vec![];
+        };
+        let present: HashSet<Key> = live
+            .mls
+            .members()
+            .filter_map(|m| key_of(&m.signature_key))
+            .collect();
+        admins_from(live.mls.extensions())
+            .into_iter()
+            .filter(|k| present.contains(k))
+            .collect()
+    }
+
+    /// Every request to close a room, counted over its current admins.
+    fn close_requests(&self, gid: &GroupId) -> Result<Vec<crate::close::Request>, CoreError> {
+        let Some(me) = self.my_group_key(*gid) else {
+            return Ok(vec![]);
+        };
+        let votes = self.store.close_votes(gid)?;
+        Ok(crate::close::requests(
+            &votes,
+            &self.current_admins(gid),
+            &me,
+        ))
+    }
+
+    fn close_request(
+        &self,
+        gid: &GroupId,
+        close_id: &[u8; 16],
+    ) -> Result<Option<crate::close::Request>, CoreError> {
+        Ok(self
+            .close_requests(gid)?
+            .into_iter()
+            .find(|r| r.close_id == *close_id))
+    }
+
+    fn close_view(&self, gid: &GroupId, r: &crate::close::Request) -> CloseView {
+        CloseView {
+            close_id: r.close_id,
+            asked_by: r
+                .asked_by
+                .map(|k| self.name_for(gid, &k))
+                .unwrap_or_default(),
+            yes: r.yes,
+            no: r.no,
+            needed: r.needed,
+            admins: r.admins,
+            my_vote: r.my_vote,
+            kept: r.kept(),
+        }
+    }
+
+    /// The request to close a room: the open one, or else the newest of the
+    /// last seven days, which shows whether it was kept.
+    pub fn close_state(&self, gid: GroupId) -> Option<CloseView> {
+        let reqs = self.close_requests(&gid).ok()?;
+        crate::close::current(&reqs, self.now()).map(|r| self.close_view(&gid, r))
+    }
+
+    /// Stores an admin's vote on closing a room, with its notice at `seq`.
+    /// Returns the request as it now stands, or `None` when the vote does
+    /// not count because the voter is not an admin in the room.
+    fn record_vote(
+        &mut self,
+        gid: GroupId,
+        seq: u64,
+        voter: Key,
+        close_id: [u8; 16],
+        yes: bool,
+    ) -> Result<Option<CloseView>, CoreError> {
+        if !self.current_admins(&gid).contains(&voter) {
+            return Ok(None);
+        }
+        let before = self.close_request(&gid, &close_id)?;
+        let now = self.now();
+        self.store
+            .add_close_vote(&gid, &close_id, &voter, yes, now)?;
+        let Some(after) = self.close_request(&gid, &close_id)? else {
+            return Ok(None);
+        };
+        let who = self.name_for(&gid, &voter);
+        let mut text = match (yes, &before) {
+            (true, None) => format!("{who} asked to close this room."),
+            (true, Some(_)) => format!("{who} agreed to close this room."),
+            (false, _) => format!("{who} wants to keep this room open."),
+        };
+        // A vote is one log entry and one line: the outcome joins it.
+        if after.kept() && !before.as_ref().is_some_and(|b| b.kept()) {
+            text.push_str(" This room stays open: too few admins agreed to close it.");
+        }
+        self.store
+            .add_message(&gid, seq, None, kind::NOTICE, &text, now)?;
+        Ok(Some(self.close_view(&gid, &after)))
+    }
+
+    /// Votes on closing a room. Needs an admin, and a server on protocol 2
+    /// (checked before anything is sent). A yes with no request open asks
+    /// the other admins; with one open, the vote goes to it. Once enough
+    /// admins agree, this app closes the room: everyone else is removed,
+    /// the server deletes the room, and it ends here.
+    pub async fn vote_close(&mut self, gid: GroupId, yes: bool) -> Result<CloseOutcome, CoreError> {
+        let me = self
+            .my_group_key(gid)
+            .ok_or_else(|| CoreError::Other("you are not in that group".into()))?;
+        if !self.current_admins(&gid).contains(&me) {
+            return Err(CoreError::Other("Only admins can close this room.".into()));
+        }
+        let server_id = self.server_of(&gid)?;
+        let protocol = self.conn(server_id).await?.protocol();
+        if protocol < 2 {
+            return Err(CoreError::Net(NetError::Unsupported {
+                needs: 2,
+                server: protocol,
+            }));
+        }
+        let r = self.vote_close_on(gid, me, yes).await;
+        // Another admin's close can end the room while this vote goes out.
+        let closed_here = self
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Closed { group, .. } if *group == gid));
+        if !self.groups.contains_key(&gid) && closed_here {
+            return Ok(CloseOutcome::Closed);
+        }
+        r
+    }
+
+    async fn vote_close_on(
+        &mut self,
+        gid: GroupId,
+        me: Key,
+        yes: bool,
+    ) -> Result<CloseOutcome, CoreError> {
+        // Catch up first, so the vote goes to the request the others see.
+        self.fetch_group(gid).await?;
+        if !self.groups.contains_key(&gid) {
+            return Err(CoreError::Other("you are not in that group".into()));
+        }
+        if !self.current_admins(&gid).contains(&me) {
+            return Err(CoreError::Other("Only admins can close this room.".into()));
+        }
+        let reqs = self.close_requests(&gid)?;
+        let close_id = match (crate::close::open_request(&reqs, self.now()), yes) {
+            (Some(r), _) => r.close_id,
+            (None, true) => {
+                let mut id = [0u8; 16];
+                OsRng.fill_bytes(&mut id);
+                id
+            }
+            (None, false) => {
+                return Err(CoreError::Other(
+                    "Nobody has asked to close this room.".into(),
+                ))
+            }
+        };
+        let seq = self
+            .send_app(gid, &AppMsg::CloseVote { close_id, yes })
+            .await?;
+        self.record_vote(gid, seq, me, close_id, yes)?;
+        self.store.set_seen_seq(&gid, seq)?;
+        let req = self
+            .close_request(&gid, &close_id)?
+            .ok_or_else(|| CoreError::Other("your vote was not counted".into()))?;
+        if req.met() {
+            self.finish_close(gid, close_id).await?;
+            return Ok(CloseOutcome::Closed);
+        }
+        if req.kept() {
+            return Ok(CloseOutcome::Kept);
+        }
+        Ok(CloseOutcome::Waiting {
+            yes: req.yes,
+            needed: req.needed,
+        })
+    }
+
+    /// The close this app should finish in a room, if any: one it started
+    /// and did not finish, or one with enough votes that this admin said
+    /// yes to.
+    fn close_to_finish(&self, gid: GroupId) -> Result<Option<[u8; 16]>, CoreError> {
+        let Some(me) = self.my_group_key(gid) else {
+            return Ok(None);
+        };
+        if let Some((close_id, by)) = self.store.closing(&gid)? {
+            if by == me {
+                return Ok(Some(close_id));
+            }
+        }
+        if !self.current_admins(&gid).contains(&me) {
+            return Ok(None);
+        }
+        Ok(self
+            .close_requests(&gid)?
+            .into_iter()
+            .find(|r| r.met() && r.my_vote == Some(true))
+            .map(|r| r.close_id))
+    }
+
+    /// Closes a room whose close has enough votes, this admin's among them:
+    /// tells the room, removes everyone else in one commit, has the server
+    /// delete the room, then ends it here. A step that fails leaves
+    /// `closing` set and the next sync carries on. If another admin's close
+    /// removes this member first, it stops quietly.
+    async fn finish_close(&mut self, gid: GroupId, close_id: [u8; 16]) -> Result<(), CoreError> {
+        let Some(me) = self.my_group_key(gid) else {
+            return Ok(());
+        };
+        let server_id = self.server_of(&gid)?;
+        self.store.set_closing(&gid, &close_id, &me)?;
+        let others = |c: &Client| {
+            c.groups
+                .get(&gid)
+                .map(|l| l.mls.members().any(|m| m.signature_key != me.0))
+        };
+        if others(self) == Some(true) {
+            // No message goes out while a commit of this app's waits.
+            let mut r = self.settle_sent(gid).await;
+            if r.is_ok() {
+                r = self
+                    .send_app(gid, &AppMsg::Closed { close_id })
+                    .await
+                    .map(|_| ());
+            }
+            if !self.groups.contains_key(&gid) {
+                return Ok(());
+            }
+            r?;
+            let mut removed = false;
+            for _ in 0..3 {
+                let r = self.settle_sent(gid).await;
+                if !self.groups.contains_key(&gid) {
+                    return Ok(());
+                }
+                r?;
+                let live = self.groups.get_mut(&gid).expect("checked above");
+                let gone: Vec<(LeafNodeIndex, Key)> = live
+                    .mls
+                    .members()
+                    .filter(|m| m.signature_key != me.0)
+                    .filter_map(|m| key_of(&m.signature_key).map(|k| (m.index, k)))
+                    .collect();
+                if gone.is_empty() {
+                    removed = true;
+                    break;
+                }
+                let idx: Vec<LeafNodeIndex> = gone.iter().map(|(i, _)| *i).collect();
+                let (commit, _, _) = live
+                    .mls
+                    .remove_members(&self.prov, &live.row.key, &idx)
+                    .map_err(mls_err)?;
+                match self.post_commit(gid, commit, None).await {
+                    Ok(Some(_)) => {
+                        for (_, k) in &gone {
+                            self.store.remove_member(&gid, k)?;
+                        }
+                        self.emit(Event::MembersChanged { group: gid });
+                        removed = true;
+                        break;
+                    }
+                    // Lost a race; the catch-up may have ended the room.
+                    Ok(None) => {}
+                    Err(CoreError::Net(NetError::Refused(why))) if why == NOT_A_MEMBER => {
+                        // Another admin's close removed this member.
+                        return self.removed_from(gid).await;
+                    }
+                    Err(_) if !self.groups.contains_key(&gid) => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+                if !self.groups.contains_key(&gid) {
+                    return Ok(());
+                }
+            }
+            if !removed {
+                return Err(CoreError::Other(
+                    "the group kept changing; try again".into(),
+                ));
+            }
+        }
+        // Alone in the room now: the server deletes it.
+        match self
+            .request(server_id, Request::LastLeave { group: gid })
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if connection_lost(&e) => return Err(e),
+            Err(e) => {
+                let name = self.label(&gid);
+                self.emit(Event::Warning(format!(
+                    "Closed {name}, but the server could not delete it: {e}"
+                )));
+            }
+        }
+        self.end_closed(gid, me, 0)
+    }
+
+    /// Ends a room that was closed by `by`, with the notice at `seq` when
+    /// someone else closed it.
+    fn end_closed(&mut self, gid: GroupId, by: Key, seq: u64) -> Result<(), CoreError> {
+        let Some(live) = self.groups.get(&gid) else {
+            return Ok(());
+        };
+        let name = live.row.name.clone();
+        let mine = live.row.key.public() == by;
+        let who = self.name_for(&gid, &by);
+        if !mine {
+            let now = self.now();
+            let text = format!("{who} closed this room.");
+            self.store
+                .add_message(&gid, seq, None, kind::NOTICE, &text, now)?;
+        }
+        self.emit(Event::Closed {
+            group: gid,
+            name,
+            by: who,
+        });
+        self.end_room(gid, Ended::Closed)
+    }
+
+    /// Ends a room this member was removed from: as closed when this app
+    /// knows of a `Closed` message in it, with the notice at `seq`.
+    fn end_removed(&mut self, gid: GroupId, seq: u64) -> Result<(), CoreError> {
+        match self.store.closing(&gid)? {
+            Some((_, by)) => self.end_closed(gid, by, seq),
+            None => self.end_room(gid, Ended::Removed),
+        }
+    }
+
+    /// The server says this member is no longer in the room, so its log is
+    /// out of reach. Entries the server pushed before the removal are read
+    /// first, as they may say the room was closed; only a run that follows
+    /// on from the last entry read is applied, so nothing goes out of order.
+    async fn removed_from(&mut self, gid: GroupId) -> Result<(), CoreError> {
+        let server_id = self.server_of(&gid)?;
+        self.drain_pushes(server_id);
+        let kept = self.pushed.remove(&gid).unwrap_or_default();
+        for (seq, mls) in kept {
+            let Some(last) = self.groups.get(&gid).map(|l| l.row.last_seq) else {
+                return Ok(());
+            };
+            if seq <= last {
+                continue;
+            }
+            if seq != last + 1 {
+                break;
+            }
+            self.apply_entry(gid, Entry { seq, mls }).await?;
+        }
+        let Some(last) = self.groups.get(&gid).map(|l| l.row.last_seq) else {
+            return Ok(());
+        };
+        self.end_removed(gid, last + 1)
     }
 
     // ---------- direct messages ----------

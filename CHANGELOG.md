@@ -20,6 +20,7 @@ Each release of socketchat has a section here. Version numbers follow [Semantic 
 - An ended room's unread messages still show who wrote them.
 - Joining a room no longer leaves spare keys from the join request on your computer.
 - When the last person leaves a room with 0.5.0, the server deletes everything it holds for that room. Its hourly sweep also removes rooms that have no members.
+- Admins can close a room for everyone once they agree: every admin when the room has up to three, more than half of them when it has more. A room with one admin closes at once. A request to close stays open for seven days.
 
 ## 0.4.0 - 2026-10-20
 

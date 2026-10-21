@@ -5,6 +5,7 @@
 
 pub mod appmsg;
 pub mod client;
+pub mod close;
 pub mod error;
 pub mod files;
 pub mod invite;

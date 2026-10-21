@@ -1,5 +1,8 @@
 use socketchat_core::appmsg::AppMsg;
 use socketchat_core::client::{Ended, Event, KEEP_UNSEEN_SECS};
+use socketchat_core::close::{CloseOutcome, CLOSE_ASK_SECS};
+use socketchat_core::net::NetError;
+use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
 use socketchat_testkit::{drain, settle, TestClient, TestServer};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -664,4 +667,350 @@ async fn refused_last_leave_still_posts_the_leave_request() {
             .any(|e| matches!(e, Event::Warning(w) if w.contains("other people are still"))),
         "{ev:?}"
     );
+}
+
+// ---------- closing a room ----------
+
+async fn settle_all(cs: &mut [TestClient]) {
+    let mut refs: Vec<&mut TestClient> = cs.iter_mut().collect();
+    settle(&mut refs).await;
+}
+
+/// Ada's room "Room" with everyone in `names` (Ada first) in it. The first
+/// `admins` of them are admins. Every event so far is drained.
+async fn room_of(s: &TestServer, names: &[&str], admins: usize) -> (GroupId, Vec<TestClient>) {
+    let mut cs = vec![TestClient::new(s, names[0]).await];
+    let g = cs[0].create_group("Room").await.unwrap();
+    for n in &names[1..] {
+        let mut c = TestClient::new(s, n).await;
+        let link = cs[0].invite(Some(g), false).await.unwrap().0;
+        c.join(&link).await.unwrap();
+        cs.push(c);
+        settle_all(&mut cs).await;
+    }
+    for i in 1..admins {
+        let k = cs[i].my_group_key(g).unwrap();
+        cs[0].make_admin(g, &k).await.unwrap();
+    }
+    settle_all(&mut cs).await;
+    for c in cs.iter_mut() {
+        drain(c).await;
+    }
+    (g, cs)
+}
+
+fn warnings(ev: &[Event]) -> Vec<&Event> {
+    ev.iter()
+        .filter(|e| matches!(e, Event::Warning(_)))
+        .collect()
+}
+
+/// The room is no longer live for `c`, and if its history is still here
+/// it shows as closed.
+fn closed_for(c: &TestClient, g: GroupId) {
+    assert!(
+        c.my_group_key(g).is_none(),
+        "{} is still in",
+        c.display_name()
+    );
+    for x in c.groups().into_iter().filter(|x| x.id == g) {
+        assert_eq!(x.ended, Some(Ended::Closed), "{}", c.display_name());
+    }
+}
+
+#[tokio::test]
+async fn one_admin_closes_at_once() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b, mut c) = trio(&s).await;
+    drain(&mut b).await;
+    drain(&mut c).await;
+    assert_eq!(a.vote_close(g, true).await.unwrap(), CloseOutcome::Closed);
+    assert!(a.test_traces(g).is_empty(), "{:?}", a.test_traces(g));
+    assert!(!listed(&a, g));
+    settle(&mut [&mut b, &mut c]).await;
+    for m in [&mut b, &mut c] {
+        let ev = drain(m).await;
+        assert!(
+            ev.iter().any(
+                |e| matches!(e, Event::Closed { group, name, by } if *group == g && name == "Room" && by == "Ada")
+            ),
+            "{ev:?}"
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, Event::Left { group, .. } if *group == g)),
+            "{ev:?}"
+        );
+        assert!(warnings(&ev).is_empty(), "{ev:?}");
+        assert_eq!(summary(m, g).ended, Some(Ended::Closed));
+        assert!(
+            m.messages(g, 50)
+                .iter()
+                .any(|l| l.notice && l.text == "Ada closed this room."),
+            "{:?}",
+            texts(m, g)
+        );
+        // Ending the room took its votes with its other state.
+        assert_eq!(
+            m.test_traces(g),
+            vec!["messages", "ended_names", "ended_rooms"]
+        );
+        m.mark_seen(g).unwrap();
+        assert_eq!(m.purge_read(None), vec![g]);
+        assert!(m.test_traces(g).is_empty(), "{:?}", m.test_traces(g));
+    }
+    assert_eq!(server_rows(&s, g), (0, 0));
+}
+
+#[tokio::test]
+async fn three_admins_must_all_agree() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Cy", "Di"], 3).await;
+    assert_eq!(
+        cs[0].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Waiting { yes: 1, needed: 3 }
+    );
+    settle_all(&mut cs).await;
+    assert!(texts(&cs[3], g).contains(&"Ada asked to close this room.".to_string()));
+    let ev = drain(&mut cs[3]).await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::CloseVote { group, view }
+            if *group == g && view.yes == 1 && view.needed == 3 && view.asked_by == "Ada")),
+        "{ev:?}"
+    );
+    assert_eq!(
+        cs[1].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Waiting { yes: 2, needed: 3 }
+    );
+    settle_all(&mut cs).await;
+    assert!(texts(&cs[0], g).contains(&"Bo agreed to close this room.".to_string()));
+    assert!(cs[0].test_traces(g).contains(&"close_votes"));
+    assert_eq!(
+        cs[2].vote_close(g, false).await.unwrap(),
+        CloseOutcome::Kept
+    );
+    settle_all(&mut cs).await;
+    let view = cs[0].close_state(g).unwrap();
+    assert!(view.kept, "{view:?}");
+    assert_eq!((view.yes, view.no, view.needed, view.admins), (2, 1, 3, 3));
+    assert_eq!(view.my_vote, Some(true));
+    assert_eq!(cs[0].details(g).await.unwrap().close, Some(view));
+    let t = texts(&cs[3], g);
+    assert!(
+        t.iter()
+            .any(|l| l.contains("Cy wants to keep this room open.")),
+        "{t:?}"
+    );
+    assert!(
+        t.iter()
+            .any(|l| l.contains("This room stays open: too few admins agreed to close it.")),
+        "{t:?}"
+    );
+    for (i, c) in cs.iter_mut().enumerate() {
+        c.send_text(g, &format!("still here {i}")).await.unwrap();
+    }
+    settle_all(&mut cs).await;
+    for c in &cs {
+        assert_eq!(summary(c, g).ended, None);
+        assert!(texts(c, g).contains(&"still here 3".to_string()));
+    }
+    assert_eq!(server_rows(&s, g).0, 1);
+}
+
+#[tokio::test]
+async fn four_admins_need_three() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Cy", "Di", "Ed"], 4).await;
+    assert_eq!(
+        cs[0].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Waiting { yes: 1, needed: 3 }
+    );
+    settle_all(&mut cs).await;
+    assert_eq!(
+        cs[1].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Waiting { yes: 2, needed: 3 }
+    );
+    settle_all(&mut cs).await;
+    assert_eq!(
+        cs[2].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Closed
+    );
+    settle_all(&mut cs).await;
+    for c in cs.iter_mut() {
+        closed_for(c, g);
+        let ev = drain(c).await;
+        assert!(warnings(&ev).is_empty(), "{ev:?}");
+    }
+    for c in [&cs[0], &cs[1], &cs[3], &cs[4]] {
+        assert!(texts(c, g).contains(&"Cy closed this room.".to_string()));
+    }
+    assert_eq!(server_rows(&s, g), (0, 0));
+}
+
+#[tokio::test]
+async fn member_cannot_close() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Cy", "Di"], 3).await;
+    let before = newest_seq(&cs[0], g);
+    let err = cs[3].vote_close(g, true).await.unwrap_err();
+    assert_eq!(err.to_string(), "Only admins can close this room.");
+    settle_all(&mut cs).await;
+    assert_eq!(newest_seq(&cs[0], g), before);
+    assert_eq!(cs[0].close_state(g), None);
+}
+
+#[tokio::test]
+async fn forged_close_without_votes_changes_nothing() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Cy", "Di"], 3).await;
+    cs[0]
+        .test_send_app(g, &AppMsg::Closed { close_id: [7; 16] })
+        .await
+        .unwrap();
+    // A vote from someone who is not an admin does not count either.
+    cs[3]
+        .test_send_app(
+            g,
+            &AppMsg::CloseVote {
+                close_id: [8; 16],
+                yes: true,
+            },
+        )
+        .await
+        .unwrap();
+    settle_all(&mut cs).await;
+    for c in cs.iter_mut() {
+        assert_eq!(summary(c, g).ended, None, "{}", c.display_name());
+        assert_eq!(c.close_state(g), None, "{}", c.display_name());
+        let t = texts(c, g);
+        assert!(!t.iter().any(|l| l.contains("close")), "{t:?}");
+        // Not even stored.
+        assert!(!c.test_traces(g).contains(&"close_votes"));
+        let ev = drain(c).await;
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, Event::Closed { .. } | Event::Left { .. })),
+            "{ev:?}"
+        );
+    }
+    cs[1].send_text(g, "still open").await.unwrap();
+    settle_all(&mut cs).await;
+    assert!(texts(&cs[2], g).contains(&"still open".to_string()));
+    assert_eq!(server_rows(&s, g).0, 1);
+}
+
+#[tokio::test]
+async fn two_admins_finish_at_once_closes_once() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Cy", "Di", "Ed"], 4).await;
+    assert_eq!(
+        cs[0].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Waiting { yes: 1, needed: 3 }
+    );
+    settle_all(&mut cs).await;
+    for c in cs.iter_mut() {
+        drain(c).await;
+    }
+    {
+        let (left, right) = cs.split_at_mut(2);
+        let (bo, cy) = (&mut left[1], &mut right[0]);
+        let (rb, rc) = tokio::join!(bo.vote_close(g, true), cy.vote_close(g, true));
+        rb.unwrap();
+        rc.unwrap();
+        // Each now sees three yes votes, its own among them: both finish
+        // the close at the same moment.
+        let (sb, sc) = tokio::join!(bo.sync(), cy.sync());
+        sb.unwrap();
+        sc.unwrap();
+    }
+    settle_all(&mut cs).await;
+    for c in cs.iter_mut() {
+        closed_for(c, g);
+        let ev = drain(c).await;
+        assert!(warnings(&ev).is_empty(), "{}: {ev:?}", c.display_name());
+    }
+    assert_eq!(server_rows(&s, g), (0, 0));
+}
+
+#[tokio::test]
+async fn member_away_during_close_learns_on_return() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo", "Di"], 1).await;
+    cs[0].send_text(g, "see you").await.unwrap();
+    settle_all(&mut cs).await;
+    let di = cs.pop().unwrap().reopen_later();
+    assert_eq!(
+        cs[0].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Closed
+    );
+    settle_all(&mut cs).await;
+    let mut di = di.open().await;
+    di.sync().await.unwrap();
+    let ev = drain(&mut di).await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Left { group, .. } if *group == g)),
+        "{ev:?}"
+    );
+    assert_eq!(summary(&di, g).ended, Some(Ended::Removed));
+    assert!(texts(&di, g).contains(&"see you".to_string()));
+    di.mark_seen(g).unwrap();
+    assert_eq!(di.purge_read(None), vec![g]);
+    assert!(di.test_traces(g).is_empty(), "{:?}", di.test_traces(g));
+}
+
+#[tokio::test]
+async fn close_on_protocol_1_server_posts_nothing() {
+    let s = TestServer::start_with(|c| c.protocol_max = 1).await;
+    let (g, mut a, mut b) = pair(&s).await;
+    let before = texts(&b, g);
+    let err = a.vote_close(g, true).await.unwrap_err();
+    assert!(
+        matches!(err, CoreError::Net(NetError::Unsupported { .. })),
+        "{err:?}"
+    );
+    settle(&mut [&mut a, &mut b]).await;
+    assert_eq!(texts(&b, g), before);
+    assert_eq!(a.close_state(g), None);
+}
+
+#[tokio::test]
+async fn close_request_expires() {
+    let s = TestServer::start().await;
+    let (g, mut cs) = room_of(&s, &["Ada", "Bo"], 2).await;
+    assert_eq!(
+        cs[0].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Waiting { yes: 1, needed: 2 }
+    );
+    settle_all(&mut cs).await;
+    let asked = cs[1].close_state(g).expect("Bo sees Ada's request");
+    cs[1].advance_clock(CLOSE_ASK_SECS + 60);
+    assert_eq!(cs[1].close_state(g), None);
+    let err = cs[1].vote_close(g, false).await.unwrap_err();
+    assert_eq!(err.to_string(), "Nobody has asked to close this room.");
+    assert_eq!(
+        cs[1].vote_close(g, true).await.unwrap(),
+        CloseOutcome::Waiting { yes: 1, needed: 2 }
+    );
+    let fresh = cs[1].close_state(g).unwrap();
+    assert_ne!(fresh.close_id, asked.close_id);
+    assert_eq!(fresh.asked_by, "Bo");
+    assert_eq!(fresh.my_vote, Some(true));
+}
+
+#[tokio::test]
+async fn member_whose_app_was_waiting_sees_the_close() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    drain(&mut b).await;
+    assert_eq!(a.vote_close(g, true).await.unwrap(), CloseOutcome::Closed);
+    // The chat screen waits for the server's push, then syncs.
+    assert_eq!(
+        b.wait(std::time::Duration::from_secs(5)).await,
+        socketchat_core::client::Wake::Push
+    );
+    b.sync().await.unwrap();
+    assert_eq!(summary(&b, g).ended, Some(Ended::Closed));
+    assert!(texts(&b, g).contains(&"Ada closed this room.".to_string()));
 }

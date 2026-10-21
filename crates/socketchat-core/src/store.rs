@@ -209,6 +209,14 @@ CREATE TABLE IF NOT EXISTS ended_names (
     name TEXT NOT NULL,
     PRIMARY KEY (group_id, group_key)
 );
+CREATE TABLE IF NOT EXISTS close_votes (
+    group_id BLOB NOT NULL,
+    close_id BLOB NOT NULL,
+    voter BLOB NOT NULL,
+    yes INTEGER NOT NULL,
+    at_unix INTEGER NOT NULL,
+    PRIMARY KEY (group_id, close_id, voter)
+);
 CREATE TABLE IF NOT EXISTS ended_rooms (
     group_id BLOB PRIMARY KEY,
     name TEXT NOT NULL,
@@ -227,6 +235,7 @@ pub const ROOM_STATE_TABLES: &[&str] = &[
     "files",
     "owed_proofs",
     "expected_joiners",
+    "close_votes",
 ];
 
 /// Tables holding a room's history, each keyed by `group_id`. An ended
@@ -334,6 +343,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("groups", "announced_version", "TEXT"),
     ("groups", "seen_seq", "INTEGER NOT NULL DEFAULT 0"),
     ("groups", "muted", "INTEGER NOT NULL DEFAULT 0"),
+    ("groups", "closing", "BLOB"),
     ("pending_joins", "key_package_refs", "BLOB"),
 ];
 
@@ -1431,6 +1441,89 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// Keeps an admin's vote on a request to close. A newer vote from the
+    /// same voter replaces the older and keeps the time of the first.
+    pub fn add_close_vote(
+        &self,
+        g: &GroupId,
+        close_id: &[u8; 16],
+        voter: &Key,
+        yes: bool,
+        at_unix: u64,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT INTO close_votes (group_id, close_id, voter, yes, at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(group_id, close_id, voter) DO UPDATE SET yes = excluded.yes",
+            params![
+                g.0.as_slice(),
+                close_id.as_slice(),
+                voter.0.as_slice(),
+                yes,
+                at_unix as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A room's votes on closing it, in the order they first arrived.
+    pub fn close_votes(&self, g: &GroupId) -> Result<Vec<crate::close::Vote>, CoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT close_id, voter, yes, at_unix FROM close_votes
+             WHERE group_id = ?1 ORDER BY rowid",
+        )?;
+        let rows = st.query_map([g.0.as_slice()], |r| {
+            let id: Vec<u8> = r.get(0)?;
+            let voter: Vec<u8> = r.get(1)?;
+            Ok((id, voter, r.get::<_, bool>(2)?, r.get::<_, i64>(3)? as u64))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, voter, yes, at_unix) = row?;
+            if let (Ok(close_id), Some(voter)) = (id.try_into(), key_col(Some(voter))) {
+                out.push(crate::close::Vote {
+                    close_id,
+                    voter,
+                    yes,
+                    at_unix,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Records a `Closed` message this app knows of: request `close_id`,
+    /// sent by `by` (this member's own key when it is finishing the close).
+    /// Stored in `groups.closing` as the 16-byte request ID then the
+    /// 32-byte key.
+    pub fn set_closing(&self, g: &GroupId, close_id: &[u8; 16], by: &Key) -> Result<(), CoreError> {
+        let mut blob = close_id.to_vec();
+        blob.extend_from_slice(&by.0);
+        self.conn.execute(
+            "UPDATE groups SET closing = ?1 WHERE id = ?2",
+            params![blob, g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// The `Closed` message this app knows of in a room, if any.
+    pub fn closing(&self, g: &GroupId) -> Result<Option<([u8; 16], Key)>, CoreError> {
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT closing FROM groups WHERE id = ?1",
+                [g.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(blob.and_then(|b| {
+            let id: [u8; 16] = b.get(..16)?.try_into().ok()?;
+            let by = key_col(Some(b.get(16..)?.to_vec()))?;
+            Some((id, by))
+        }))
     }
 
     /// True once, the first time the expected joiner introduces themselves.
