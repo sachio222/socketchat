@@ -40,6 +40,14 @@ cargo deny check
 
 `cargo deny` checks dependencies for known vulnerabilities, licenses and sources, using `deny.toml`. Install it with `cargo install cargo-deny`.
 
+When a pull request changes `Cargo.lock` or `scripts/crate-age-allow.txt`, continuous integration also runs:
+
+```
+sh scripts/crate-age-check.sh
+```
+
+It fails when `Cargo.lock` holds a library released less than 30 days ago, unless `scripts/crate-age-allow.txt` names that exact version with the reason. It asks crates.io about one library a second, so a full run takes several minutes. `sh scripts/crate-age-check.sh --since <an older Cargo.lock>` checks only the versions that file does not have.
+
 ## Crate map
 
 | Crate | Job |
@@ -77,7 +85,7 @@ If you are unsure, open an issue before you write the code.
 
 ## Dependencies
 
-- A new crate, or a new version of one, must be at least 30 days old and widely used, with active maintainers.
+- A new crate, or a new version of one, must be at least 30 days old and widely used, with active maintainers. `sh scripts/crate-age-check.sh` checks the age (see "Lint").
 - Pin versions in the workspace `Cargo.toml` and say in the pull request why the crate is needed.
 - Flag any crate that runs code at build time beyond normal compiling, fetches anything over the network while building, or adds native libraries.
 - `cargo deny check` must pass. An advisory may be ignored in `deny.toml` only with a written reason that explains why it does not apply.

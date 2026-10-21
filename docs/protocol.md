@@ -11,14 +11,16 @@ This document describes what socketchat v4.0 sends between app and server, for c
 
 ## Hello
 
-The first frame from the app must be `Hello { version }`. The protocol number in v4.0 is 1.
+The first frame from the app must be `Hello { version }`, with the newest protocol number the app speaks. socketchat 0.5.0 speaks protocol 2, and 0.4.0 speaks only protocol 1. A 0.5.0 server serves both.
 
 - `HelloOk { version }`: the server speaks this version; requests may follow.
-- `VersionMismatch { server }`: the server speaks another version and closes the connection.
+- `VersionMismatch { server }`: the server does not serve this version. `server` is the newest one it does, and the server closes the connection. When that number is at least 1 and lower than the app's own, the app connects once more and says Hello with it, so a 0.5.0 app talks to a 0.4.0 server over protocol 1. Any other number ends the attempt with "the server speaks protocol N; update socketchat".
 - `Busy(Full)`: the server already serves `max_connections` connections (1,000 by default) and closes the connection.
 - `Busy(Network)`: the connection's address already holds `max_per_ip` connections (256 by default; an IPv6 address counts by its /64 network) and the server closes the connection. While 64 such connections are already being turned away, the server drops the next one before TLS instead.
 
 The app shows a `Busy` reply as "this server is full right now; try again in a few minutes" or "this server has too many connections from your network right now; try again in a few minutes".
+
+Every request needs protocol 1 or later, and the ones marked "Protocol 2" in the table below need protocol 2. An app does not send a request newer than its connection's version. It tells the person "this server runs an older version of socketchat that can't do that yet; ask the person who runs it to update it" and carries on with everything else. A server that gets such a request anyway answers `Refused("this server needs a newer app for that")`. A protocol-1 connection never gets a frame that 0.4.0 cannot decode: the responses added in protocol 2 answer only protocol-2 requests, and pushes are unchanged.
 
 The server also closes the connection, without a reply, when the first frame is anything else or when no Hello arrives within 10 seconds. Later it closes a connection that sends nothing for 5 minutes. Each connection may have at most 2 MiB of replies and pushes waiting to be written. The server handles the next request only once there is room for the largest reply, and closes the connection when a push would not fit. A write that makes no progress for 30 seconds also closes it, so a client that stops reading frees its slot. Apps reconnect when they next need the server and fetch what they missed.
 
@@ -50,6 +52,10 @@ Most requests need the connection to have signed in with a key first, through `C
 | `FileEnd { file }` | Marks an upload complete once every chunk has arrived. |
 | `FileGet { file, index }` | Downloads one sealed chunk, for group members. |
 | `FileDone { file }` | Says this mailbox has saved the file. When every member except the sender has, the server deletes it. |
+| `ListInvites { server_tokens }` | Protocol 2. Lists the open invite links that this connection's keys made into groups, plus the open server links named in `server_tokens`. The server keeps no record of who made a server link, so the app remembers its own and names them here. A request names at most 100 (more is refused with "ask about at most 100 links at a time"), so an app with more asks in chunks of 100. The reply holds at most 500 links. |
+| `CancelInvite { token }` | Protocol 2. Deletes an open link: a group link one of this connection's keys made, or a server link while the connection is signed in with an account key. A cancelled server link still counts against the account's server invites. A link that was already used, has expired or was cancelled gets `Refused("that link was already used, has expired or was cancelled")`. |
+| `GroupCreated { group }` | Protocol 2. Asks when the group was created on this server. Only members may ask. |
+| `LastLeave { group }` | Protocol 2. The only member leaves, and the server deletes the group in one transaction: its log, the Welcomes waiting for its mailboxes, join requests, invites, mailboxes, files with their chunks, and its OpenMLS state. Refused with "other people are still in this group" while anyone else is in it. |
 
 ### Responses
 
@@ -69,6 +75,8 @@ Most requests need the connection to have signed in with a key first, through `C
 | `File(FileId)` | The ID for a new upload. |
 | `Chunk(Vec<u8>)` | One sealed file chunk. |
 | `Error(String)` | Something failed on the server, or the request made no sense. |
+| `Invites(Vec<InviteInfo>)` | Protocol 2. Answers `ListInvites`: each link's token, its group (none for a server link) and its expiry, oldest expiry first. |
+| `GroupCreated { created_unix }` | Protocol 2. Answers `GroupCreated` with the time the server stored the group. |
 
 ### Sealed voucher
 
@@ -130,6 +138,42 @@ Numbers in parentheses are byte lengths.
 - **Invite proof:** HMAC-SHA256 under the proof key, over group ID (16) ‖ the joiner's group key (32). The joiner posts it in the group as `AppMsg::InviteProof`; the inviter's app checks it before marking the joiner verified.
 - **KeyPackage bundle:** a postcard-encoded list of TLS-encoded KeyPackages, one per allowed suite (0x004F, then 0x0001). The member who adds the joiner picks the one matching the group's suite.
 - **Admin list:** GroupContext extension type `0xff00`, a run of entries, each a 2-byte big-endian length of 32 followed by a 32-byte Ed25519 key.
-- **Application messages:** inside MLS PrivateMessages, the postcard-encoded `AppMsg` enum from `crates/socketchat-core/src/appmsg.rs`.
+- **Application messages:** inside MLS PrivateMessages, the postcard-encoded `AppMsg` enum from `crates/socketchat-core/src/appmsg.rs` (see "Application messages" below).
 - **Voucher on the wire:** sealed for the joiner, as described under "Sealed voucher".
 - **Safety number:** built the way Signal's numeric fingerprint (version 1) builds its digits. For each of the two identity keys, start from a 2-byte zero, the key, and the key again; then 5,200 times, replace that value with SHA-512 of the value followed by the key. Read the first 30 bytes as six 5-byte big-endian numbers, each modulo 100,000 and written as 5 digits. The two 30-digit halves are sorted and joined into 60 digits, so both people see the same number.
+
+## Application messages
+
+Everything members send each other inside a group travels as one `AppMsg` value per MLS application message, encoded with postcard. Postcard writes an enum variant as its number, counted from 0 in the order below, followed by its fields.
+
+| # | Variant | What it carries |
+|---|---|---|
+| 0 | `Text { body }` | A chat message. |
+| 1 | `Profile { display_name, binding }` | The sender's display name, and a `Binding`: the group ID, the sender's group key, their identity key, and the identity key's signature over the group key (context `socketchat/v1/group-key-binding`). |
+| 2 | `GroupName { name }` | The room's name. Apps take a new name from an admin, and from any member while they have no name for the room, which is how a newcomer learns it. |
+| 3 | `Voucher { voucher, request_key, seal_key }` | An invite link's signed voucher, the public half of the request key, and the seal key (see "Other formats"). |
+| 4 | `File(FileOffer)` | A file offer: file ID, name, size, media type, SHA-256 of the plaintext, the file key and the 19-byte nonce prefix. |
+| 5 | `IsDm` | Marks the group as a two-person direct message. |
+| 6 | `DmRequest { to, group, token, dm_key }` | Asks the member whose group key is `to` to open a direct message in the new group `group`. `token` registers their mailbox there, and `dm_key` is the asker's key in the new group. |
+| 7 | `DmAccept { to, group, token, key_packages }` | Answers a `DmRequest` with a KeyPackage bundle for the new group. |
+| 8 | `InviteProof { token, proof }` | A joiner's proof that they hold the invite link `token` belongs to (see "Other formats"). |
+| 9 | `Extension(Extension)` | A message for an add-on or another program, described below. |
+| 10 | `AppInfo { app_version }` | The socketchat version the sender runs. Apps keep at most 32 characters of it. Each app sends it once to every room that has not heard its current version, and again after someone joins. |
+| 11 | `CloseVote { close_id, yes }` | An admin's vote on closing the room. `close_id` is 16 random bytes that name one request to close: the first yes starts a request, and later votes name it. |
+| 12 | `Closed { close_id }` | Request `close_id` passed, and the sender is closing the room. |
+
+Variants 9 to 12 are new in socketchat 0.5.0.
+
+- **Skip rule.** An app ignores an application message it cannot decode. socketchat 0.4.0 cannot decode variants 9 to 12, so it skips them and shows nothing.
+- **Append-only rule.** New variants go at the end of the enum, and an existing variant's fields never change, so an older app still decodes every variant it knows.
+- **Closing.** Apps count a `CloseVote` or a `Closed` only from an admin still in the room, and only each admin's newest vote on a request. A request passes when enough admins say yes: every admin when the room has up to 3, and `n / 2 + 1` of `n` admins above that. It ends without closing once too many say no for the rest to reach that number, or 7 days after its first vote. Every admin whose yes is in a passed count finishes the close: it posts `Closed`, removes everyone else with one Commit, then sends `LastLeave`. Racing Commits resolve through the server's epoch check.
+
+An `Extension` carries:
+
+- `namespace`: names the add-on. 1 to 32 bytes of `a-z`, `0-9` and `-`.
+- `kind`: the sort of message. 1 to 32 bytes of `a-z`, `0-9`, `.`, `_` and `-`.
+- `version`: a 16-bit number for the layout of `body`, which the add-on defines.
+- `body`: bytes for the add-on. The whole encrypted message must fit the server's limit of 1,047,552 bytes.
+- `summary`: an optional line for people. Apps clean it the way they clean message text, put it on one line, cut it at 200 characters, and drop it when nothing is left. The chat shows the summary as a line from its sender; a message without one shows nothing.
+
+An app refuses to send an `Extension` whose namespace or kind breaks these rules, and ignores any such `Extension` it receives.

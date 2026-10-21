@@ -23,7 +23,9 @@ The server never holds a key that can read messages, files, display names or gro
 - Every group change. Commits and proposals travel signed but unencrypted, so the server can check them (see below).
 - Each person's server account key, which lets them create groups. Stored records do not connect it to any group.
 - The size and timing of every encrypted message and file, and which mailbox uploaded each file.
-- IP addresses of connected apps. An app signs in with all of its keys for a server on one connection, so an operator watching live traffic can link one person's mailboxes through their IP address and connection, even though stored records cannot.
+- IP addresses of connected apps. An app signs in with all of its keys for a server on one connection, so an operator watching live traffic can link one person's mailboxes through their IP address and connection, even though stored records cannot. An app asks for its list of open invite links on that same connection, and the server keeps no record of the question.
+- Each connection's protocol version, which tells apps on 0.4.0 (protocol 1) from newer ones (protocol 2).
+- When a room ends. Closing a room shows as an admin's Commit that removes everyone else, followed by that admin leaving. When the last member of a room leaves with 0.5.0 or later, the server deletes everything it holds for that room at once: its log, the Welcomes waiting for its mailboxes, its mailboxes, invite links, join requests, files and group state. Its hourly sweep also deletes rooms with no members. The votes to close travel encrypted, so the server never sees them.
 
 Stored rows also carry creation times. Someone holding the server database can sometimes guess a link from times alone, for example an account and a mailbox registered in the same second when a new person joins with a group invite.
 
@@ -41,6 +43,21 @@ The server delivers each encrypted message to the mailboxes in a group, so it ha
 The server cannot check the encrypted parts of a Commit, the new keys it hands each member. A buggy or hostile app can still send a Commit that passes the server's checks but that some members cannot apply. Those members fall out of step: they stop being able to read the group. Their app says so ("This chat fell out of step. Ask an admin to remove you and invite you again.") instead of going quiet, and an admin can remove them and invite them again.
 
 socketchat limits what that knowledge reveals. Group keys and mailboxes are per group, so the database shows separate groups of random keys. Names, group names and identity keys travel only inside encrypted messages or the sealed voucher. Retention is short and set by the operator. The server database overwrites deleted rows and cleared fields with zeros (SQLite's `secure_delete`), so expired messages and the name of a used invite's maker do not linger in free pages. Hiding membership from the server completely is the first item in [ROADMAP.md](ROADMAP.md).
+
+## What stays on your computer
+
+socketchat keeps its data in one encrypted profile on your computer (see "Local data" under "Cryptography").
+
+- **Rooms you are in** keep their messages, files list, member list and keys there.
+- **When you leave a room, are removed from it or it closes,** socketchat deletes its keys and group state at once, with its member list, files list and your record of invite links into it. Its messages and add-on messages go once you have read them:
+  - When you leave with everything read, they go at once. The chat screen first shows any messages you have not read and asks you to type `/leave` again.
+  - When you were removed or the room closed, they go when you open another room or quit socketchat.
+  - A room with messages you have not read keeps its messages until you read them, and 30 days at the latest. The names of the people who wrote those messages stay with them until they go.
+- **`/clear`** deletes a room's messages from your computer while you stay in it.
+- **Spare join keys.** A join request carries a KeyPackage for each allowed suite. Once you join, socketchat deletes the ones the join did not use, with their private keys.
+- **Deleted rows are overwritten** inside the encrypted file (SQLite's `secure_delete`). socketchat then clears old copies of them out of the profile's log file (SQLite's write-ahead log). If the profile is busy at that moment, old copies can stay in that log file until a later tidy-up, and the app warns when that happens.
+- **Files you saved** stay where you saved them.
+- **Rooms you left with 0.4.0** lose their history when 0.5.0 first opens the profile.
 
 ## Cryptography
 
@@ -60,7 +77,10 @@ socketchat limits what that knowledge reveals. Group keys and mailboxes are per 
 ## What socketchat does not protect
 
 - **Metadata.** The server sees sizes, timing, IP addresses and each group's list of random keys, as described above.
-- **What happens after delivery.** Receivers can save, copy, screenshot or forward anything you send. Deleting a file removes your copy only.
+- **What happens after delivery.** Receivers can save, copy, screenshot or forward anything you send. Deleting messages or a file removes your copy only.
+- **Other people's copies of a room.** Deletion happens in each person's own app. A member on 0.4.0, or a changed app, keeps its copy of the history, and anyone can copy or photograph a screen.
+- **Closing against one admin's wishes.** Closing asks the admins to agree inside their apps, and the server checks admin rights, not votes, so one admin can still remove members one by one.
+- **What add-ons send.** Messages from add-ons and other programs are end-to-end encrypted like text. socketchat checks only their namespace and kind, stores them, and shows their summary line when they carry one. What the rest of a message says, and what an add-on does with it, is up to that add-on.
 - **Video location data.** socketchat removes location and device data from JPEG, PNG and WebP photos. It does not remove them from videos, and asks before sending one. See [docs/files-photos-videos.md](docs/files-photos-videos.md).
 - **An unlocked device.** If someone gets your computer while socketchat is open, or learns your passphrase, they get your identity key and your messages. Do not put `SOCKETCHAT_PASSPHRASE` in a shell profile on a shared machine.
 - **A stolen identity key.** Whoever holds it can pose as you. The identity key never decrypts messages. v4.0 has no command to replace an identity key. If yours is exposed, ask an admin to remove you, set up a fresh profile, join again through new invites, and compare safety numbers with your contacts again.

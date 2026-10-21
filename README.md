@@ -8,7 +8,8 @@ What you get:
 - Invite links, shown as text and as a QR code.
 - Verification with safety numbers, so you can check that nobody sits between you and a friend.
 - Files, photos and videos. Photos lose their location and device data before they leave.
-- Admins, who can remove people and make other admins.
+- Admins, who can remove people, make other admins and rename a room. A room closes for everyone once its admins agree.
+- Room history that leaves your computer once you are out of the room and have read it.
 - Post-quantum protection, meaning protection against a future quantum computer, on by default.
 - A server that cannot read your messages.
 
@@ -101,7 +102,11 @@ The chat screen opens. Start a group and invite a friend:
 socketchat
 ```
 
-Type `/help` in the chat screen to see every command. [docs/running-a-server.md](docs/running-a-server.md) covers a server that runs all the time.
+Type `/help` in the chat screen to see every command. `/switch` opens another room, and Tab completes its name. `/details` shows a room's admins, size and age, `/mute` hides its new-message count, and `/invites` lists the invite links you made that still work. Admins rename a room with `/title` and ask to close it with `/close`. [docs/running-a-server.md](docs/running-a-server.md) covers a server that runs all the time.
+
+## What leaving and closing delete
+
+When you leave a room, are removed from it or it closes, socketchat deletes the room's keys from your computer at once. Its messages go once you have read them. After your own leave they go at once; after a removal or a close they go when you open another room or quit. Messages you have not read stay until you read them, 30 days at most. `/clear` deletes a room's messages from your computer while you stay in it. Deletion happens in each person's own app, so other members keep their copies, and anyone can photograph a screen. On a 0.5.0 server, the server deletes everything it holds for a room once the last person leaves or an admin closes it. [SECURITY.md](SECURITY.md) has the details.
 
 ## Screenshots
 

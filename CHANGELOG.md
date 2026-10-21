@@ -2,28 +2,21 @@
 
 Each release of socketchat has a section here. Version numbers follow [Semantic Versioning](https://semver.org): the first number changes when something stops working the old way, the second for new features, the third for fixes.
 
-## Unreleased
+## 0.5.0 - 2026-10-21
 
-- Planned for 0.5.0 (see [ROADMAP.md](ROADMAP.md)): rename and close rooms (closing needs the admins to agree), a `/switch` command with Tab completion, history that is deleted when you leave or a room closes, and a way to see and cancel invite links you sent.
-- A check now keeps libraries released less than 30 days ago out of `Cargo.lock`; run it with `sh scripts/crate-age-check.sh`. 47 libraries went back to older releases. `openmls` 0.9.1 stays, because socketchat pins that exact version.
-- A 0.5.0 server still serves apps on 0.4.0, so you can update the server first.
-- A 0.5.0 app still works with a server on 0.4.0. A feature that needs a newer server says so and leaves the rest of the app alone.
-- Rooms now carry messages from add-ons and other programs. Each shows as a one-line summary, and apps on 0.4.0 skip them. Each app also tells its rooms which version it runs.
-- Admins can rename a room for everyone, and the room shows who renamed it.
-- Unread counts stay right after you close and reopen the app. Anything you had before this update counts as read.
-- A room can be muted on your own computer. Nobody else sees that you muted it.
-- Room details show the admins, how many people are in the room and when it was made. A server on 0.4.0 cannot say when, so that line is left out.
-- When you leave a room, are removed from it or it closes, socketchat deletes the room's keys from your computer at once. Its messages go as soon as you have read them, and anything unread goes after 30 days.
-- socketchat turns on SQLite's `secure_delete`, so deleted rows are overwritten inside your encrypted profile.
-- Rooms you left with 0.4.0 lose their history the first time 0.5.0 opens your profile.
-- You can delete a room's messages from your computer and stay in the room.
-- An ended room's unread messages still show who wrote them.
-- Joining a room no longer leaves spare keys from the join request on your computer.
-- When the last person leaves a room with 0.5.0, the server deletes everything it holds for that room. Its hourly sweep also removes rooms that have no members.
-- Admins can close a room for everyone once they agree: every admin when the room has up to three, more than half of them when it has more. A room with one admin closes at once. A request to close stays open for seven days.
-- You can see the invite links you made that are still open, and cancel one so it stops working.
-- The chat screen has new commands: `/switch` opens another room (Tab completes its name), `/title` renames the room for everyone, `/close` closes it once its admins agree, `/keep` says no to closing it, `/invites` lists your open invite links, `/cancel` stops one of them, `/mute` and `/unmute` hide and show its new-message count, `/details` shows its admins, size and age, and `/clear` deletes its messages from your computer. `/leave` shows new messages before it asks. A room you were removed from or that closed stays on screen, saying so, until you open another room.
-- `socketchat invites` lists your open invite links and `--cancel <n>` stops one; `socketchat log` now marks the room read.
+This release lets you move between rooms, rename them and close them, deletes a room's history from your computer once you are done with it, and lists the invite links you made that still work. Apps and servers on 0.4.0 still work with 0.5.0.
+
+- **Moving between rooms**: `/switch` opens another room, and Tab completes its name. Unread counts stay right after you close and reopen the app, and `socketchat log` marks the room it prints as read. Anything you had before this update counts as read.
+- **Renaming a room**: admins rename a room for everyone with `/title`, and the room shows who renamed it.
+- **Closing a room**: `/close` asks to close a room for everyone, and the room closes once its admins agree: every admin when the room has up to three, more than half of them when it has more. A room with one admin closes at once. `/keep` says no, and a request to close stays open for seven days.
+- **Room details and muting**: `/details` shows a room's admins, how many people are in it and when it was made. A server on 0.4.0 cannot say when, so that line is left out. `/mute` hides a room's new-message count on your own computer, nobody else sees that you muted it, and `/unmute` shows the count again.
+- **Leaving, removal and closing**: when you leave a room, are removed from it or it closes, socketchat deletes the room's keys from your computer at once. When you leave, its messages go at the same time, and `/leave` first shows any new messages and asks you to type `/leave` again. A room you were removed from or that closed stays on screen, saying so, and its read messages go when you open another room or quit. Unread messages stay until you read them, 30 days at most, and still show who wrote them.
+- **What stays on your computer**: `/clear` deletes a room's messages from your computer while you stay in it. socketchat turns on SQLite's `secure_delete`, so deleted rows are overwritten inside your encrypted profile. Joining a room no longer leaves spare keys from the join request on your computer. Opening 0.5.0 deletes the history of rooms you left with 0.4.0.
+- **Invite links you made**: `/invites` lists the ones that still work, and `/cancel <number>` stops one. From a terminal, `socketchat invites` lists them, and `socketchat invites --cancel <number>` stops one and names the link it cancelled.
+- **Servers delete rooms nobody is in**: when the last person in a room leaves it with 0.5.0, or an admin closes it, a 0.5.0 server deletes everything it holds for that room at once. Its hourly sweep also deletes rooms that have no members.
+- **Working with 0.4.0**: apps and servers now use protocol 2, and still use protocol 1 with apps and servers on 0.4.0. A 0.5.0 server serves apps on 0.4.0, so you can update the server first. A 0.5.0 app works with a server on 0.4.0. A feature that needs a newer server says so and leaves the rest of the app alone.
+- **Messages from add-ons and other programs**: rooms now carry them, end-to-end encrypted like text. One that carries a summary line shows it in the chat, and apps on 0.4.0 skip them. Each app also tells its rooms which version it runs.
+- **Dependency check**: `sh scripts/crate-age-check.sh` keeps libraries released less than 30 days ago out of `Cargo.lock`. 47 libraries went back to older releases. `openmls` 0.9.1 stays, because socketchat pins that exact version.
 
 ## 0.4.0 - 2026-10-20
 
