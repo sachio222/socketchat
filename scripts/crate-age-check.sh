@@ -122,7 +122,10 @@ date_of() {
     fi
 }
 
-# versions_of NAME: prints "version date [yanked]" for every release.
+# versions_of NAME: prints "version date [yanked]" for each of the newest 100
+# releases (the first page crates.io returns). If a crate's newest 30-day-old
+# release is further back than that, the "no release in its range is 30 days
+# old yet" message can be wrong; look the crate up by hand before allowing it.
 versions_of() {
     if [ -n "${CRATE_AGE_DATES:-}" ]; then
         awk -v n="$1" '$1 == n { $1 = ""; sub(/^ /, ""); print }' "$CRATE_AGE_DATES"

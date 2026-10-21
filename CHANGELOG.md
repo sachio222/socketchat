@@ -4,11 +4,8 @@ Each release of socketchat has a section here. Version numbers follow [Semantic 
 
 ## Unreleased
 
-- Planned for 0.5.0 (see [ROADMAP.md](ROADMAP.md)): rename and close rooms, where closing needs the admins to agree.
-- Planned for 0.5.0: a `/switch` command with Tab completion.
-- Planned for 0.5.0: history that is deleted when you leave or a room closes.
-- Planned for 0.5.0: a way to see and cancel invite links you sent.
-- A check now keeps libraries released less than 30 days ago out of `Cargo.lock` (run it with `sh scripts/crate-age-check.sh`). Forty-seven too-new libraries went back to older releases, and one (`toml_edit`) is no longer needed. Two stay: `openmls` 0.9.1, because socketchat pins that exact version, and `rustls-webpki` 0.103.16, because it fixes a certificate check flaw (RUSTSEC-2026-0382) that the older release has.
+- Planned for 0.5.0 (see [ROADMAP.md](ROADMAP.md)): rename and close rooms (closing needs the admins to agree), a `/switch` command with Tab completion, history that is deleted when you leave or a room closes, and a way to see and cancel invite links you sent.
+- A check now keeps libraries released less than 30 days ago out of `Cargo.lock`; run it with `sh scripts/crate-age-check.sh`. 47 libraries went back to older releases. `openmls` 0.9.1 stays, because socketchat pins that exact version.
 
 ## 0.4.0 - 2026-10-20
 
