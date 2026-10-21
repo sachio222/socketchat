@@ -302,6 +302,8 @@ struct Hooks {
     announce_version: Option<String>,
     /// The next purge of an ended room's history fails.
     fail_purge: bool,
+    /// The next ending of a room stops after `begin_end`.
+    fail_ending: bool,
 }
 
 enum DmTodo {
@@ -470,34 +472,26 @@ impl Client {
             hooks: Hooks::default(),
         };
         for row in rows {
-            let me = row.key.public();
-            let finished = if row.left {
-                // Left with 0.4.0, which kept everything: it all goes now.
-                // History first, so a stop part way leaves the flag to
-                // finish from.
-                c.store
-                    .purge_room(&row.id)
-                    .and_then(|()| c.store.end_room(&row.id, &me))
-                    .and_then(|()| c.store.checkpoint())
+            // A failure below still opens the profile; the next open tries
+            // again.
+            let what = room_label(&row.name, row.is_dm);
+            if row.left {
+                // Left with 0.4.0, which kept everything: it all goes now,
+                // in one transaction.
+                c.purge_ended(&row.id, &what);
             } else if c.store.is_ended(&row.id)? {
-                // An ending that stopped part way: finish it.
-                c.store
-                    .end_room(&row.id, &me)
-                    .and_then(|()| c.store.checkpoint())
-            } else {
-                if let Some(mls) =
-                    MlsGroup::load(c.prov.storage(), &mls_gid(&row.id)).map_err(mls_err)?
-                {
-                    c.groups.insert(row.id, Live { row, mls });
+                // An ending that stopped part way: finish it. Its history
+                // stays until read.
+                match c.store.end_room(&row.id, &row.key.public()) {
+                    Ok(()) => c.tidy_log(&what),
+                    Err(e) => c.emit(Event::Warning(format!(
+                        "Could not finish deleting {what} from this computer: {e}"
+                    ))),
                 }
-                continue;
-            };
-            if let Err(e) = finished {
-                // The profile still opens; the next open tries again.
-                let what = room_label(&row.name, row.is_dm);
-                c.emit(Event::Warning(format!(
-                    "Could not finish deleting {what} from this computer: {e}"
-                )));
+            } else if let Some(mls) =
+                MlsGroup::load(c.prov.storage(), &mls_gid(&row.id)).map_err(mls_err)?
+            {
+                c.groups.insert(row.id, Live { row, mls });
             }
         }
         c.purge_read(None);
@@ -2245,43 +2239,64 @@ impl Client {
             }
         };
         for e in ended {
+            let what = room_label(&e.name, e.is_dm);
             let expired = now.saturating_sub(e.ended_unix) >= KEEP_UNSEEN_SECS;
-            let r = match self.store.unseen(&e.id) {
-                Ok(n) if expired || (n == 0 && Some(e.id) != keep) => self.purge(&e.id),
-                Ok(_) => continue,
-                Err(err) => Err(err),
-            };
-            match r {
-                Ok(()) => purged.push(e.id),
-                Err(err) => {
-                    let what = room_label(&e.name, e.is_dm);
-                    self.emit(Event::Warning(format!(
-                        "Could not delete the messages of {what}: {err}"
-                    )));
+            match self.store.unseen(&e.id) {
+                Ok(n) if expired || (n == 0 && Some(e.id) != keep) => {
+                    if self.purge_ended(&e.id, &what) {
+                        purged.push(e.id);
+                    }
                 }
+                Ok(_) => {}
+                Err(err) => self.emit(Event::Warning(format!(
+                    "Could not delete the messages of {what}: {err}"
+                ))),
             }
         }
         purged
     }
 
-    /// Deletes an ended room's history.
-    fn purge(&mut self, gid: &GroupId) -> Result<(), CoreError> {
+    /// Deletes everything left of an ended room, keys and group state
+    /// included if its ending stopped part way, then tidies the log.
+    /// Warns on failure. Returns whether the room's rows are gone.
+    fn purge_ended(&mut self, gid: &GroupId, what: &str) -> bool {
         #[cfg(feature = "test-hooks")]
-        if std::mem::take(&mut self.hooks.fail_purge) {
-            return Err(CoreError::Other(
-                "the purge was made to fail for a test".into(),
-            ));
+        let failed = std::mem::take(&mut self.hooks.fail_purge)
+            .then(|| CoreError::Other("the purge was made to fail for a test".into()));
+        #[cfg(not(feature = "test-hooks"))]
+        let failed: Option<CoreError> = None;
+        let r = match failed {
+            Some(e) => Err(e),
+            None => self.store.delete_room(gid),
+        };
+        if let Err(e) = r {
+            self.emit(Event::Warning(format!(
+                "Could not delete the messages of {what}: {e}"
+            )));
+            return false;
         }
-        self.store.purge_room(gid)
+        self.tidy_log(what);
+        true
+    }
+
+    /// Clears old copies of deleted rows out of the profile's log file, and
+    /// says so when it cannot yet.
+    fn tidy_log(&mut self, what: &str) {
+        if let Err(e) = self.store.checkpoint() {
+            self.emit(Event::Warning(format!(
+                "Deleted {what} from this computer, but old copies stay in the profile's log file until it can be cleared: {e}"
+            )));
+        }
     }
 
     /// Deletes a room's messages on this computer only. A live room stays
-    /// live; an ended room goes from the list.
+    /// live; an ended room goes from the list, with anything its ending
+    /// had not deleted yet.
     pub fn clear_history(&mut self, gid: GroupId) -> Result<(), CoreError> {
-        if self.groups.contains_key(&gid) {
-            self.store.clear_history(&gid)
-        } else {
+        if !self.groups.contains_key(&gid) && self.store.is_ended(&gid)? {
             self.store.purge_room(&gid)
+        } else {
+            self.store.clear_history(&gid)
         }
     }
 
@@ -2680,6 +2695,12 @@ impl Client {
             group: gid,
             name: live.row.name.clone(),
         });
+        #[cfg(feature = "test-hooks")]
+        if std::mem::take(&mut self.hooks.fail_ending) {
+            return Err(CoreError::Other(
+                "the ending was made to stop for a test".into(),
+            ));
+        }
         // OpenMLS deletes row by row. Whatever a failure here leaves, the
         // store's transaction below deletes in one go.
         let _ = live.mls.delete(self.prov.storage());
@@ -3151,6 +3172,12 @@ impl Client {
             .filter_map(|b| crate::provider::JsonCodec::from_slice::<KeyPackageBundle>(b).ok())
             .filter(|kb| kb.key_package().leaf_node().signature_key().as_slice() == key.0)
             .count()
+    }
+
+    /// Makes the next ending of a room stop after its first step, with
+    /// the room's keys and group state still on disk.
+    pub fn test_fail_next_ending(&mut self) {
+        self.hooks.fail_ending = true;
     }
 
     /// Makes the next room `purge_read` deletes fail.

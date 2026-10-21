@@ -251,6 +251,23 @@ fn openmls_key(g: &GroupId) -> Result<Vec<u8>, CoreError> {
         .map_err(|e| CoreError::Storage(e.to_string()))
 }
 
+/// Deletes a room's state inside `tx`: its rows in every
+/// [`ROOM_STATE_TABLES`] table, everything OpenMLS holds for it (`mls` is
+/// its key there, from [`openmls_key`]) and its `groups` row.
+fn delete_state(tx: &rusqlite::Transaction, g: &GroupId, mls: &[u8]) -> Result<(), CoreError> {
+    for table in ROOM_STATE_TABLES {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE group_id = ?1"),
+            [g.0.as_slice()],
+        )?;
+    }
+    for table in OPENMLS_GROUP_TABLES {
+        tx.execute(&format!("DELETE FROM {table} WHERE group_id = ?1"), [mls])?;
+    }
+    tx.execute("DELETE FROM groups WHERE id = ?1", [g.0.as_slice()])?;
+    Ok(())
+}
+
 /// How many times [`Store::checkpoint`] tries before it gives up.
 const CHECKPOINT_TRIES: usize = 3;
 
@@ -1267,19 +1284,7 @@ impl Store {
                     OR group_key IN (SELECT sender_group_key FROM extensions WHERE group_id = ?1))",
             params![g.0.as_slice(), me.0.as_slice()],
         )?;
-        for table in ROOM_STATE_TABLES {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE group_id = ?1"),
-                [g.0.as_slice()],
-            )?;
-        }
-        for table in OPENMLS_GROUP_TABLES {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE group_id = ?1"),
-                [mls.as_slice()],
-            )?;
-        }
-        tx.execute("DELETE FROM groups WHERE id = ?1", [g.0.as_slice()])?;
+        delete_state(&tx, g, &mls)?;
         tx.commit()?;
         Ok(())
     }
@@ -1313,11 +1318,14 @@ impl Store {
         Ok(false)
     }
 
-    /// Deletes an ended room's history and its `ended_rooms` row in one
-    /// transaction, then clears the deleted pages out of the write-ahead
-    /// log.
-    pub fn purge_room(&self, g: &GroupId) -> Result<(), CoreError> {
+    /// Deletes everything left of an ended room in one transaction: first
+    /// whatever its ending had not deleted yet (as [`Store::end_room`]
+    /// does), then its history and its `ended_rooms` row. An ended room
+    /// never loses its marker while its keys are still here.
+    pub fn delete_room(&self, g: &GroupId) -> Result<(), CoreError> {
+        let mls = openmls_key(g)?;
         let tx = self.conn.unchecked_transaction()?;
+        delete_state(&tx, g, &mls)?;
         for table in ROOM_HISTORY_TABLES {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE group_id = ?1"),
@@ -1329,6 +1337,13 @@ impl Store {
             [g.0.as_slice()],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// [`Store::delete_room`], then clears the deleted pages out of the
+    /// write-ahead log.
+    pub fn purge_room(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.delete_room(g)?;
         self.checkpoint()
     }
 

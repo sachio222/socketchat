@@ -472,3 +472,39 @@ async fn purge_that_fails_says_so() {
     );
     assert_eq!(b.purge_read(None), vec![g]);
 }
+
+#[tokio::test]
+async fn failed_ending_is_never_undone_by_a_purge() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    a.send_text(g, "one").await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    b.mark_seen(g).unwrap();
+    // The ending stops after its first step, with keys and group state
+    // still on disk.
+    b.test_fail_next_ending();
+    assert!(b.leave(g).await.is_err());
+    let rows: Vec<_> = b.groups().into_iter().filter(|x| x.id == g).collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].ended, Some(Ended::Left));
+    b.mark_seen(g).unwrap();
+    assert_eq!(b.purge_read(None), vec![g]);
+    assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+    assert!(!listed(&b, g));
+    let b = b.reopen().await;
+    assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+    assert!(!listed(&b, g));
+}
+
+#[tokio::test]
+async fn clearing_a_failed_ending_deletes_its_keys_too() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    a.send_text(g, "one").await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    b.test_fail_next_ending();
+    assert!(b.leave(g).await.is_err());
+    b.clear_history(g).unwrap();
+    assert!(b.test_traces(g).is_empty(), "{:?}", b.test_traces(g));
+    assert!(!listed(&b, g));
+}
