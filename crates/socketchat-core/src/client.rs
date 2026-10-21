@@ -251,6 +251,12 @@ struct Live {
 /// member was removed or their leave went through.
 pub const NOT_A_MEMBER: &str = "you are not a member of this group";
 
+/// Most server links one `ListInvites` may ask about.
+const LIST_CHUNK: usize = 100;
+
+/// The server's refusal when a link to cancel is already gone.
+const CANCEL_GONE: &str = "that link was already used, has expired or was cancelled";
+
 /// Largest MLS message the server takes, in bytes: a frame of 1 MiB less
 /// room for the request around it.
 pub const MAX_MLS_BYTES: usize = 1_047_552;
@@ -1401,7 +1407,20 @@ impl Client {
     pub async fn invites(&mut self) -> Result<Vec<InviteView>, CoreError> {
         let mut out = Vec::new();
         for server in self.store.servers()? {
-            let protocol = self.conn(server.id).await?.protocol();
+            let unreachable = |c: &mut Self| {
+                c.emit(Event::Warning(format!(
+                    "{} could not be reached, so its invite links can't be listed here.",
+                    server.host
+                )));
+            };
+            let protocol = match self.conn(server.id).await {
+                Ok(c) => c.protocol(),
+                Err(e @ CoreError::Net(NetError::Unsupported { .. })) => return Err(e),
+                Err(_) => {
+                    unreachable(self);
+                    continue;
+                }
+            };
             if protocol < 2 {
                 self.emit(Event::Warning(format!(
                     "{} runs an older version of socketchat, so its invite links can't be listed here.",
@@ -1415,20 +1434,61 @@ impl Client {
                 .filter(|(_, g, _)| g.is_none())
                 .map(|(t, _, _)| *t)
                 .collect();
-            let Response::Invites(open) = self
-                .request(server.id, Request::ListInvites { server_tokens })
-                .await?
-            else {
-                return Err(CoreError::Net(NetError::Unexpected(
-                    "no invite list".into(),
-                )));
+            // The server takes at most 100 server tokens at a time. Room
+            // links come back with every answer.
+            let chunks: Vec<&[Token]> = if server_tokens.is_empty() {
+                vec![&[]]
+            } else {
+                server_tokens.chunks(LIST_CHUNK).collect()
             };
-            for (token, ..) in &made {
-                if !open.iter().any(|i| i.token == *token) {
+            let mut open: Vec<socketchat_proto::msg::InviteInfo> = Vec::new();
+            let mut answered: HashSet<Token> = HashSet::new();
+            let mut rooms_answered = false;
+            for chunk in chunks {
+                let req = Request::ListInvites {
+                    server_tokens: chunk.to_vec(),
+                };
+                match self.request(server.id, req).await {
+                    Ok(Response::Invites(v)) => {
+                        for i in v {
+                            if !open.iter().any(|o| o.token == i.token) {
+                                open.push(i);
+                            }
+                        }
+                        answered.extend(chunk.iter().copied());
+                        rooms_answered = true;
+                    }
+                    Ok(_) => {
+                        return Err(CoreError::Net(NetError::Unexpected(
+                            "no invite list".into(),
+                        )));
+                    }
+                    Err(e @ CoreError::Net(NetError::Unsupported { .. })) => return Err(e),
+                    Err(_) => {
+                        unreachable(self);
+                        break;
+                    }
+                }
+            }
+            // Forget only links whose question was answered.
+            for (token, group, _) in &made {
+                let was_asked = if group.is_some() {
+                    rooms_answered
+                } else {
+                    answered.contains(token)
+                };
+                if was_asked && !open.iter().any(|i| i.token == *token) {
                     self.store.forget_invite(token)?;
                 }
             }
             for info in open {
+                let label = match info.group {
+                    Some(g) => match self.groups.get(&g) {
+                        Some(l) => l.row.name.clone(),
+                        None => continue,
+                    },
+                    None => "Server invite".to_string(),
+                };
                 // A room link made before this client kept a list.
                 if !made.iter().any(|(t, ..)| *t == info.token) {
                     self.store.save_invite_made(
@@ -1438,13 +1498,6 @@ impl Client {
                         info.expires_unix,
                     )?;
                 }
-                let label = match info.group {
-                    Some(g) => match self.groups.get(&g) {
-                        Some(l) => l.row.name.clone(),
-                        None => continue,
-                    },
-                    None => "Server invite".to_string(),
-                };
                 out.push(InviteView {
                     token: info.token,
                     group: info.group,
@@ -1464,8 +1517,19 @@ impl Client {
                 "That invite link isn't one of yours, or it's already gone.".into(),
             ));
         };
-        self.request(server_id, Request::CancelInvite { token })
-            .await?;
+        match self
+            .request(server_id, Request::CancelInvite { token })
+            .await
+        {
+            Ok(_) => {}
+            // The server no longer has it: used, expired or cancelled
+            // already. This computer stops listing it, and the refusal shows.
+            Err(CoreError::Net(NetError::Refused(why))) if why == CANCEL_GONE => {
+                self.store.forget_invite(&token)?;
+                return Err(CoreError::Net(NetError::Refused(why)));
+            }
+            Err(e) => return Err(e),
+        }
         self.store.forget_invite(&token)
     }
 
@@ -4061,6 +4125,33 @@ impl Client {
             .get(&gid)
             .map(|k| (k.len(), k.values().map(Vec::len).sum()))
             .unwrap_or((0, 0))
+    }
+
+    /// Adds `n` server-link rows the server never made, on the account server.
+    pub fn test_fake_server_links(&mut self, n: usize) {
+        let server_id = self.account_server().expect("account server");
+        for _ in 0..n {
+            let mut t = [0u8; 16];
+            OsRng.fill_bytes(&mut t);
+            self.store
+                .save_invite_made(&Token(t), server_id, None, self.now() + 3600)
+                .expect("save");
+        }
+    }
+
+    /// How many links this client has recorded as made.
+    pub fn test_invite_rows(&self) -> usize {
+        let mut n = 0;
+        for s in self.store.servers().expect("servers") {
+            n += self.store.invites_made_on(s.id).expect("rows").len();
+        }
+        n
+    }
+
+    /// Drops the record of one link, as if it were made before 0.5; the
+    /// voucher for a room link stays.
+    pub fn test_forget_invite_row(&mut self, token: Token) {
+        self.store.drop_invite_made(&token).expect("drop");
     }
 
     /// Makes the next `leave` act as if this person were alone in the room,

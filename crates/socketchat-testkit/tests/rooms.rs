@@ -1433,3 +1433,81 @@ async fn leaving_a_room_drops_its_invite_rows_but_not_server_links() {
     assert_eq!(list.len(), 1, "{list:?}");
     assert_eq!(list[0].token, server_link.token);
 }
+
+#[tokio::test]
+async fn unreachable_server_does_not_blank_the_list() {
+    let s1 = TestServer::start().await;
+    let s2 = TestServer::start().await;
+    let mut a = TestClient::new(&s1, "Ada").await;
+    a.join(&s2.server_invite()).await.unwrap();
+    let (link, _) = a.invite(None, false).await.unwrap();
+    s2.handle.shutdown();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drain(&mut a).await;
+    let rows = a.test_invite_rows();
+    let list = a.invites().await.unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0].token, link.token);
+    let ev = drain(&mut a).await;
+    let w = warnings(&ev);
+    assert_eq!(w.len(), 1, "{ev:?}");
+    assert!(
+        matches!(w[0], Event::Warning(m) if m.ends_with("could not be reached, so its invite links can't be listed here.")),
+        "{ev:?}"
+    );
+    assert_eq!(a.test_invite_rows(), rows);
+}
+
+#[tokio::test]
+async fn more_than_100_server_links_are_asked_in_chunks() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let (real, _) = a.invite(None, false).await.unwrap();
+    a.test_fake_server_links(150);
+    assert_eq!(a.test_invite_rows(), 151);
+    let list = a.invites().await.unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0].token, real.token);
+    assert_eq!(a.test_invite_rows(), 1);
+    assert!(warnings(&drain(&mut a).await).is_empty());
+}
+
+#[tokio::test]
+async fn room_link_made_before_the_list_is_found_and_kept() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let (link, exp) = a.invite(Some(g), false).await.unwrap();
+    a.test_forget_invite_row(link.token);
+    assert_eq!(a.test_invite_rows(), 0);
+    let list = a.invites().await.unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0].expires_unix, exp);
+    assert_eq!(a.test_invite_rows(), 1);
+}
+
+#[tokio::test]
+async fn cancel_finds_a_room_link_by_its_voucher() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Crew").await.unwrap();
+    let (link, _) = a.invite(Some(g), false).await.unwrap();
+    a.test_forget_invite_row(link.token);
+    a.cancel_invite(link.token).await.unwrap();
+    assert!(a.invites().await.unwrap().is_empty());
+    let mut b = TestClient::profile_only("Bo").await;
+    assert!(b.join(&link).await.is_err());
+}
+
+#[tokio::test]
+async fn cancelling_a_gone_link_forgets_it_here() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let (link, _) = a.invite(None, false).await.unwrap();
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    assert_eq!(a.test_invite_rows(), 1);
+    let err = a.cancel_invite(link.token).await.unwrap_err();
+    assert!(err.to_string().contains("already used"), "{err}");
+    assert_eq!(a.test_invite_rows(), 0);
+}

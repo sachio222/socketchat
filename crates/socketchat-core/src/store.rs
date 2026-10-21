@@ -1160,6 +1160,15 @@ impl Store {
             .optional()?)
     }
 
+    /// Drops the record of a link, keeping its voucher.
+    pub fn drop_invite_made(&self, token: &Token) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM invites_made WHERE token = ?1",
+            [token.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
     /// Forgets a link this client made, and the voucher kept for it.
     pub fn forget_invite(&self, token: &Token) -> Result<(), CoreError> {
         self.conn.execute(
