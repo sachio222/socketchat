@@ -14,7 +14,7 @@ use rand_core::{OsRng, RngCore};
 use socketchat_proto::msg::{Entry, Push, Request, Response, WelcomeIn, WelcomeOut};
 use socketchat_proto::{InviteLink, Token};
 
-use crate::appmsg::AppMsg;
+use crate::appmsg::{AppMsg, Extension};
 use crate::invite::{join_sig, key_package_blob, pick_key_package, signed_key_package_blob};
 use crate::keys::{
     fingerprint, invite_proof, invite_signing_key, join_request_ok, open_voucher, proof_matches,
@@ -33,7 +33,11 @@ pub mod kind {
     pub const TEXT: i64 = 0;
     pub const NOTICE: i64 = 1;
     pub const FILE: i64 = 2;
+    pub const EXTENSION: i64 = 3;
 }
+
+/// The app version this build announces to its rooms.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// "12 KB", "3.4 MB": sizes for people.
 pub fn human_size(n: u64) -> String {
@@ -89,6 +93,18 @@ pub struct MemberView {
     pub verified: bool,
     pub admin: bool,
     pub me: bool,
+    /// The app version this member said they run. `None` means they never
+    /// said, so treat them as 0.4.0.
+    pub app_version: Option<String>,
+}
+
+/// An extension message as stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionRow {
+    pub seq: u64,
+    pub sender_key: Key,
+    pub ext: Extension,
+    pub sent_unix: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,6 +145,13 @@ pub enum Event {
     FileOffered {
         group: GroupId,
         file: crate::files::FileOffer,
+    },
+    /// A message for an add-on arrived (and is stored).
+    Extension {
+        group: GroupId,
+        seq: u64,
+        sender_key: Key,
+        ext: Extension,
     },
     Warning(String),
     Disconnected,
@@ -221,6 +244,9 @@ struct Hooks {
     /// The newest protocol later connections offer, to stand in for an
     /// older app.
     protocol_cap: Option<u16>,
+    /// The version to announce instead of `APP_VERSION`; empty announces
+    /// nothing.
+    announce_version: Option<String>,
 }
 
 enum DmTodo {
@@ -1248,6 +1274,57 @@ impl Client {
         if !name.is_empty() {
             self.send_app(gid, &AppMsg::GroupName { name }).await?;
         }
+        if let Some(v) = self.version_to_announce() {
+            self.send_app(gid, &AppMsg::AppInfo { app_version: v })
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The app version to tell rooms about, or `None` to say nothing.
+    fn version_to_announce(&self) -> Option<String> {
+        #[cfg(feature = "test-hooks")]
+        if let Some(v) = &self.hooks.announce_version {
+            return (!v.is_empty()).then(|| v.clone());
+        }
+        Some(APP_VERSION.to_string())
+    }
+
+    /// Tells every live room on this server the version this app runs, if
+    /// the room has not heard it yet.
+    async fn announce_versions(&mut self, server_id: i64) -> Result<(), CoreError> {
+        let Some(version) = self.version_to_announce() else {
+            return Ok(());
+        };
+        let gids: Vec<GroupId> = self
+            .groups
+            .values()
+            .filter(|g| g.row.server_id == server_id)
+            .map(|g| g.row.id)
+            .collect();
+        for gid in gids {
+            if !self.groups.contains_key(&gid)
+                || self.holds_commit(&gid)
+                || self.store.announced_version(&gid)?.as_deref() == Some(version.as_str())
+            {
+                continue;
+            }
+            let r = self
+                .send_app(
+                    gid,
+                    &AppMsg::AppInfo {
+                        app_version: version.clone(),
+                    },
+                )
+                .await;
+            if r.is_ok() {
+                self.store.set_announced_version(&gid, &version)?;
+                let me = self.groups[&gid].row.key.public();
+                self.store.set_member_app_version(&gid, &me, &version)?;
+            }
+            let what = format!("Could not share your app version in {}", self.label(&gid));
+            self.group_step(r.map(|_| ()), &what)?;
+        }
         Ok(())
     }
 
@@ -1469,7 +1546,7 @@ impl Client {
             );
             self.group_step(r, &what)?;
         }
-        Ok(())
+        self.announce_versions(server_id).await
     }
 
     /// Works through a group's waiting join requests, a page at a time,
@@ -1906,11 +1983,47 @@ impl Client {
                     });
                 }
             }
-            // Behaviour arrives with the extension, app version and close tasks.
-            AppMsg::Extension(_)
-            | AppMsg::AppInfo { .. }
-            | AppMsg::CloseVote { .. }
-            | AppMsg::Closed { .. } => {}
+            AppMsg::Extension(mut ext) => {
+                if ext.check().is_err() {
+                    return Ok(());
+                }
+                let summary = ext
+                    .summary
+                    .as_deref()
+                    .map(crate::sanitize::clean_summary)
+                    .filter(|s| !s.is_empty());
+                ext.summary = summary.clone();
+                let now = self.now();
+                self.store
+                    .add_extension(&gid, seq, Some(&sender), &ext, now)?;
+                if let Some(text) = summary {
+                    self.store.add_message(
+                        &gid,
+                        seq,
+                        Some(&sender),
+                        kind::EXTENSION,
+                        &text,
+                        now,
+                    )?;
+                }
+                self.emit(Event::Extension {
+                    group: gid,
+                    seq,
+                    sender_key: sender,
+                    ext,
+                });
+            }
+            AppMsg::AppInfo { app_version } => {
+                let v: String = crate::sanitize::clean_name(&app_version)
+                    .chars()
+                    .take(crate::appmsg::MAX_APP_VERSION_CHARS)
+                    .collect();
+                if !v.is_empty() && self.store.set_member_app_version(&gid, &sender, &v)? {
+                    self.emit(Event::MembersChanged { group: gid });
+                }
+            }
+            // Behaviour arrives with the close task.
+            AppMsg::CloseVote { .. } | AppMsg::Closed { .. } => {}
         }
         Ok(())
     }
@@ -1991,6 +2104,7 @@ impl Client {
                 verified: m.verified,
                 admin: admins.contains(&m.key),
                 me: m.key == mine,
+                app_version: m.app_version,
                 key: m.key,
             })
             .collect()
@@ -2008,7 +2122,7 @@ impl Client {
                     m.sender,
                     m.body,
                     m.sent_unix,
-                    m.kind != kind::TEXT,
+                    matches!(m.kind, kind::NOTICE | kind::FILE),
                 )
             })
             .collect()
@@ -2039,6 +2153,57 @@ impl Client {
         self.store
             .add_message(&gid, seq, me.as_ref(), kind::TEXT, &text, now)?;
         Ok(())
+    }
+
+    /// Sends a message for an add-on to a group. Returns its sequence.
+    pub async fn send_extension(
+        &mut self,
+        gid: GroupId,
+        mut ext: Extension,
+    ) -> Result<u64, CoreError> {
+        ext.check().map_err(|e| CoreError::Other(e.into()))?;
+        ext.summary = ext
+            .summary
+            .as_deref()
+            .map(crate::sanitize::clean_summary)
+            .filter(|s| !s.is_empty());
+        if self.holds_commit(&gid) {
+            self.resolve_pending(gid).await?;
+        }
+        let seq = self.send_app(gid, &AppMsg::Extension(ext.clone())).await?;
+        let me = self.my_group_key(gid);
+        let now = self.now();
+        self.store
+            .add_extension(&gid, seq, me.as_ref(), &ext, now)?;
+        if let Some(text) = &ext.summary {
+            self.store
+                .add_message(&gid, seq, me.as_ref(), kind::EXTENSION, text, now)?;
+        }
+        Ok(seq)
+    }
+
+    /// Extension messages in a group with a sequence above `after_seq`,
+    /// oldest first, at most `limit` (never more than 500).
+    pub fn extensions(&self, gid: GroupId, after_seq: u64, limit: usize) -> Vec<ExtensionRow> {
+        self.store
+            .extensions(&gid, after_seq, limit.min(500))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| {
+                Some(ExtensionRow {
+                    seq: r.seq,
+                    sender_key: r.sender?,
+                    ext: Extension {
+                        namespace: r.namespace,
+                        kind: r.kind,
+                        version: r.version,
+                        body: r.body,
+                        summary: r.summary,
+                    },
+                    sent_unix: r.sent_unix,
+                })
+            })
+            .collect()
     }
 
     /// Changes this person's display name everywhere and tells every group.
@@ -2632,6 +2797,12 @@ impl Client {
     /// Later connections say Hello with at most `max`, as an older app would.
     pub fn test_cap_protocol(&mut self, max: u16) {
         self.hooks.protocol_cap = Some(max);
+    }
+
+    /// Announces `v` instead of the real app version from now on; an empty
+    /// `v` stops announcing, as an app on 0.4.0 would.
+    pub fn test_announce_version(&mut self, v: &str) {
+        self.hooks.announce_version = Some(v.to_string());
     }
 
     /// Posts any application message, as a hostile member could.

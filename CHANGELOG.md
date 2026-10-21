@@ -8,6 +8,7 @@ Each release of socketchat has a section here. Version numbers follow [Semantic 
 - A check now keeps libraries released less than 30 days ago out of `Cargo.lock`; run it with `sh scripts/crate-age-check.sh`. 47 libraries went back to older releases. `openmls` 0.9.1 stays, because socketchat pins that exact version.
 - A 0.5.0 server still serves apps on 0.4.0, so you can update the server first.
 - A 0.5.0 app still works with a server on 0.4.0. A feature that needs a newer server says so and leaves the rest of the app alone.
+- Rooms now carry messages from add-ons and other programs. Each shows as a one-line summary, and apps on 0.4.0 skip them. Each app also tells its rooms which version it runs.
 
 ## 0.4.0 - 2026-10-20
 

@@ -94,13 +94,15 @@ pub fn clean_text(s: &str) -> String {
 /// whitespace (newlines included) turned into one space, trimmed and
 /// capped.
 pub fn clean_summary(s: &str) -> String {
-    clean_text(s)
+    let line = clean_text(s)
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    let capped: String = line
         .chars()
         .take(crate::appmsg::MAX_SUMMARY_CHARS)
-        .collect()
+        .collect();
+    capped.trim_end().to_string()
 }
 
 #[cfg(test)]
@@ -112,6 +114,19 @@ mod tests {
         assert_eq!(clean_summary("a\nb\u{202e}c"), "a bc");
         assert_eq!(clean_summary(&"x".repeat(300)).chars().count(), 200);
         assert_eq!(clean_summary("  a \t\r\n  b  "), "a b");
+    }
+
+    #[test]
+    fn summary_cap_leaves_no_trailing_space_or_split_character() {
+        let s = format!("{} tail", "x".repeat(199));
+        let out = clean_summary(&s);
+        assert_eq!(out, "x".repeat(199));
+        assert!(!out.ends_with(' '));
+        for unit in ["é", "\u{1F600}"] {
+            let out = clean_summary(&unit.repeat(300));
+            assert_eq!(out.chars().count(), 200);
+            assert_eq!(out, unit.repeat(200));
+        }
     }
 
     #[test]

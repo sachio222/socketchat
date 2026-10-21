@@ -185,6 +185,18 @@ CREATE TABLE IF NOT EXISTS expected_joiners (
     group_key BLOB NOT NULL,
     PRIMARY KEY (group_id, group_key)
 );
+CREATE TABLE IF NOT EXISTS extensions (
+    group_id BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    sender_group_key BLOB,
+    namespace TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    body BLOB NOT NULL,
+    summary TEXT,
+    sent_unix INTEGER NOT NULL,
+    PRIMARY KEY (group_id, seq)
+);
 CREATE TABLE IF NOT EXISTS owed_proofs (
     group_id BLOB NOT NULL,
     token BLOB NOT NULL,
@@ -246,6 +258,8 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("vouchers", "mac_key", "BLOB"),
     ("vouchers", "seal_key", "BLOB"),
     ("vouchers", "request_key", "BLOB"),
+    ("members", "app_version", "TEXT"),
+    ("groups", "announced_version", "TEXT"),
 ];
 
 fn migrate(conn: &Connection) -> Result<(), CoreError> {
@@ -419,6 +433,21 @@ pub struct MemberRow {
     pub local_name: Option<String>,
     pub verified: bool,
     pub joined_seq: u64,
+    /// The app version this member said they run; `None` if they never said.
+    pub app_version: Option<String>,
+}
+
+/// A stored extension message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionRecord {
+    pub seq: u64,
+    pub sender: Option<Key>,
+    pub namespace: String,
+    pub kind: String,
+    pub version: u16,
+    pub body: Vec<u8>,
+    pub summary: Option<String>,
+    pub sent_unix: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -664,7 +693,8 @@ impl Store {
     pub fn members(&self, g: &GroupId) -> Result<Vec<MemberRow>, CoreError> {
         let mut st = self.conn.prepare(
             "SELECT m.group_key, m.identity, m.display_name, m.local_name, m.joined_seq,
-                    (m.identity IS NOT NULL AND EXISTS(SELECT 1 FROM trusted t WHERE t.identity = m.identity))
+                    (m.identity IS NOT NULL AND EXISTS(SELECT 1 FROM trusted t WHERE t.identity = m.identity)),
+                    m.app_version
              FROM members m WHERE m.group_id = ?1 ORDER BY m.joined_seq, m.group_key",
         )?;
         let rows = st.query_map([g.0.as_slice()], |r| {
@@ -675,8 +705,103 @@ impl Store {
                 local_name: r.get(3)?,
                 joined_seq: r.get::<_, i64>(4)? as u64,
                 verified: r.get(5)?,
+                app_version: r.get(6)?,
             })
         })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Records the app version a member said they run. Returns whether it
+    /// differs from what was stored.
+    pub fn set_member_app_version(
+        &self,
+        g: &GroupId,
+        key: &Key,
+        version: &str,
+    ) -> Result<bool, CoreError> {
+        let n = self.conn.execute(
+            "UPDATE members SET app_version = ?3
+             WHERE group_id = ?1 AND group_key = ?2 AND app_version IS NOT ?3",
+            params![g.0.as_slice(), key.0.as_slice(), version],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// The version this client last announced in a group, if any.
+    pub fn announced_version(&self, g: &GroupId) -> Result<Option<String>, CoreError> {
+        Ok(self.conn.query_row(
+            "SELECT announced_version FROM groups WHERE id = ?1",
+            [g.0.as_slice()],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn set_announced_version(&self, g: &GroupId, version: &str) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE groups SET announced_version = ?1 WHERE id = ?2",
+            params![version, g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_extension(
+        &self,
+        g: &GroupId,
+        seq: u64,
+        sender: Option<&Key>,
+        e: &crate::appmsg::Extension,
+        sent_unix: u64,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO extensions
+                 (group_id, seq, sender_group_key, namespace, kind, version, body, summary, sent_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                g.0.as_slice(),
+                seq as i64,
+                sender.map(|k| k.0.to_vec()),
+                e.namespace,
+                e.kind,
+                e.version,
+                e.body,
+                e.summary,
+                sent_unix as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Up to `limit` extension messages with a sequence above `after_seq`,
+    /// oldest first.
+    pub fn extensions(
+        &self,
+        g: &GroupId,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<ExtensionRecord>, CoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT seq, sender_group_key, namespace, kind, version, body, summary, sent_unix
+             FROM extensions WHERE group_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+        )?;
+        let rows = st.query_map(
+            params![
+                g.0.as_slice(),
+                after_seq.min(i64::MAX as u64) as i64,
+                limit as i64
+            ],
+            |r| {
+                Ok(ExtensionRecord {
+                    seq: r.get::<_, i64>(0)? as u64,
+                    sender: key_col(r.get(1)?),
+                    namespace: r.get(2)?,
+                    kind: r.get(3)?,
+                    version: r.get(4)?,
+                    body: r.get(5)?,
+                    summary: r.get(6)?,
+                    sent_unix: r.get::<_, i64>(7)? as u64,
+                })
+            },
+        )?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
