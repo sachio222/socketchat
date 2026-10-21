@@ -15,7 +15,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use socketchat_core::provider::JsonCodec;
 use socketchat_core::suite::{parse_admins, FALLBACK_SUITE, MAX_PAST_EPOCHS, SUITE};
 use socketchat_proto::msg::{
-    Entry, GroupId as Gid, InviteInfo, Key, MemberInfo, Push, Response, ServerFrame, Sig,
+    Entry, FileId, GroupId as Gid, InviteInfo, Key, MemberInfo, Push, Response, ServerFrame, Sig,
     WelcomeIn, WelcomeOut,
 };
 use socketchat_proto::{Token, MAX_FRAME};
@@ -845,6 +845,60 @@ pub fn group_created(state: &State, cs: &ConnState, group: Gid) -> Response {
         },
         Err(_) => Response::Error("could not read the group".into()),
     }
+}
+
+/// The only member of a group leaves: everything the server holds for the
+/// group goes. Refused unless the OpenMLS group holds exactly one member and
+/// that member is the caller.
+pub fn last_leave(state: &State, cs: &ConnState, group: Gid) -> Response {
+    let db = state.db();
+    let Some(me) = member_key(&db, cs, &group) else {
+        return refused("you are not a member of this group");
+    };
+    let storage = Storage::new(&*db);
+    let alone = match PublicGroup::load(&storage, &mls_gid(&group)) {
+        Ok(Some(pg)) => {
+            let mut keys = pg.members().map(|m| key_of(&m.signature_key));
+            keys.next() == Some(Some(me)) && keys.next().is_none()
+        }
+        _ => false,
+    };
+    if !alone || joined(&db, &group).len() != 1 {
+        return refused("other people are still in this group");
+    }
+    match delete_group(&db, state, &group) {
+        Ok(()) => Response::Ok,
+        Err(_) => Response::Error("could not delete the group".into()),
+    }
+}
+
+/// Deletes a group and everything held for it, in one transaction: its
+/// files (chunks too), log, Welcomes waiting for its mailboxes, join
+/// requests, invites, mailboxes, the group row and the OpenMLS state.
+pub(crate) fn delete_group(db: &Connection, state: &State, group: &Gid) -> rusqlite::Result<()> {
+    let g = group.0.as_slice();
+    let t = db.unchecked_transaction()?;
+    let files: Vec<Vec<u8>> = t
+        .prepare("SELECT id FROM files WHERE group_id = ?1")?
+        .query_map([g], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in files {
+        if let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) {
+            crate::files::delete(state, &t, &FileId(id));
+        }
+    }
+    t.execute("DELETE FROM log WHERE group_id = ?1", [g])?;
+    t.execute(
+        "DELETE FROM welcomes WHERE mailbox IN (SELECT key FROM mailboxes WHERE group_id = ?1)",
+        [g],
+    )?;
+    t.execute("DELETE FROM joins WHERE group_id = ?1", [g])?;
+    t.execute("DELETE FROM invites WHERE group_id = ?1", [g])?;
+    t.execute("DELETE FROM mailboxes WHERE group_id = ?1", [g])?;
+    t.execute("DELETE FROM groups WHERE id = ?1", [g])?;
+    let storage = Storage::new(&*t);
+    PublicGroup::delete(&storage, &mls_gid(group)).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    t.commit()
 }
 
 /// Days in an account's server-invite window: long enough that every link

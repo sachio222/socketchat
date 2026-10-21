@@ -19,6 +19,7 @@ Each release of socketchat has a section here. Version numbers follow [Semantic 
 - You can delete a room's messages from your computer and stay in the room.
 - An ended room's unread messages still show who wrote them.
 - Joining a room no longer leaves spare keys from the join request on your computer.
+- A server now deletes everything it holds for a room as soon as its last member leaves, and its hourly sweep removes rooms with no members.
 
 ## 0.4.0 - 2026-10-20
 

@@ -1,7 +1,7 @@
 //! The hourly sweep: whatever outlives its time on the server goes.
 
 use rusqlite::params;
-use socketchat_proto::msg::FileId;
+use socketchat_proto::msg::{FileId, GroupId};
 
 use crate::invites::JOIN_WAIT_SECS;
 use crate::{State, DAY_SECS};
@@ -35,6 +35,24 @@ pub fn sweep(state: &State) {
         "DELETE FROM mailboxes WHERE joined_seq IS NULL AND created_unix < ?1",
         params![mailbox_cutoff],
     );
+    // A room whose last member is gone is deleted whole; the app tells the
+    // server when it leaves alone, and this catches the rest.
+    let empty: Vec<Vec<u8>> = db
+        .prepare(
+            "SELECT id FROM groups WHERE NOT EXISTS (
+                 SELECT 1 FROM mailboxes
+                 WHERE mailboxes.group_id = groups.id AND joined_seq IS NOT NULL)",
+        )
+        .and_then(|mut st| {
+            st.query_map([], |r| r.get(0))
+                .map(|rows| rows.filter_map(Result::ok).collect())
+        })
+        .unwrap_or_default();
+    for id in empty {
+        if let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) {
+            let _ = crate::groups::delete_group(&db, state, &GroupId(id));
+        }
+    }
     let old_files: Vec<Vec<u8>> = db
         .prepare("SELECT id FROM files WHERE created_unix < ?1")
         .and_then(|mut st| {

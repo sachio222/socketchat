@@ -330,3 +330,143 @@ async fn group_created_returns_creation_time() {
         Response::Refused("you are not a member of this group".into())
     );
 }
+
+fn count(db: &rusqlite::Connection, table: &str, gid: GroupId) -> i64 {
+    let col = if table == "groups" { "id" } else { "group_id" };
+    db.query_row(
+        &format!("SELECT count(*) FROM {table} WHERE {col} = ?1"),
+        [gid.0.as_slice()],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn mls_group_loads(db: &rusqlite::Connection, gid: GroupId) -> bool {
+    use openmls::prelude::{GroupId as MlsGid, PublicGroup};
+    let storage = openmls_sqlite_storage::SqliteStorageProvider::<
+        socketchat_core::provider::JsonCodec,
+        &rusqlite::Connection,
+    >::new(db);
+    PublicGroup::load(&storage, &MlsGid::from_slice(&gid.0))
+        .unwrap()
+        .is_some()
+}
+
+#[tokio::test]
+async fn last_leave_deletes_everything() {
+    let e = env().await;
+    let mut ada = e.admin().await;
+    let gid = ada.gid.unwrap();
+    let _open = make_invite(&mut ada).await;
+    let Response::File(f) = ada
+        .conn
+        .req(Request::FileBegin {
+            group: gid,
+            size: 3,
+        })
+        .await
+    else {
+        panic!("no file")
+    };
+    assert_eq!(
+        ada.conn
+            .req(Request::FileChunk {
+                file: f,
+                index: 0,
+                data: vec![1, 2, 3]
+            })
+            .await,
+        Response::Ok
+    );
+    let db = rusqlite::Connection::open(e.d.path().join("server.db")).unwrap();
+    db.execute(
+        "INSERT INTO log (group_id, seq, mls, created_unix) VALUES (?1, 1, x'00', 1)",
+        [gid.0.as_slice()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO joins (token, group_id, mailbox) VALUES (x'07', ?1, x'08')",
+        [gid.0.as_slice()],
+    )
+    .unwrap();
+    let chunks =
+        e.d.path()
+            .join("files")
+            .join(f.0.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    assert!(chunks.exists());
+    for t in ["groups", "log", "mailboxes", "invites", "joins", "files"] {
+        assert!(count(&db, t, gid) > 0, "{t} starts empty");
+    }
+    assert!(mls_group_loads(&db, gid));
+
+    assert_eq!(
+        ada.conn.req(Request::LastLeave { group: gid }).await,
+        Response::Ok
+    );
+    for t in ["groups", "log", "mailboxes", "invites", "joins", "files"] {
+        assert_eq!(count(&db, t, gid), 0, "{t}");
+    }
+    assert!(!chunks.exists());
+    assert!(!mls_group_loads(&db, gid));
+}
+
+#[tokio::test]
+async fn last_leave_refused_while_others_remain() {
+    let e = env().await;
+    let mut ada = e.admin().await;
+    let mut bo = e.member(&mut ada).await;
+    let gid = ada.gid.unwrap();
+    let why = Response::Refused("other people are still in this group".into());
+    assert_eq!(ada.conn.req(Request::LastLeave { group: gid }).await, why);
+    assert_eq!(bo.conn.req(Request::LastLeave { group: gid }).await, why);
+    let db = rusqlite::Connection::open(e.d.path().join("server.db")).unwrap();
+    assert_eq!(count(&db, "groups", gid), 1);
+    assert!(mls_group_loads(&db, gid));
+    // A stranger is not a member at all.
+    let mut out = e.person().await;
+    assert_eq!(
+        out.conn.req(Request::LastLeave { group: gid }).await,
+        Response::Refused("you are not a member of this group".into())
+    );
+}
+
+#[tokio::test]
+async fn sweep_deletes_group_with_no_members() {
+    let e = env().await;
+    let ada = e.admin().await;
+    let gid = ada.gid.unwrap();
+    let db = rusqlite::Connection::open(e.d.path().join("server.db")).unwrap();
+    assert_eq!(count(&db, "groups", gid), 1);
+    // A group that still has a member survives the sweep.
+    e.h.sweep_now();
+    assert_eq!(count(&db, "groups", gid), 1);
+    db.execute(
+        "DELETE FROM mailboxes WHERE group_id = ?1",
+        [gid.0.as_slice()],
+    )
+    .unwrap();
+    e.h.sweep_now();
+    assert_eq!(count(&db, "groups", gid), 0);
+    assert_eq!(count(&db, "log", gid), 0);
+    assert!(!mls_group_loads(&db, gid));
+}
+
+#[tokio::test]
+async fn last_leave_needs_protocol_2() {
+    let e = env().await;
+    let ada = e.admin().await;
+    let gid = ada.gid.unwrap();
+    // The same account's keys on a protocol-1 connection are refused by
+    // the version check before anything runs.
+    let mut c = e.raw().await;
+    assert_eq!(
+        c.hello_as(1).await,
+        Some(ServerFrame::HelloOk { version: 1 })
+    );
+    assert_eq!(
+        c.req(Request::LastLeave { group: gid }).await,
+        Response::Refused("this server needs a newer app for that".into())
+    );
+    let db = rusqlite::Connection::open(e.d.path().join("server.db")).unwrap();
+    assert_eq!(count(&db, "groups", gid), 1);
+}

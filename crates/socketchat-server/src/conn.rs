@@ -616,6 +616,7 @@ async fn handle(state: &Arc<State>, cs: &mut ConnState, req: Request) -> Respons
         Request::ListInvites { server_tokens } => groups::list_invites(state, cs, &server_tokens),
         Request::CancelInvite { token } => groups::cancel_invite(state, cs, token),
         Request::GroupCreated { group } => groups::group_created(state, cs, group),
+        Request::LastLeave { group } => groups::last_leave(state, cs, group),
     }
 }
 

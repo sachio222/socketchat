@@ -2674,6 +2674,27 @@ impl Client {
                 },
             )
             .await?;
+        } else if self.protocol_for(gid) != Some(1) {
+            // Alone in the room: the server deletes it. If it cannot (the
+            // connection is gone, or it refuses), the room still ends here.
+            let sent = if self.protocol_for(gid).is_some() {
+                self.request(server_id, Request::LastLeave { group: gid })
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            } else {
+                Err("the connection is down".to_string())
+            };
+            if let Err(e) = sent {
+                let name = self
+                    .groups
+                    .get(&gid)
+                    .map(|g| room_label(&g.row.name, g.row.is_dm))
+                    .unwrap_or_default();
+                self.emit(Event::Warning(format!(
+                    "Left {name}, but the server could not delete it: {e}"
+                )));
+            }
         }
         self.end_room(gid, Ended::Left)
     }

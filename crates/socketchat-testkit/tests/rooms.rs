@@ -573,3 +573,59 @@ async fn busy_log_after_clearing_warns_and_succeeds() {
     assert_eq!(summary(&b, g).ended, None);
     assert_eq!(old_copies(&drain(&mut b).await), 1);
 }
+
+fn server_rows(s: &TestServer, g: GroupId) -> (i64, i64) {
+    let db = socketchat_testkit::open_server_db(s);
+    let n = |t: &str, col: &str| -> i64 {
+        db.query_row(
+            &format!("SELECT count(*) FROM {t} WHERE {col} = ?1"),
+            [g.0.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    (n("groups", "id"), n("mailboxes", "group_id"))
+}
+
+#[tokio::test]
+async fn alone_leaver_tells_the_server() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Room").await.unwrap();
+    a.send_text(g, "hello").await.unwrap();
+    assert_eq!(server_rows(&s, g), (1, 1));
+    a.leave(g).await.unwrap();
+    assert_eq!(server_rows(&s, g), (0, 0));
+    assert!(a.test_traces(g).is_empty(), "{:?}", a.test_traces(g));
+    assert!(!listed(&a, g));
+}
+
+#[tokio::test]
+async fn alone_leaver_on_protocol_1_ends_locally() {
+    let s = TestServer::start_with(|c| c.protocol_max = 1).await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Room").await.unwrap();
+    a.leave(g).await.unwrap();
+    assert!(a.test_traces(g).is_empty(), "{:?}", a.test_traces(g));
+    assert!(!listed(&a, g));
+    assert_eq!(server_rows(&s, g), (1, 1));
+}
+
+#[tokio::test]
+async fn alone_leaver_ends_locally_when_the_server_is_gone() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Room").await.unwrap();
+    drain(&mut a).await;
+    s.handle.shutdown();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    a.leave(g).await.unwrap();
+    assert!(a.test_traces(g).is_empty(), "{:?}", a.test_traces(g));
+    assert!(!listed(&a, g));
+    let ev = drain(&mut a).await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Warning(w) if w.contains("could not delete"))),
+        "{ev:?}"
+    );
+}

@@ -155,6 +155,11 @@ pub enum Request {
     GroupCreated {
         group: GroupId,
     },
+    /// Protocol 2. The only member leaves: the server deletes the group
+    /// and everything it holds for it. Refused while anyone else is in it.
+    LastLeave {
+        group: GroupId,
+    },
 }
 
 impl Request {
@@ -183,7 +188,8 @@ impl Request {
             | Request::FileDone { .. } => 1,
             Request::ListInvites { .. }
             | Request::CancelInvite { .. }
-            | Request::GroupCreated { .. } => 2,
+            | Request::GroupCreated { .. }
+            | Request::LastLeave { .. } => 2,
         }
     }
 }
@@ -539,6 +545,7 @@ mod tests {
             },
             Request::CancelInvite { token: t },
             Request::GroupCreated { group: g },
+            Request::LastLeave { group: g },
         ] {
             assert_eq!(r.min_version(), 2, "{r:?}");
         }
