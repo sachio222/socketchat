@@ -260,6 +260,8 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("vouchers", "request_key", "BLOB"),
     ("members", "app_version", "TEXT"),
     ("groups", "announced_version", "TEXT"),
+    ("groups", "seen_seq", "INTEGER NOT NULL DEFAULT 0"),
+    ("groups", "muted", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 fn migrate(conn: &Connection) -> Result<(), CoreError> {
@@ -272,6 +274,10 @@ fn migrate(conn: &Connection) -> Result<(), CoreError> {
         )?;
         if !has {
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
+            if *column == "seen_seq" {
+                // History from before seen marks counts as read, once.
+                conn.execute_batch("UPDATE groups SET seen_seq = last_seq;")?;
+            }
         }
     }
     Ok(())
@@ -609,6 +615,56 @@ impl Store {
             params![seq as i64, g.0.as_slice()],
         )?;
         Ok(())
+    }
+
+    /// Moves the seen mark up to `seq`. It never moves back.
+    pub fn set_seen_seq(&self, g: &GroupId, seq: u64) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE groups SET seen_seq = max(seen_seq, ?1) WHERE id = ?2",
+            params![seq as i64, g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Marks every stored line of a room as seen.
+    pub fn mark_seen(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE groups SET seen_seq = max(seen_seq,
+                 COALESCE((SELECT max(seq) FROM messages WHERE group_id = groups.id), 0))
+             WHERE id = ?1",
+            params![g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Stored lines newer than the room's seen mark.
+    pub fn unseen(&self, g: &GroupId) -> Result<u32, CoreError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM messages
+             WHERE group_id = ?1 AND seq > (SELECT seen_seq FROM groups WHERE id = ?1)",
+            params![g.0.as_slice()],
+            |r| r.get(0),
+        )?;
+        Ok(n.min(i64::from(u32::MAX)) as u32)
+    }
+
+    pub fn set_muted(&self, g: &GroupId, muted: bool) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE groups SET muted = ?1 WHERE id = ?2",
+            params![muted, g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_muted(&self, g: &GroupId) -> Result<bool, CoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT muted FROM groups WHERE id = ?1",
+                params![g.0.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap_or(false))
     }
 
     pub fn set_last_update(&self, g: &GroupId, unix: u64) -> Result<(), CoreError> {
@@ -1289,5 +1345,42 @@ mod tests {
             Store::open(d.path(), "k"),
             Err(CoreError::NoProfile)
         ));
+    }
+
+    #[test]
+    fn old_profile_starts_with_history_seen() {
+        let conn = Connection::open_in_memory().unwrap();
+        // The 0.4.0 groups table: no seen_seq, no muted.
+        conn.execute_batch(
+            "CREATE TABLE servers (
+                 id INTEGER PRIMARY KEY, host TEXT NOT NULL, port INTEGER NOT NULL,
+                 cert_fpr BLOB NOT NULL, account_key BLOB, UNIQUE (host, port));
+             INSERT INTO servers (id, host, port, cert_fpr) VALUES (1, 'h', 1, x'00');
+             CREATE TABLE groups (
+                 id BLOB PRIMARY KEY,
+                 server_id INTEGER NOT NULL REFERENCES servers(id),
+                 group_key BLOB NOT NULL,
+                 name TEXT NOT NULL DEFAULT '',
+                 is_dm INTEGER NOT NULL DEFAULT 0,
+                 left_group INTEGER NOT NULL DEFAULT 0,
+                 last_seq INTEGER NOT NULL DEFAULT 0,
+                 last_update_unix INTEGER NOT NULL DEFAULT 0,
+                 joined_unix INTEGER NOT NULL);
+             INSERT INTO groups (id, server_id, group_key, last_seq, joined_unix)
+                 VALUES (x'01', 1, x'00', 7, 1);",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        let seen: i64 = conn
+            .query_row("SELECT seen_seq FROM groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(seen, 7);
+        // A second run does not move it again.
+        conn.execute("UPDATE groups SET last_seq = 9", []).unwrap();
+        migrate(&conn).unwrap();
+        let seen: i64 = conn
+            .query_row("SELECT seen_seq FROM groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(seen, 7);
     }
 }

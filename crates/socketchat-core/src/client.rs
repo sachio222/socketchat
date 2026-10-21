@@ -113,6 +113,23 @@ pub struct GroupSummary {
     pub name: String,
     pub is_dm: bool,
     pub left: bool,
+    /// Stored lines newer than the last time this room was marked seen.
+    pub unseen: u32,
+    /// Muted on this computer only.
+    pub muted: bool,
+}
+
+/// What a room's details screen shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomDetails {
+    pub name: String,
+    /// Display names of the admins who are still in the room.
+    pub admins: Vec<String>,
+    pub size: usize,
+    /// When the server made the room. `None` when the server does not say.
+    pub created_unix: Option<u64>,
+    pub joined_unix: u64,
+    pub muted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1867,9 +1884,27 @@ impl Client {
             }
             AppMsg::GroupName { name } => {
                 let name = crate::sanitize::clean_name(&name);
+                let Some(live) = self.groups.get(&gid) else {
+                    return Ok(());
+                };
+                let old = live.row.name.clone();
+                let from_admin = admins_from(live.mls.extensions()).contains(&sender);
+                // An admin's name always applies. A member who is not an
+                // admin can only tell this app a name it does not have yet,
+                // which is how a newcomer learns it.
+                if name.is_empty() || !(from_admin || old.is_empty()) {
+                    return Ok(());
+                }
                 self.store.set_group_name(&gid, &name)?;
                 if let Some(l) = self.groups.get_mut(&gid) {
-                    l.row.name = name;
+                    l.row.name = name.clone();
+                }
+                if from_admin && !old.is_empty() && old != name {
+                    let who = self.name_for(&gid, &sender);
+                    let now = self.now();
+                    let text = format!("{who} renamed this room to {name}.");
+                    self.store
+                        .add_message(&gid, seq, None, kind::NOTICE, &text, now)?;
                 }
                 self.emit(Event::GroupRenamed { group: gid });
             }
@@ -2079,8 +2114,88 @@ impl Client {
                 name: g.name,
                 is_dm: g.is_dm,
                 left: g.left,
+                unseen: self.store.unseen(&g.id).unwrap_or(0),
+                muted: self.store.is_muted(&g.id).unwrap_or(false),
             })
             .collect()
+    }
+
+    /// Marks everything stored in a room as seen.
+    pub fn mark_seen(&mut self, gid: GroupId) -> Result<(), CoreError> {
+        self.store.mark_seen(&gid)
+    }
+
+    /// Mutes or unmutes a room on this computer only. Nothing is sent.
+    pub fn set_muted(&mut self, gid: GroupId, muted: bool) -> Result<(), CoreError> {
+        self.store.set_muted(&gid, muted)
+    }
+
+    /// Renames a room for everyone. Needs an admin.
+    pub async fn rename_room(&mut self, gid: GroupId, name: &str) -> Result<(), CoreError> {
+        let live = self
+            .groups
+            .get(&gid)
+            .ok_or_else(|| CoreError::Other("you are not in that group".into()))?;
+        if !admins_from(live.mls.extensions()).contains(&live.row.key.public()) {
+            return Err(CoreError::Other("Only admins can rename this room.".into()));
+        }
+        let name = crate::sanitize::clean_name(name);
+        if name.is_empty() {
+            return Err(CoreError::Other(
+                "A room name needs at least one visible character.".into(),
+            ));
+        }
+        if self.holds_commit(&gid) {
+            self.resolve_pending(gid).await?;
+        }
+        let seq = self
+            .send_app(gid, &AppMsg::GroupName { name: name.clone() })
+            .await?;
+        self.store.set_group_name(&gid, &name)?;
+        if let Some(l) = self.groups.get_mut(&gid) {
+            l.row.name = name.clone();
+        }
+        let now = self.now();
+        let text = format!("You renamed this room to {name}.");
+        self.store
+            .add_message(&gid, seq, None, kind::NOTICE, &text, now)?;
+        self.store.set_seen_seq(&gid, seq)?;
+        self.emit(Event::GroupRenamed { group: gid });
+        Ok(())
+    }
+
+    /// Who runs a room, how big it is and when it was made.
+    pub async fn details(&mut self, gid: GroupId) -> Result<RoomDetails, CoreError> {
+        let server_id = self.server_of(&gid)?;
+        let members = self.members(gid);
+        let row = self.groups[&gid].row.clone();
+        // Only a server that speaks protocol 2 knows the date; an older or
+        // unreachable one just leaves it out.
+        let created_unix = if self.conn(server_id).await.is_ok()
+            && self.protocol_for(gid).is_some_and(|p| p >= 2)
+        {
+            match self
+                .request(server_id, Request::GroupCreated { group: gid })
+                .await
+            {
+                Ok(Response::GroupCreated { created_unix }) => Some(created_unix),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        Ok(RoomDetails {
+            name: row.name,
+            admins: members
+                .iter()
+                .filter(|m| m.admin)
+                .map(|m| m.name.clone())
+                .collect(),
+            size: members.len(),
+            created_unix,
+            joined_unix: row.joined_unix,
+            muted: self.store.is_muted(&gid).unwrap_or(false),
+        })
     }
 
     pub fn members(&self, gid: GroupId) -> Vec<MemberView> {
@@ -2152,6 +2267,7 @@ impl Client {
         let now = self.now();
         self.store
             .add_message(&gid, seq, me.as_ref(), kind::TEXT, &text, now)?;
+        self.store.set_seen_seq(&gid, seq)?;
         Ok(())
     }
 
@@ -2179,6 +2295,7 @@ impl Client {
             self.store
                 .add_message(&gid, seq, me.as_ref(), kind::EXTENSION, text, now)?;
         }
+        self.store.set_seen_seq(&gid, seq)?;
         Ok(seq)
     }
 
@@ -2687,6 +2804,7 @@ impl Client {
         let now = self.now();
         self.store
             .add_message(&gid, seq, me.as_ref(), kind::FILE, &text, now)?;
+        self.store.set_seen_seq(&gid, seq)?;
         Ok(offer)
     }
 
