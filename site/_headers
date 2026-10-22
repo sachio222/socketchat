@@ -1,0 +1,13 @@
+/*
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+/
+  Content-Security-Policy: default-src 'none'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'sha256-Hi7W7GYuYMHEU7m9yawaKNNi5cQVnUMGMujnKhGQ0c4='
+/index.html
+  Content-Security-Policy: default-src 'none'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'sha256-Hi7W7GYuYMHEU7m9yawaKNNi5cQVnUMGMujnKhGQ0c4='
+/join
+  Content-Security-Policy: default-src 'none'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'sha256-Hi7W7GYuYMHEU7m9yawaKNNi5cQVnUMGMujnKhGQ0c4='; script-src 'sha256-qS8u+sAiepUCqbzcSgwsykbRD7FCYHJ0kG8lc/zixaM='
+/join/
+  Content-Security-Policy: default-src 'none'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'sha256-Hi7W7GYuYMHEU7m9yawaKNNi5cQVnUMGMujnKhGQ0c4='; script-src 'sha256-qS8u+sAiepUCqbzcSgwsykbRD7FCYHJ0kG8lc/zixaM='
+/join/index.html
+  Content-Security-Policy: default-src 'none'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'sha256-Hi7W7GYuYMHEU7m9yawaKNNi5cQVnUMGMujnKhGQ0c4='; script-src 'sha256-qS8u+sAiepUCqbzcSgwsykbRD7FCYHJ0kG8lc/zixaM='

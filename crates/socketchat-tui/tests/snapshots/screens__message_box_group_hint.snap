@@ -23,6 +23,6 @@ expression: s
 │                  ││                                      ││                  │
 └──────────────────┘└──────────────────────────────────────┘└──────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  What's on your mind, Book club?                               / for commands│
+│  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
 Enter send · /help commands · Tab move · Ctrl-K switch chat · Ctrl-C quit

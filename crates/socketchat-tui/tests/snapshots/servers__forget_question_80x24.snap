@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/servers.rs
+expression: s
+---
+┌ Chats ───────────┐┌ Book club · chat.socketchat.org ─────┐┌ People ──────────┐
+│# Book club       ││                                      ││                  │
+│# Climbing Saturd…││                                      ││                  │
+│# Old crew        ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│ ┌──────────────────────────────────────────────────────────────────────────┐ │
+│ │Forget Jacobs-MacBook-Pro-2.local? Its 4 rooms leave this computer, with  │ │
+│ │their messages and keys. The server is not told, so others there still see│ │
+│ │you as a member until an admin removes you. If the server still works,    │ │
+│ │/leave its rooms first. Press y to forget it or n to keep it.             │ │
+│ └───────────────────────────────────────────────────────────[ Yes ]─[ No ]─┘ │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  What's on your mind? #Book club                               / for commands│
+└──────────────────────────────────────────────────────────────────────────────┘
+Y yes · N no                                                    socketchat 0.5.1

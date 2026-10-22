@@ -3,12 +3,6 @@
 version = 4
 
 [[package]]
-name = "adler2"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
-
-[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -614,15 +608,6 @@ dependencies = [
  "bindgen",
  "cc",
  "pkg-config",
-]
-
-[[package]]
-name = "crc32fast"
-version = "1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
-dependencies = [
- "cfg-if",
 ]
 
 [[package]]
@@ -1617,17 +1602,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "img-parts"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19734e3c43b2a850f5889c077056e47c874095f2d87e853c7c41214ae67375f0"
-dependencies = [
- "bytes",
- "crc32fast",
- "miniz_oxide",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2145,15 +2119,6 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
-
-[[package]]
-name = "miniz_oxide"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
-dependencies = [
- "adler2",
-]
 
 [[package]]
 name = "mio"
@@ -3639,7 +3604,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clap",
  "directories",
@@ -3656,14 +3621,14 @@ dependencies = [
 
 [[package]]
 name = "socketchat-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
  "ed25519-dalek",
  "hkdf 0.12.4",
  "hmac 0.12.1",
- "img-parts",
+ "libc",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
@@ -3687,7 +3652,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat-proto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "postcard",
@@ -3699,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat-server"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "openmls",
  "openmls_rust_crypto",
@@ -3723,9 +3688,11 @@ dependencies = [
 
 [[package]]
 name = "socketchat-testkit"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
+ "openmls",
  "openmls_rust_crypto",
+ "openmls_traits",
  "rand_core 0.6.4",
  "rusqlite",
  "socketchat-core",
@@ -3737,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat-tui"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "crossterm",
@@ -3750,6 +3717,7 @@ dependencies = [
  "socketchat-testkit",
  "tempfile",
  "tokio",
+ "unicode-segmentation",
 ]
 
 [[package]]

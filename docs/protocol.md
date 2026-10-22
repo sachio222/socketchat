@@ -1,6 +1,6 @@
 # Protocol
 
-This document describes what socketchat v4.0 sends between app and server, for contributors and anyone writing a compatible client. The source of truth is `crates/socketchat-proto` (frames, messages, links) and `crates/socketchat-core/src/keys.rs` (signatures and the sealed voucher). [architecture.md](architecture.md) explains the terms MLS, epoch, Commit, Welcome and KeyPackage.
+This document describes what Socketchat v4.0 sends between app and server, for contributors and anyone writing a compatible client. The source of truth is `crates/socketchat-proto` (frames, messages, links) and `crates/socketchat-core/src/keys.rs` (signatures and the sealed voucher). [architecture.md](architecture.md) explains the terms MLS, epoch, Commit, Welcome and KeyPackage.
 
 ## Connection and framing
 
@@ -11,24 +11,24 @@ This document describes what socketchat v4.0 sends between app and server, for c
 
 ## Hello
 
-The first frame from the app must be `Hello { version }`, with the newest protocol number the app speaks. socketchat 0.5.0 speaks protocol 2, and 0.4.0 speaks only protocol 1. A 0.5.0 server serves both.
+The first frame from the app must be `Hello { version }`, with the newest protocol number the app speaks. Socketchat 0.5.0 speaks protocol 2, and 0.4.0 speaks only protocol 1. A 0.5.0 server serves both.
 
 - `HelloOk { version }`: the server speaks this version; requests may follow.
-- `VersionMismatch { server }`: the server does not serve this version. `server` is the newest one it does, and the server closes the connection. When that number is at least 1 and lower than the app's own, the app connects once more and says Hello with it, so a 0.5.0 app talks to a 0.4.0 server over protocol 1. Any other number ends the attempt with "the server speaks protocol N; update socketchat".
+- `VersionMismatch { server }`: the server does not serve this version. `server` is the newest one it does, and the server closes the connection. When that number is at least 1 and lower than the app's own, the app connects once more and says Hello with it, so a 0.5.0 app talks to a 0.4.0 server over protocol 1. Any other number ends the attempt with "the server speaks protocol N; update Socketchat".
 - `Busy(Full)`: the server already serves `max_connections` connections (1,000 by default) and closes the connection.
 - `Busy(Network)`: the connection's address already holds `max_per_ip` connections (256 by default; an IPv6 address counts by its /64 network) and the server closes the connection. While 64 such connections are already being turned away, the server drops the next one before TLS instead.
 
 The app shows a `Busy` reply as "this server is full right now; try again in a few minutes" or "this server has too many connections from your network right now; try again in a few minutes".
 
-Every request needs protocol 1 or later, and the ones marked "Protocol 2" in the table below need protocol 2. An app does not send a request newer than its connection's version. It tells the person "this server runs an older version of socketchat that can't do that yet; ask the person who runs it to update it" and carries on with everything else. A server that gets such a request anyway answers `Refused("this server needs a newer app for that")`. A protocol-1 connection never gets a frame that 0.4.0 cannot decode: the responses added in protocol 2 answer only protocol-2 requests, and pushes are unchanged.
+Every request needs protocol 1 or later, and the ones marked "Protocol 2" in the table below need protocol 2. An app does not send a request newer than its connection's version. It tells the person "this server runs an older version of Socketchat that can't do that yet; ask the person who runs it to update it" and carries on with everything else. A server that gets such a request anyway answers `Refused("this server needs a newer app for that")`. A protocol-1 connection never gets a frame that 0.4.0 cannot decode: the responses added in protocol 2 answer only protocol-2 requests, and pushes are unchanged.
 
-The server also closes the connection, without a reply, when the first frame is anything else or when no Hello arrives within 10 seconds. Later it closes a connection that sends nothing for 5 minutes. Each connection may have at most 2 MiB of replies and pushes waiting to be written. The server handles the next request only once there is room for the largest reply, and closes the connection when a push would not fit. A write that makes no progress for 30 seconds also closes it, so a client that stops reading frees its slot. Apps reconnect when they next need the server and fetch what they missed.
+The server also closes the connection, without a reply, when the first frame is anything else, when a frame before Hello announces a body over 16 bytes, or when no Hello arrives within 10 seconds. Until the connection signs in, a frame over `max_frame_before_sign_in` bytes (8,192 by default) closes it, and so does reaching 60 seconds after connecting, whatever it sent. Later it closes a connection that sends nothing for 5 minutes. Each connection may have at most 2 MiB of replies and pushes waiting to be written. The server handles the next request only once there is room for the largest reply, and closes the connection when a push would not fit. A write that makes no progress for 30 seconds also closes it, so a client that stops reading frees its slot. Apps reconnect when they next need the server and fetch what they missed.
 
 ## Requests and responses
 
 After Hello, the app sends `Req { id, body }` and the server answers with `Resp { id, body }` carrying the same `id`. The server answers requests in the order they arrive.
 
-Most requests need the connection to have signed in with a key first, through `Challenge` and `Prove` or one of the `Register` requests.
+Most requests need the connection to have signed in with a key first, through `Challenge` and `Prove` or one of the `Register` requests. A `Prove` or `Register` request that succeeds signs the connection in.
 
 ### Requests
 
@@ -36,10 +36,10 @@ Most requests need the connection to have signed in with a key first, through `C
 |---|---|
 | `Challenge` | Asks for a random 32-byte challenge to sign for this connection. |
 | `Prove { key, sig }` | Signs in with a key the server already knows: an account key or a mailbox. |
-| `RegisterAccount { token, key, sig }` | Registers a server account key with an invite token, and signs in with it. |
-| `RegisterMailbox { token, key, sig }` | Registers a group key as a mailbox. `token: Some` redeems a group invite; `None` reserves a mailbox for a group the signed-in account is about to create. |
-| `CreateGroup { group_info, ratchet_tree }` | Creates a group from an MLS GroupInfo and ratchet tree. The group must hold only its creator, as its only admin. |
-| `Post { group, mls, welcome }` | Adds an MLS message to the group log. A Commit that adds someone may carry a `WelcomeOut { token, welcome, voucher }` for the joiner, with `voucher` sealed as described under "Sealed voucher" below. An MLS message over 1,047,552 bytes is refused. |
+| `RegisterAccount { token, key, sig }` | Registers a server account key with an invite token, and signs in with it. A group token registers an account only if the connection that made it held an account with room left under `max_accounts_from_room_links`; otherwise it is refused, and the token still redeems a mailbox. |
+| `RegisterMailbox { token, key, sig }` | Registers a group key as a mailbox. `token: Some` redeems a group invite; `None` reserves a mailbox for a group the signed-in account is about to create. A group invite is refused, and stays unused, while its room has `max_room_welcomes` joins waiting (Welcomes not yet fetched and invites redeemed but not yet added) or no room in its messages for an add. |
+| `CreateGroup { group_info, ratchet_tree }` | Creates a group from an MLS GroupInfo and ratchet tree. The group must hold only its creator, as its only admin, and a ratchet tree over 16 KiB is refused. |
+| `Post { group, mls, welcome }` | Adds an MLS message to the group log. A Commit that adds someone may carry a `WelcomeOut { token, welcome, voucher }` for the joiner, with `voucher` sealed as described under "Sealed voucher" below. An MLS message over 1,047,552 bytes is refused. So is a message past the room's or the server's storage limit, and a Commit that adds someone while the room has `max_room_welcomes` Welcomes waiting. Past those limits the server still takes, up to a tenth past the room's limit and a fiftieth past the server's, each member's first leave Proposal of at most 4 KiB, and Commits that only remove people; neither may carry more than 64 bytes of authenticated data. A Commit that lost a race for its epoch while the server checked it gets `Conflict`. |
 | `Fetch { group, after, limit }` | Returns log entries after sequence number `after`: at most 500, and no more than fit about 900 KiB, but always at least one when there is one. Fetch again until the reply is empty. |
 | `Ack { group, seq }` | Says this mailbox has everything up to `seq`; entries every member has acknowledged are deleted. |
 | `Members { group }` | Lists the group's mailboxes and the sequence number at which each joined. |
@@ -47,7 +47,7 @@ Most requests need the connection to have signed in with a key first, through `C
 | `RedeemInvite { token, key_package, mac }` | Lodges a join request: a postcard list of one or two KeyPackages, at most 8 KiB in all, each signed by the mailbox that redeemed the token. Each KeyPackage carries the joiner's signature on the request (see "Other formats"). Apps send `mac` as 32 zero bytes, and nothing reads it. |
 | `PendingJoins { group, after }` | Lists join requests for a group that are less than 7 days old, ordered by when they were lodged and then by token, starting strictly after `after` (the `(lodged_unix, token)` of the last request the client already has; none starts from the oldest). Each reply holds as many as fit about 900 KiB, and at least one; an empty reply means the end. A request leaves the list when its Welcome is posted or it expires. |
 | `FetchWelcomes` | Returns and deletes Welcomes waiting for this connection's mailboxes. |
-| `FileBegin { group, size }` | Starts an upload and returns a file ID. Refused if `size` is over the server's limit. |
+| `FileBegin { group, size }` | Starts an upload and returns a file ID. Refused if `size` is over the server's limit, or would take the sender's, the room's or the server's stored files past its limit (files may use nine tenths of the server's). Starting an upload while the sender has 3 unfinished ones deletes the oldest of them first. An unfinished upload counts at the bytes received and is deleted 6 hours after it began; each `FileChunk` is checked against the same limits. |
 | `FileChunk { file, index, data }` | Uploads one sealed chunk (at most 64 KiB plus a 16-byte tag), in order, from the sender only. |
 | `FileEnd { file }` | Marks an upload complete once every chunk has arrived. |
 | `FileGet { file, index }` | Downloads one sealed chunk, for group members. |
@@ -114,7 +114,7 @@ socketchat://<host>:<port>/j/<token>#<cert-fpr>[.<inviter-fpr>.<invite-secret>]
 
 ## Signed byte strings
 
-Every socketchat signature outside MLS is Ed25519 over a context string, one zero byte, then the message:
+Every Socketchat signature outside MLS is Ed25519 over a context string, one zero byte, then the message:
 
 ```
 signed = context || 0x00 || message
@@ -158,13 +158,13 @@ Everything members send each other inside a group travels as one `AppMsg` value 
 | 7 | `DmAccept { to, group, token, key_packages }` | Answers a `DmRequest` with a KeyPackage bundle for the new group. |
 | 8 | `InviteProof { token, proof }` | A joiner's proof that they hold the invite link `token` belongs to (see "Other formats"). |
 | 9 | `Extension(Extension)` | A message for an add-on or another program, described below. |
-| 10 | `AppInfo { app_version }` | The socketchat version the sender runs. Apps keep at most 32 characters of it. Each app sends it once to every room that has not heard its current version, and again after someone joins. |
+| 10 | `AppInfo { app_version }` | The Socketchat version the sender runs. Apps keep at most 32 characters of it. Each app sends it once to every room that has not heard its current version, and again after someone joins. |
 | 11 | `CloseVote { close_id, yes }` | An admin's vote on closing the room. `close_id` is 16 random bytes that name one request to close: the first yes starts a request, and later votes name it. |
 | 12 | `Closed { close_id }` | Request `close_id` passed, and the sender is closing the room. |
 
-Variants 9 to 12 are new in socketchat 0.5.0.
+Variants 9 to 12 are new in Socketchat 0.5.0.
 
-- **Skip rule.** An app ignores an application message it cannot decode. socketchat 0.4.0 cannot decode variants 9 to 12, so it skips them and shows nothing.
+- **Skip rule.** An app ignores an application message it cannot decode. Socketchat 0.4.0 cannot decode variants 9 to 12, so it skips them and shows nothing.
 - **Append-only rule.** New variants go at the end of the enum, and an existing variant's fields never change, so an older app still decodes every variant it knows.
 - **Closing.** Apps count a `CloseVote` or a `Closed` only from an admin still in the room, and only each admin's newest vote on a request. A request passes when enough admins say yes: every admin when the room has up to 3, and `n / 2 + 1` of `n` admins above that. It ends without closing once too many say no for the rest to reach that number, or 7 days after its first vote. The admin whose yes passes the request finishes the close at once: it posts `Closed`, removes everyone else with one Commit, then sends `LastLeave`. Other apps end the room when they read that `Closed` or the Commit that removes them. Another admin whose yes is in the count finishes the close the same way only if its app finds the request passed before any `Closed` arrives, as when the first admin's app stopped part way. Racing Commits resolve through the server's epoch check.
 

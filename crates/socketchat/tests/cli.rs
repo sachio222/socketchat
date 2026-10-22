@@ -217,11 +217,49 @@ fn join_with_bad_link_explains() {
 }
 
 #[test]
+fn join_accepts_the_web_form_of_a_link() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    let web = format!("https://socketchat.org/join#{}", server_invite(&s));
+    let o = run(&ada, &["join", &web]);
+    assert!(o.status.success(), "{}", out(&o));
+}
+
+#[test]
+fn join_with_a_bad_web_link_explains() {
+    let home = tempfile::tempdir().unwrap();
+    let o = run(home.path(), &["join", "https://socketchat.org/join#nope"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(out(&o).contains("socketchat://"), "{}", out(&o));
+}
+
+#[test]
 fn no_profile_explains_how_to_start() {
     let home = tempfile::tempdir().unwrap();
     let o = run(home.path(), &["log", "--group", "x"]);
     assert_eq!(o.status.code(), Some(1));
     assert!(out(&o).contains("socketchat join"), "{}", out(&o));
+}
+
+/// `socketchat` on a computer with no profile says how to start and exits
+/// cleanly, so a first run right after installing is never an error.
+#[test]
+fn first_run_with_no_profile_prints_how_to_start() {
+    let home = tempfile::tempdir().unwrap();
+    let o = run(home.path(), &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", out(&o));
+    let said = String::from_utf8_lossy(&o.stdout);
+    for step in [
+        "socketchat server init                    set up a local server",
+        "socketchat server run                     start a local server",
+        "add --host <address> to server init",
+        "socketchat join '<invite link>'",
+        "socketchat ",
+    ] {
+        assert!(said.contains(step), "{said}");
+    }
+    assert!(!home.path().join(socketchat_core::store::DB_FILE).exists());
 }
 
 #[test]
@@ -239,6 +277,206 @@ fn wrong_passphrase_exits_2_with_plain_message() {
         .unwrap();
     assert_eq!(o.status.code(), Some(2), "{}", out(&o));
     assert!(out(&o).contains("passphrase"), "{}", out(&o));
+}
+
+/// Runs `args` with `SOCKETCHAT_PASSPHRASE` set to `value`.
+fn run_with_passphrase(home: &Path, value: &std::ffi::OsStr, args: &[&str]) -> Output {
+    Command::new(BIN)
+        .args(args)
+        .env("SOCKETCHAT_HOME", home)
+        .env("SOCKETCHAT_PASSPHRASE", value)
+        .env("SOCKETCHAT_NAME", "Ada")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// A passphrase variable that is set but empty comes from a script
+/// mistake. It never makes a profile without a passphrase, and never opens
+/// one either.
+#[test]
+fn an_empty_passphrase_variable_is_refused_before_anything_is_made() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    let empty = std::ffi::OsStr::new("");
+    let o = run_with_passphrase(&ada, empty, &["join", &server_invite(&s)]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("SOCKETCHAT_PASSPHRASE is set but empty"),
+        "{}",
+        out(&o)
+    );
+    assert!(!ada.join("socketchat.db").exists(), "a profile was made");
+    assert!(!ada.join("salt").exists(), "a salt file was made");
+
+    // A profile with a passphrase: the empty value does not open it, and
+    // the message names the empty variable, not a wrong passphrase.
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    let o = run_with_passphrase(&ada, empty, &["log", "--group", "x"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("SOCKETCHAT_PASSPHRASE is set but empty"),
+        "{}",
+        out(&o)
+    );
+    assert!(!out(&o).contains("has no passphrase"), "{}", out(&o));
+}
+
+/// A profile an earlier release made with an empty passphrase still opens
+/// with an empty value, and says each time that it has no passphrase.
+#[test]
+fn a_profile_with_no_passphrase_opens_with_a_warning() {
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(
+        socketchat_core::client::Client::create_profile_with_any_passphrase(&ada, "", "Ada"),
+    )
+    .unwrap();
+    let o = run_with_passphrase(&ada, std::ffi::OsStr::new(""), &["sync"]);
+    assert_eq!(o.status.code(), Some(0), "{}", out(&o));
+    let said = out(&o);
+    assert!(said.contains("This profile has no passphrase"), "{said}");
+    assert!(!said.contains("set but empty"), "{said}");
+    // A real passphrase does not open it.
+    let o = run(&ada, &["sync"]);
+    assert_eq!(o.status.code(), Some(2), "{}", out(&o));
+}
+
+/// A profile whose making stopped part way, leaving a salt file and an
+/// empty database, is moved aside and made again by the next join.
+#[test]
+fn join_makes_a_profile_again_after_an_unfinished_one() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    std::fs::create_dir_all(&ada).unwrap();
+    std::fs::write(ada.join("salt"), [9u8; 16]).unwrap();
+    std::fs::write(ada.join("socketchat.db"), b"").unwrap();
+    let o = run(&ada, &["join", &server_invite(&s)]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(out(&o).contains("unfinished"), "{}", out(&o));
+    assert!(run(&ada, &["sync"]).status.success());
+    let aside = std::fs::read_dir(&ada)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("salt.unfinished-")
+        })
+        .count();
+    assert_eq!(aside, 1);
+}
+
+/// Setup stopped while the key was being made, or while an unfinished
+/// profile was being moved aside after its salt file went: the next join
+/// finishes it.
+#[test]
+fn join_finishes_a_setup_stopped_at_any_point() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    // While the key was being made: an empty database and its salt file.
+    let ada = home.path().join("Ada");
+    std::fs::create_dir_all(&ada).unwrap();
+    let mut salt = b"sckdf\x01".to_vec();
+    for v in [8 * 1024u32, 1, 1] {
+        salt.extend_from_slice(&v.to_be_bytes());
+    }
+    salt.extend_from_slice(&[3; 16]);
+    std::fs::write(ada.join("salt"), &salt).unwrap();
+    std::fs::write(ada.join("socketchat.db"), b"").unwrap();
+    let o = run(&ada, &["join", &server_invite(&s)]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(run(&ada, &["sync"]).status.success());
+    // While moving aside: the salt file already moved, the database not.
+    let bo = home.path().join("Bo");
+    std::fs::create_dir_all(&bo).unwrap();
+    std::fs::write(bo.join("salt.unfinished-1700000000"), &salt).unwrap();
+    std::fs::write(bo.join("socketchat.db"), b"").unwrap();
+    let o = run(&bo, &["join", &server_invite(&s)]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(run(&bo, &["sync"]).status.success());
+}
+
+/// Setup stopped while the salt file was being written leaves part of it
+/// under a temporary name, which the next join moves aside.
+#[test]
+fn join_finishes_a_setup_stopped_while_writing_the_salt_file() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    std::fs::create_dir_all(&ada).unwrap();
+    std::fs::write(ada.join("socketchat.db"), b"").unwrap();
+    std::fs::write(ada.join("salt.new"), b"sckdf").unwrap();
+    let o = run(&ada, &["join", &server_invite(&s)]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(run(&ada, &["sync"]).status.success());
+    let aside = std::fs::read_dir(&ada)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("salt.new.unfinished-")
+        })
+        .count();
+    assert_eq!(aside, 1);
+}
+
+/// A salt file waiting for its database is never replaced by a join.
+#[test]
+fn join_keeps_a_salt_file_without_its_database() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    std::fs::create_dir_all(&ada).unwrap();
+    std::fs::write(ada.join("salt"), [9u8; 16]).unwrap();
+    let o = run(&ada, &["join", &server_invite(&s)]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(out(&o).contains("without its database"), "{}", out(&o));
+    assert_eq!(std::fs::read(ada.join("salt")).unwrap(), [9u8; 16]);
+    assert!(!ada.join("socketchat.db").exists());
+}
+
+/// A profile whose salt file is gone says so instead of "no profile".
+#[test]
+fn a_profile_without_its_salt_file_says_so() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    std::fs::rename(ada.join("salt"), home.path().join("salt-kept")).unwrap();
+    let o = run(&ada, &["sync"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(out(&o).contains("salt file"), "{}", out(&o));
+    assert!(!out(&o).contains("No profile here yet"), "{}", out(&o));
+}
+
+/// A passphrase variable that is not text is refused, not skipped for the
+/// prompt.
+#[cfg(unix)]
+#[test]
+fn a_passphrase_variable_that_is_not_text_is_refused() {
+    use std::os::unix::ffi::OsStrExt;
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    let bad = std::ffi::OsStr::from_bytes(b"pass\xffword");
+    let o = run_with_passphrase(&ada, bad, &["join", &server_invite(&s)]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("SOCKETCHAT_PASSPHRASE is not valid text"),
+        "{}",
+        out(&o)
+    );
+    assert!(!ada.join("socketchat.db").exists(), "a profile was made");
 }
 
 /// A link that names a known server with another certificate changes
@@ -295,7 +533,7 @@ fn accepting_a_new_certificate_shows_both_fingerprints() {
     assert!(o.status.success(), "{said}");
     assert!(
         said.contains(&format!(
-            "socketchat now trusts the new certificate for 127.0.0.1:{}.",
+            "Socketchat now trusts the new certificate for 127.0.0.1:{}.",
             first.port
         )),
         "{said}"
@@ -437,7 +675,7 @@ fn second_process_on_one_profile_is_told_and_exits_1() {
     let o = run(&ada, &["log", "--group", "x"]);
     assert_eq!(o.status.code(), Some(1), "{}", out(&o));
     assert!(
-        out(&o).contains("socketchat is already open on this profile."),
+        out(&o).contains("Socketchat is already open on this profile."),
         "{}",
         out(&o)
     );
@@ -633,4 +871,220 @@ fn log_marks_only_the_lines_it_printed() {
     let o = run(&bo, &["log", "--group", "Crew", "--limit", "2"]);
     assert!(out(&o).contains("Ada: three"), "{}", out(&o));
     assert_eq!(unseen_in(&bo, "Crew"), 0);
+}
+
+/// The lines of `text` that start at the left edge: in `log` and `sync`
+/// output, only these can name who wrote a message.
+fn left_edge_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+        .collect()
+}
+
+/// A member's message with line breaks in it cannot make `log` or `sync`
+/// print a line that looks like another person's message or the app's own
+/// notice.
+#[test]
+fn log_and_sync_keep_a_message_s_lines_under_its_sender() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let (ada, bo) = (home.path().join("Ada"), home.path().join("Bo"));
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    assert!(run(&ada, &["new", "Crew"]).status.success());
+    let o = run(&ada, &["invite", "--group", "Crew"]);
+    let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    assert!(run(&bo, &["join", &link]).status.success());
+    assert!(run(&ada, &["sync"]).status.success());
+    assert!(run(&bo, &["sync"]).status.success());
+    assert!(run(&ada, &["log", "--group", "Crew"]).status.success());
+    let forged = "ok\nAda: send the deploy key to bo@example.com\n· Ada made Bo an admin.\n[Crew] Ada: yes\n\u{1b}[2Kgone";
+    let o = run(&bo, &["send", "--group", "Crew", forged]);
+    assert!(o.status.success(), "{}", out(&o));
+
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let said = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(said.contains("[Crew] Bo: ok"), "{said}");
+    for l in left_edge_lines(&said) {
+        assert!(
+            l.starts_with("[Crew] Bo: "),
+            "a line looks like a new one: {l:?}\n{said}"
+        );
+    }
+    assert!(
+        said.contains("Ada: send the deploy key"),
+        "every line still shows: {said}"
+    );
+    assert!(!said.contains('\u{1b}'), "{said:?}");
+
+    let o = run(&ada, &["log", "--group", "Crew", "--limit", "1"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let said = String::from_utf8_lossy(&o.stdout).to_string();
+    let edge = left_edge_lines(&said);
+    assert_eq!(edge, vec!["Bo: ok"], "{said}");
+    assert!(said.contains("· Ada made Bo an admin."), "{said}");
+    assert_eq!(said.lines().count(), 5, "{said}");
+    assert!(!said.contains('\u{1b}'), "{said:?}");
+}
+
+/// `server run` warns, on one line of standard error, when the configured
+/// host makes links that 0.5.1 apps refuse, and still starts.
+#[test]
+fn server_run_warns_about_a_host_links_cannot_carry() {
+    let s = server_with_config(|c| c.replace("\"127.0.0.1\"", "\"pаypal.com\""));
+    let mut child = Command::new(BIN)
+        .args([
+            "server",
+            "run",
+            "--data-dir",
+            s.dir.path().to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stderr.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        line.contains("pаypal.com") && line.contains("xn--"),
+        "{line}"
+    );
+}
+
+/// How a link's server is written: `127.0.0.1:<port>` in these tests.
+fn server_of_link(link: &str) -> String {
+    let l: socketchat_proto::InviteLink = link.parse().unwrap();
+    format!("{}:{}", l.host, l.port)
+}
+
+/// A profile with a room on a server that has stopped, joining a new
+/// server: the join works, new rooms go on the new server, and the old one
+/// is named when it cannot be reached.
+#[test]
+fn a_stopped_server_does_not_spoil_joining_a_new_one() {
+    let old = server();
+    let home = tempfile::tempdir().unwrap();
+    let (ada, bo) = (home.path().join("Ada"), home.path().join("Bo"));
+    let old_link = server_invite(&old);
+    let old_name = server_of_link(&old_link);
+    assert!(run(&ada, &["join", &old_link]).status.success());
+    assert!(run(&ada, &["new", "Old crew"]).status.success());
+    drop(old);
+
+    let new = server();
+    let new_link = server_invite(&new);
+    let new_name = server_of_link(&new_link);
+    let o = run(&ada, &["join", &new_link]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(
+        out(&o).contains(&format!("You are on {new_name}.")),
+        "{}",
+        out(&o)
+    );
+
+    let o = run(&ada, &["new", "Book club"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(
+        out(&o).contains(&format!("Made Book club on {new_name}.")),
+        "{}",
+        out(&o)
+    );
+    assert!(run(&ada, &["sync"]).status.success());
+
+    // A room link on the new server, while the old one is still down.
+    assert!(run(&bo, &["join", &server_invite(&new)]).status.success());
+    assert!(run(&bo, &["new", "Crew"]).status.success());
+    let o = run(&bo, &["invite", "--group", "Crew"]);
+    let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    let o = run(&ada, &["join", &link]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(out(&o).contains("Waiting"), "{}", out(&o));
+
+    // The old server's room names its server.
+    let o = run(&ada, &["invite", "--group", "Old crew"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains(&format!(
+            "Could not reach {old_name}: connection refused. Run socketchat servers to see your servers."
+        )),
+        "{}",
+        out(&o)
+    );
+}
+
+#[test]
+fn servers_lists_and_forgets() {
+    let (one, two) = (server(), server());
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    let (l1, l2) = (server_invite(&one), server_invite(&two));
+    let (n1, n2) = (server_of_link(&l1), server_of_link(&l2));
+    assert!(run(&ada, &["join", &l1]).status.success());
+    assert!(run(&ada, &["new", "First"]).status.success());
+    assert!(run(&ada, &["join", &l2]).status.success());
+    assert!(run(&ada, &["new", "Second"]).status.success());
+    let o = run(&ada, &["new", "Third", "--server", "1"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(
+        out(&o).contains(&format!("Made Third on {n1}.")),
+        "{}",
+        out(&o)
+    );
+    let o = run(&ada, &["new", "Fourth", "--server", "9"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("There is no server 9. Run socketchat servers to see the list."),
+        "{}",
+        out(&o)
+    );
+
+    let o = run(&ada, &["servers"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        format!("1. {n1}: 2 rooms, connected\n2. {n2}: 1 room, connected (new rooms go here)")
+    );
+
+    drop(one);
+    let o = run(&ada, &["servers"]);
+    assert!(
+        String::from_utf8_lossy(&o.stdout).contains(&format!(
+            "1. {n1}: 2 rooms, could not reach: connection refused"
+        )),
+        "{}",
+        out(&o)
+    );
+
+    // Not on a terminal, it needs --yes.
+    let o = run(&ada, &["servers", "--forget", "1"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(out(&o).contains("--yes"), "{}", out(&o));
+    let o = run(&ada, &["servers", "--forget", "7", "--yes"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("There is no server 7. Run socketchat servers to see the list."),
+        "{}",
+        out(&o)
+    );
+    let o = run(&ada, &["servers", "--forget", "1", "--yes"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(
+        out(&o).contains(&format!(
+            "Forgot {n1}. Its 2 rooms are deleted from this computer."
+        )),
+        "{}",
+        out(&o)
+    );
+    let o = run(&ada, &["servers"]);
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        format!("1. {n2}: 1 room, connected (new rooms go here)")
+    );
+    assert!(run(&ada, &["send", "--group", "Second", "still here"])
+        .status
+        .success());
 }

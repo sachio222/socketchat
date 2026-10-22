@@ -1,0 +1,27 @@
+name: Release
+permissions:
+  "contents": "read"
+
+on:
+  push:
+
+jobs:
+  build-local-artifacts:
+    runs-on: ubuntu-22.04
+    permissions:
+      "contents": "read"
+    steps:
+      - name: Build artifacts
+        env:
+          TAG_FLAG: --tag=v1.0.0
+        run: |
+          dist build $TAG_FLAG --artifacts=local
+      - name: "Release binaries hold no test-only code"
+        shell: bash
+        run: |
+          sh scripts/release-binary-check.sh target/distrib/socketchat-*/socketchat
+
+  build-global-artifacts:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: dist build --artifacts=global

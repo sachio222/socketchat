@@ -23,6 +23,6 @@ expression: s
 │                  ││                                      ││                  │
 └──────────────────┘└──────────────────────────────────────┘└──────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  What's on your mind, Book club?                               / for commands│
+│  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-Saved to ~/Downloads/books.pdf
+Saved to ~/Downloads/books.pdf                                  socketchat 0.5.1

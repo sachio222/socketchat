@@ -1,0 +1,20 @@
+name: Release
+permissions:
+  "contents": "read"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+
+jobs:
+  build-local-artifacts:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "Release binaries hold no test-only code"
+        run: sh scripts/release-binary-check.sh target/distrib/socketchat-*/socketchat
+      - name: Build artifacts
+        run: |
+          dist build --artifacts=local

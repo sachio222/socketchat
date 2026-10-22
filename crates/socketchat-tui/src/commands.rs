@@ -1,5 +1,7 @@
 //! Slash commands typed in the input line.
 
+use socketchat_core::sanitize;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Invite {
@@ -32,10 +34,20 @@ pub enum Command {
     Invites,
     /// Cancel the link at this number in the last `/invites` list.
     Cancel(usize),
+    Servers,
+    /// Forget the server at this number in the last `/servers` list.
+    Forget(usize),
     Mute,
     Unmute,
     Details,
     Clear,
+    /// The version, what socketchat is and where to find it.
+    About,
+    /// Show the colors in use, or switch to the named ones.
+    Theme(Option<String>),
+    /// Say whether clicks and the scroll wheel work, or turn them on or
+    /// off.
+    Mouse(Option<bool>),
     Help,
     Quit,
 }
@@ -73,12 +85,38 @@ pub const HELP: &[(&str, &str)] = &[
     ("/keep", "say no to closing this room (admins)"),
     ("/invites", "see your open invite links"),
     ("/cancel <number>", "stop an invite link from /invites"),
+    ("/servers", "see your servers and whether each is connected"),
+    (
+        "/forget <number>",
+        "delete a server and its rooms from this computer",
+    ),
     ("/mute", "hide this room's new-message count"),
     ("/unmute", "show this room's new-message count again"),
     ("/details", "see this room's admins, size and age"),
     ("/clear", "delete this room's messages from this computer"),
-    ("/quit", "close socketchat"),
+    (
+        "/theme [name]",
+        "see or change the colors: phosphor or classic",
+    ),
+    (
+        "/mouse [on|off]",
+        "turn mouse clicks and scrolling on or off",
+    ),
+    ("/about", "see the version and what Socketchat is"),
+    ("/quit", "close Socketchat"),
 ];
+
+/// Each command word in `HELP`, once, in `HELP` order: what Tab completes.
+pub fn command_words() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = vec![];
+    for (c, _) in HELP {
+        let word = c.split_whitespace().next().unwrap_or(c);
+        if !out.contains(&word) {
+            out.push(word);
+        }
+    }
+    out
+}
 
 /// Splits on spaces, keeping "quoted parts" together.
 fn words(s: &str) -> Vec<String> {
@@ -125,6 +163,9 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         "/send" => Command::Send(need("/send <path>")?),
         "/save" => {
             let w = words(&need("/save <file> [folder]")?);
+            if w.first().is_none_or(|f| f.trim().is_empty()) {
+                return Err("Usage: /save <file> [folder]".into());
+            }
             Command::Save {
                 file: w[0].clone(),
                 dir: (w.len() > 1).then(|| w[1..].join(" ")),
@@ -154,10 +195,23 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
             rest.parse()
                 .map_err(|_| "Usage: /cancel <number>".to_string())?,
         ),
+        "/servers" => Command::Servers,
+        "/forget" => Command::Forget(
+            rest.parse()
+                .map_err(|_| "Usage: /forget <number>".to_string())?,
+        ),
         "/mute" => Command::Mute,
         "/unmute" => Command::Unmute,
         "/details" => Command::Details,
         "/clear" => Command::Clear,
+        "/about" => Command::About,
+        "/theme" => Command::Theme((!rest.is_empty()).then(|| rest.to_string())),
+        "/mouse" => Command::Mouse(match rest {
+            "" => None,
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => return Err("Usage: /mouse on, or /mouse off".into()),
+        }),
         "/help" => Command::Help,
         "/quit" => Command::Quit,
         other => {
@@ -166,4 +220,160 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
             ))
         }
     })
+}
+
+/// How many files a refused `/save` lists by name; older ones are counted.
+const PICKS_SHOWN: usize = 3;
+
+/// Which file `/save <want>` means among a room's files, oldest first.
+/// `want` is a file's name, or its name and its number among the files
+/// with that name, as `a.txt:2`. Names never hold `:`, so the number
+/// cannot be part of a name. A name more than one file has is refused,
+/// with the newest files' numbers, senders and times (from `time`), and
+/// the numbers of the older ones.
+pub fn pick_file<'a>(
+    files: &'a [socketchat_core::client::SharedFile],
+    want: &str,
+    time: impl Fn(u64) -> String,
+) -> Result<&'a socketchat_core::client::SharedFile, String> {
+    let named = |n: &str| -> Vec<&'a socketchat_core::client::SharedFile> {
+        files
+            .iter()
+            .filter(|f| sanitize::single_spaced(&f.offer.name) == sanitize::single_spaced(n))
+            .collect()
+    };
+    let mut hits = named(want);
+    if let Some((base, k)) = want.rsplit_once(':') {
+        let picked = k.parse::<usize>().ok().and_then(|k| {
+            let same = named(base);
+            k.checked_sub(1).and_then(|i| same.get(i).copied())
+        });
+        if let Some(f) = picked.filter(|f| !hits.iter().any(|h| h.offer.id == f.offer.id)) {
+            hits.push(f);
+        }
+    }
+    match hits.as_slice() {
+        [] => Err(format!("No file called {want} in this chat.")),
+        [one] => Ok(one),
+        many => {
+            // Newest first; the oldest past the first few are only counted.
+            let mut many = many.to_vec();
+            let order = |f: &&socketchat_core::client::SharedFile| {
+                files.iter().position(|x| x.offer.id == f.offer.id)
+            };
+            many.sort_by_key(|f| std::cmp::Reverse(order(f)));
+            let label = |f: &socketchat_core::client::SharedFile| {
+                let n = named(&f.offer.name)
+                    .iter()
+                    .position(|x| x.offer.id == f.offer.id)
+                    .map_or(0, |i| i + 1);
+                match f.offer.name.contains(char::is_whitespace) {
+                    true => format!("\"{}\":{n}", f.offer.name),
+                    false => format!("{}:{n}", f.offer.name),
+                }
+            };
+            let shown = many.len().min(PICKS_SHOWN);
+            let choices: Vec<String> = many[..shown]
+                .iter()
+                .map(|f| {
+                    let who = if f.mine { "you" } else { f.from.as_str() };
+                    let when = match f.sent_unix {
+                        0 => String::new(),
+                        t => format!(" at {}", time(t)),
+                    };
+                    format!("/save {} for the one {who} sent{when}", label(f))
+                })
+                .collect();
+            let (last, first) = choices.split_last().expect("two or more");
+            let older = match &many[shown..] {
+                [] => String::new(),
+                [one] => format!(" The older one is {}.", label(one)),
+                rest => format!(
+                    " The {} older ones are {} to {}.",
+                    rest.len(),
+                    label(rest[rest.len() - 1]),
+                    label(rest[0])
+                ),
+            };
+            Err(format!(
+                "More than one file is called {want}. Type {}, or {last}.{older}",
+                first.join(", ")
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_with_an_empty_name_is_a_usage_error() {
+        assert!(parse_command("/save \"\"").is_err());
+        assert!(parse_command("/save \"   \"").is_err());
+        assert_eq!(
+            parse_command("/save \"my file.txt\":2 ~/Desktop"),
+            Ok(Command::Save {
+                file: "my file.txt:2".into(),
+                dir: Some("~/Desktop".into()),
+            })
+        );
+    }
+
+    fn shared(id: u8, name: &str, from: &str, mine: bool, at: u64) -> SharedFile {
+        SharedFile {
+            offer: socketchat_core::files::FileOffer {
+                id: socketchat_proto::msg::FileId([id; 16]),
+                name: name.into(),
+                size: 1,
+                mime: "application/octet-stream".into(),
+                sha256: [0; 32],
+                key: [0; 32],
+                nonce_prefix: [0; 19],
+            },
+            from: from.into(),
+            mine,
+            sent_unix: at,
+        }
+    }
+
+    use socketchat_core::client::SharedFile;
+
+    #[test]
+    fn a_long_list_shows_the_newest_few() {
+        let files: Vec<SharedFile> = (1..=6)
+            .map(|i| shared(i, "a.txt", "Ada", false, 100 + i as u64))
+            .collect();
+        let time = |t: u64| format!("t{t}");
+        let err = pick_file(&files, "a.txt", time).unwrap_err();
+        assert_eq!(
+            err,
+            "More than one file is called a.txt. Type /save a.txt:6 for the one Ada sent at t106, /save a.txt:5 for the one Ada sent at t105, or /save a.txt:4 for the one Ada sent at t104. The 3 older ones are a.txt:1 to a.txt:3."
+        );
+        let err = pick_file(&files[..4], "a.txt", time).unwrap_err();
+        assert!(err.ends_with(" The older one is a.txt:1."), "{err}");
+    }
+
+    #[test]
+    fn a_shared_name_lists_each_file_to_pick_from() {
+        let files = [
+            shared(1, "my plan.txt", "Ada", false, 10),
+            shared(2, "notes.txt", "Ada", false, 11),
+            shared(3, "my plan.txt", "Bo", true, 12),
+            shared(4, "my plan.txt", "someone", false, 0),
+        ];
+        let time = |t: u64| format!("t{t}");
+        let err = pick_file(&files, "my plan.txt", time).unwrap_err();
+        assert_eq!(
+            err,
+            "More than one file is called my plan.txt. Type /save \"my plan.txt\":3 for the one someone sent, /save \"my plan.txt\":2 for the one you sent at t12, or /save \"my plan.txt\":1 for the one Ada sent at t10."
+        );
+        let id = |r: Result<&SharedFile, String>| r.unwrap().offer.id.0[0];
+        assert_eq!(id(pick_file(&files, "my plan.txt:2", time)), 3);
+        assert_eq!(id(pick_file(&files, "notes.txt", time)), 2);
+        assert_eq!(id(pick_file(&files, "notes.txt:1", time)), 2);
+        assert!(pick_file(&files, "notes.txt:2", time).is_err());
+        assert!(pick_file(&files, "notes.txt:0", time).is_err());
+        assert!(pick_file(&files, "my plan.txt:x", time).is_err());
+    }
 }

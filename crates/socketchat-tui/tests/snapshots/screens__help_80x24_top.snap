@@ -24,5 +24,5 @@ expression: first
 └─│/keep                 say no to closing this room (admins)                │─┘
 ┌─│/invites              see your open invite links                          │─┐
 │ │↓ more                                                                    │s│
-└─└──────────────────────────────────────────────────────────────────────────┘─┘
-Up/Down scroll · Esc close
+└─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
+Up/Down scroll · Esc close                                      socketchat 0.5.1

@@ -427,3 +427,285 @@ async fn member_cannot_remove_others_even_when_members_can_invite() {
         "{r:?}"
     );
 }
+
+// ---------- after someone leaves or is removed ----------
+
+fn leaf_of(g: &MlsGroup, k: &socketchat_core::keys::KeyPair) -> LeafNodeIndex {
+    g.members()
+        .find(|m| m.signature_key == k.public().0)
+        .unwrap()
+        .index
+}
+
+/// `admin` gives the admin role to `member` as well.
+async fn share_admin(admin: &mut Person, member: &mut Person) {
+    let bundle = admin
+        .group
+        .as_mut()
+        .unwrap()
+        .commit_builder()
+        .propose_group_context_extensions(group_context_extensions(&[
+            admin.key.public(),
+            member.key.public(),
+        ]))
+        .unwrap()
+        .load_psks(admin.prov.storage())
+        .unwrap()
+        .build(admin.prov.rand(), admin.prov.crypto(), &admin.key, |_| true)
+        .unwrap()
+        .stage_commit(&admin.prov)
+        .unwrap();
+    let (msg, _, _) = bundle.into_messages();
+    let r = admin.post(ser(&msg), None).await;
+    assert!(matches!(r, Response::Posted { .. }), "{r:?}");
+    admin.settle(&r);
+    member.catch_up().await;
+}
+
+/// `admin` removes `who` from the group.
+async fn remove(admin: &mut Person, who: &Person) {
+    let idx = leaf_of(admin.group.as_ref().unwrap(), &who.key);
+    let (c, _, _) = admin
+        .group
+        .as_mut()
+        .unwrap()
+        .remove_members(&admin.prov, &admin.key, &[idx])
+        .unwrap();
+    let r = admin.post(ser(&c), None).await;
+    assert!(matches!(r, Response::Posted { .. }), "{r:?}");
+    admin.settle(&r);
+}
+
+/// A person who comes back with `who`'s group key on a new connection.
+async fn with_key_of(e: &Env, who: &Person) -> Person {
+    let mut p = e.person().await;
+    p.key = who.key.clone();
+    p
+}
+
+#[tokio::test]
+async fn removed_members_links_stop_working() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let mut b = e.member(&mut a).await;
+    let t = b.invite().await;
+    remove(&mut a, &b).await;
+    let mut c = e.person().await;
+    let r = c.redeem_mailbox(t).await;
+    assert!(matches!(r, Response::Refused(_)), "{r:?}");
+}
+
+#[tokio::test]
+async fn links_of_a_member_who_left_stop_working() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let mut b = e.member(&mut a).await;
+    let t = b.invite().await;
+    let gb = b.group.as_mut().unwrap();
+    let leave = gb.leave_group(&b.prov, &b.key).unwrap();
+    let r = b.post(ser(&leave), None).await;
+    assert!(matches!(r, Response::Posted { .. }), "{r:?}");
+    a.catch_up().await;
+    let ga = a.group.as_mut().unwrap();
+    let (c, _, _) = ga.commit_to_pending_proposals(&a.prov, &a.key).unwrap();
+    let r = a.post(ser(&c), None).await;
+    assert!(matches!(r, Response::Posted { .. }), "{r:?}");
+    a.settle(&r);
+    let mut c = e.person().await;
+    let r = c.redeem_mailbox(t).await;
+    assert!(matches!(r, Response::Refused(_)), "{r:?}");
+}
+
+#[tokio::test]
+async fn removed_key_cannot_register_again() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let b = e.member(&mut a).await;
+    remove(&mut a, &b).await;
+    // A link from an admin still in the room does not take the old key.
+    let t = a.invite().await;
+    let mut back = with_key_of(&e, &b).await;
+    let r = back.redeem_mailbox(t).await;
+    assert!(matches!(r, Response::Refused(_)), "{r:?}");
+    // The link still works for a fresh key.
+    let mut c = e.person().await;
+    assert_eq!(c.redeem_mailbox(t).await, Response::Ok);
+}
+
+/// A removed admin cannot come back through a link they made while in the
+/// room, with their old key or a new one.
+#[tokio::test]
+async fn removed_admin_cannot_come_back_through_their_own_link() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let mut b = e.member(&mut a).await;
+    share_admin(&mut a, &mut b).await;
+    let t = b.invite().await;
+    remove(&mut a, &b).await;
+    let mut back = with_key_of(&e, &b).await;
+    let r = back.redeem_mailbox(t).await;
+    assert!(matches!(r, Response::Refused(_)), "{r:?}");
+    let mut fresh = e.person().await;
+    let r = fresh.redeem_mailbox(t).await;
+    assert!(matches!(r, Response::Refused(_)), "{r:?}");
+}
+
+/// Removing one member leaves everyone else's links working.
+#[tokio::test]
+async fn other_links_outlive_a_removal() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let b = e.member(&mut a).await;
+    let mut c = e.member(&mut a).await;
+    let ta = a.invite().await;
+    let tc = c.invite().await;
+    remove(&mut a, &b).await;
+    c.catch_up().await;
+    let mut d = e.person().await;
+    assert_eq!(d.redeem_mailbox(ta).await, Response::Ok);
+    let r = a.add(d.key_package(), ta).await;
+    assert!(matches!(r, Response::Posted { .. }), "{r:?}");
+    c.catch_up().await;
+    let mut f = e.person().await;
+    assert_eq!(f.redeem_mailbox(tc).await, Response::Ok);
+    let r = c.add(f.key_package(), tc).await;
+    assert!(matches!(r, Response::Posted { .. }), "{r:?}");
+}
+
+/// When a room goes, the server forgets the keys of the people who left it.
+#[tokio::test]
+async fn ending_a_room_forgets_who_left_it() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let b = e.member(&mut a).await;
+    remove(&mut a, &b).await;
+    let db = rusqlite::Connection::open(e.d.path().join("server.db")).unwrap();
+    let held = |db: &rusqlite::Connection| -> i64 {
+        db.query_row("SELECT COUNT(*) FROM retired_keys", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(held(&db), 1);
+    let r = a
+        .conn
+        .req(Request::LastLeave {
+            group: a.gid.unwrap(),
+        })
+        .await;
+    assert_eq!(r, Response::Ok);
+    assert_eq!(held(&db), 0);
+}
+
+/// `p` redeems `t` and lodges a KeyPackage, as a joiner's app does.
+async fn redeem_and_lodge(p: &mut Person, t: socketchat_proto::Token) -> KeyPackage {
+    assert_eq!(p.redeem_mailbox(t).await, Response::Ok);
+    let kp = p.key_package();
+    let bundle = socketchat_proto::msg::to_frame(&vec![kp.tls_serialize_detached().unwrap()])
+        .unwrap()[4..]
+        .to_vec();
+    let r = p
+        .conn
+        .req(Request::RedeemInvite {
+            token: t,
+            key_package: bundle,
+            mac: [0; 32],
+        })
+        .await;
+    assert_eq!(r, Response::JoinLodged);
+    kp
+}
+
+/// Whether the server still knows `p`'s key when it signs in again.
+async fn known(p: &mut Person) -> bool {
+    let ch = p.conn.challenge().await;
+    let r = p
+        .conn
+        .req(Request::Prove {
+            key: p.key.public(),
+            sig: auth_sig(&p.key, &ch),
+        })
+        .await;
+    r == Response::Ok
+}
+
+/// Carol asked to join through Bo's link, then Bo was removed. Nobody can
+/// complete that join afterwards, and the server forgets Carol's waiting
+/// mailbox.
+#[tokio::test]
+async fn waiting_join_through_a_removed_members_link_is_dropped() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let mut b = e.member(&mut a).await;
+    let t = b.invite().await;
+    let mut c = e.person().await;
+    let kp = redeem_and_lodge(&mut c, t).await;
+    remove(&mut a, &b).await;
+    let r = a
+        .conn
+        .req(Request::PendingJoins {
+            group: a.gid.unwrap(),
+            after: None,
+        })
+        .await;
+    assert_eq!(r, Response::Joins(vec![]));
+    let r = a.add(kp, t).await;
+    assert!(matches!(r, Response::Refused(_)), "{r:?}");
+    assert!(!known(&mut c).await);
+}
+
+/// The same holds when the link expired while the join waited and the
+/// hourly sweep ran in between.
+#[tokio::test]
+async fn waiting_join_outlives_its_links_expiry_and_still_drops() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let mut b = e.member(&mut a).await;
+    let t = b.invite().await;
+    let mut c = e.person().await;
+    let kp = redeem_and_lodge(&mut c, t).await;
+    e.h.advance_clock(2 * 24 * 3600);
+    e.h.sweep_now();
+    remove(&mut a, &b).await;
+    let r = a.add(kp, t).await;
+    assert!(matches!(r, Response::Refused(_)), "{r:?}");
+    assert!(!known(&mut c).await);
+}
+
+/// One commit that adds the joiner and removes the link's maker still
+/// delivers the joiner's Welcome.
+#[tokio::test]
+async fn adding_the_joiner_while_removing_the_maker_delivers_the_welcome() {
+    let e = env().await;
+    let mut a = e.admin().await;
+    let mut b = e.member(&mut a).await;
+    let t = b.invite().await;
+    let mut c = e.person().await;
+    let kp = redeem_and_lodge(&mut c, t).await;
+    let idx = leaf_of(a.group.as_ref().unwrap(), &b.key);
+    let bundle = a
+        .group
+        .as_mut()
+        .unwrap()
+        .commit_builder()
+        .propose_adds([kp])
+        .propose_removals([idx])
+        .load_psks(a.prov.storage())
+        .unwrap()
+        .build(a.prov.rand(), a.prov.crypto(), &a.key, |_| true)
+        .unwrap()
+        .stage_commit(&a.prov)
+        .unwrap();
+    let (commit, welcome, _) = bundle.into_messages();
+    let r = a
+        .post(
+            ser(&commit),
+            Some(socketchat_proto::msg::WelcomeOut {
+                token: t,
+                welcome: ser(&welcome.unwrap()),
+                voucher: b"v".to_vec(),
+            }),
+        )
+        .await;
+    assert!(matches!(r, Response::Posted { .. }), "{r:?}");
+    a.settle(&r);
+    c.join_from_welcome(a.gid.unwrap()).await;
+}

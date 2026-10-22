@@ -1,0 +1,25 @@
+name: Release
+permissions:
+  "contents": "read"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+
+jobs:
+  build-local-artifacts:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Build artifacts
+        run: |
+          dist build --artifacts=local
+
+  build-global-artifacts:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: dist build --artifacts=global
+      # The check in another job does not count.
+      - run: sh scripts/release-binary-check.sh target/distrib/socketchat-*/socketchat

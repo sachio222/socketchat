@@ -1,5 +1,7 @@
-//! Re-review reproductions (4077bf8). Each test states the correct
-//! behavior; a failure confirms the finding.
+//! Names that still go out after an add, joins when member invites are
+//! off, certificate pins, lost replies, text with joiners and emoji tags,
+//! damaged key settings, stale pages and join requests that fail their
+//! check.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -155,7 +157,7 @@ impl BigCut {
     }
 }
 
-/// R3: with member invites turned off, a non-admin member tries to get a
+/// With member invites turned off, a non-admin member tries to get a
 /// puppet of their own into the group through an admin's open link, using
 /// what every member receives about it. Members hold only the public key
 /// that checks a join request, so the best they can do is sign with
@@ -190,9 +192,9 @@ async fn rr_member_cannot_add_puppet_when_member_invites_are_off() {
     );
 }
 
-/// R4: any link naming a known server with a different certificate re-pins
-/// it before the server is even reached, so a bogus link cuts the person
-/// off from every chat on that server.
+/// A link naming a known server with a different certificate changes no
+/// pin before the server is reached, so a bogus link cannot cut the person
+/// off from their chats on that server.
 #[tokio::test]
 async fn rr_bogus_link_does_not_repin_a_server_in_use() {
     let s = TestServer::start().await;
@@ -210,9 +212,9 @@ async fn rr_bogus_link_does_not_repin_a_server_in_use() {
     );
 }
 
-/// R5: the reply to an add commit is lost; Ada later merges it as
-/// OwnPendingCommit but never reposts her name or the group name, so the
-/// newcomer sees neither.
+/// When the reply to an add commit is lost, Ada later merges it as
+/// OwnPendingCommit and still reposts her name and the group name, so the
+/// newcomer sees both.
 #[tokio::test]
 async fn rr_lost_reply_to_add_still_welcomes_newcomer_properly() {
     let s = TestServer::start().await;
@@ -252,7 +254,7 @@ async fn rr_lost_reply_to_add_still_welcomes_newcomer_properly() {
     );
 }
 
-/// R6: message text keeps emoji ZWJ sequences, ZWNJ and flag tag sequences.
+/// Message text keeps emoji ZWJ sequences, ZWNJ and flag tag sequences.
 #[test]
 fn rr_text_keeps_joiners_and_emoji_tags() {
     use socketchat_core::sanitize::clean_text;
@@ -268,8 +270,8 @@ fn rr_text_keeps_joiners_and_emoji_tags() {
     assert!(broken.is_empty(), "{broken:?}");
 }
 
-/// R7: a salt file asking for 2^32-1 Argon2 passes hangs the app on open
-/// instead of being refused.
+/// A salt file asking for 2^32-1 Argon2 passes is refused at once instead
+/// of hanging the app on open.
 #[tokio::test]
 async fn rr_tampered_kdf_params_are_refused_quickly() {
     let dir = tempfile::tempdir().unwrap();
@@ -299,7 +301,8 @@ async fn rr_tampered_kdf_params_are_refused_quickly() {
     let _ = GroupId([0; 16]);
 }
 
-/// Control for R5: the same steps with no reply lost.
+/// Control for the lost reply to an add: the same steps with no reply
+/// lost.
 #[tokio::test]
 async fn rr_control_add_without_lost_reply() {
     let s = TestServer::start().await;
@@ -331,9 +334,9 @@ async fn rr_control_add_without_lost_reply() {
     );
 }
 
-/// R8: the joiner's connection drops right after the Welcome is taken, on
-/// the post of its Profile. The Profile and the InviteProof are never sent
-/// again, so the inviter never learns the newcomer's name or verifies them.
+/// When the joiner's connection drops right after the Welcome is taken, on
+/// the post of its Profile, the Profile and the InviteProof go out later,
+/// so the inviter still learns the newcomer's name and verifies them.
 #[tokio::test]
 async fn rr_joiner_drop_after_welcome_still_sends_profile_and_proof() {
     let s = TestServer::start().await;
@@ -367,7 +370,7 @@ async fn rr_joiner_drop_after_welcome_still_sends_profile_and_proof() {
     );
 }
 
-/// R10: a server that answers every fetch with the same page, ending where
+/// A server that answers every fetch with the same page, ending where
 /// it started, must not hold the app in a loop.
 #[tokio::test]
 async fn rr_stale_pages_from_server_do_not_freeze_sync() {
@@ -382,7 +385,7 @@ async fn rr_stale_pages_from_server_do_not_freeze_sync() {
     );
 }
 
-/// R11: a join request that fails its check stays on the server's list, so
+/// A join request that fails its check stays on the server's list, so
 /// every sync reads it again. The app says so once per session.
 #[tokio::test]
 async fn rr_bad_join_request_warns_once() {

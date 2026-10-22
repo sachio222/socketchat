@@ -87,7 +87,7 @@ async fn unsupported_reads_in_plain_words() {
             server: 1
         }
         .to_string(),
-        "this server runs an older version of socketchat that can't do that yet; ask the person who runs it to update it"
+        "this server runs an older version of Socketchat that can't do that yet; ask the person who runs it to update it"
     );
 }
 

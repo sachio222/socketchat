@@ -52,7 +52,7 @@ fn hangul_filler(c: char) -> bool {
 /// Characters that change the direction text runs in: the marks, the
 /// embeddings and overrides, and the isolates. One of these can make
 /// `exe.txt` show as `txt.exe`.
-fn direction_char(c: char) -> bool {
+pub fn direction_char(c: char) -> bool {
     matches!(
         c,
         '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
@@ -70,10 +70,43 @@ fn unsafe_in_text(c: char) -> bool {
     (c.is_control() && c != '\n') || direction_char(c)
 }
 
-/// A display name with unsafe characters removed, trimmed and capped.
+/// `s` with every run of whitespace, of any kind, turned into one plain
+/// space, and trimmed. Two names that differ only in their spacing come
+/// out the same, so a name can be typed with the spaces a keyboard makes.
+pub fn single_spaced(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A display name, room name or file name with unsafe characters removed,
+/// every run of whitespace (tabs, line breaks, wide spaces and the rest)
+/// turned into one plain space, trimmed and capped. A name then always
+/// shows its spacing, and the spaces typed in a command match it.
 pub fn clean_name(s: &str) -> String {
+    let kept: String = s
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !unsafe_in_name(*c))
+        .collect();
+    let capped: String = single_spaced(&kept).chars().take(MAX_NAME_CHARS).collect();
+    capped.trim_end().to_string()
+}
+
+/// Whether `typed` names `stored`: the same name once both are spaced as
+/// [`clean_name`] spaces them, ignoring the case of ASCII letters. A name
+/// kept before names were spaced this way still matches what is typed.
+pub fn same_name(typed: &str, stored: &str) -> bool {
+    single_spaced(typed).eq_ignore_ascii_case(&single_spaced(stored))
+}
+
+/// Longest host name, in characters, as DNS allows.
+pub const MAX_HOST_CHARS: usize = 253;
+
+/// A server's host name or address with unsafe characters removed, as
+/// for names, trimmed and capped at the longest host DNS allows rather
+/// than at a name's length.
+pub fn clean_host(s: &str) -> String {
     let cleaned: String = s.chars().filter(|c| !unsafe_in_name(*c)).collect();
-    cleaned.trim().chars().take(MAX_NAME_CHARS).collect()
+    cleaned.trim().chars().take(MAX_HOST_CHARS).collect()
 }
 
 /// Message text with control characters and direction controls removed
@@ -172,9 +205,49 @@ mod tests {
     }
 
     #[test]
+    fn hosts_keep_their_full_length_and_lose_unsafe_characters() {
+        let long = format!("{}.{}.example", "a".repeat(63), "b".repeat(63));
+        assert_eq!(clean_host(&long), long);
+        assert_eq!(clean_host("evil\x1b[2J\u{202e}.example"), "evil[2J.example");
+        assert_eq!(clean_host(&"a.".repeat(300)).chars().count(), 253);
+    }
+
+    #[test]
     fn strips_hangul_fillers() {
         assert_eq!(clean_name("\u{3164}"), "");
         assert_eq!(clean_name("D\u{115F}\u{1160}a\u{FFA0}n"), "Dan");
+    }
+
+    #[test]
+    fn names_have_single_plain_spaces() {
+        assert_eq!(clean_name("Mal  lory"), "Mal lory");
+        assert_eq!(clean_name("Mal\u{3000}lory"), "Mal lory");
+        assert_eq!(clean_name("Mal\tlory"), "Mal lory");
+        assert_eq!(clean_name("Mal\nlory"), "Mal lory");
+        assert_eq!(
+            clean_name("\u{3000}Book\u{00A0}\u{2003} club\u{2029}"),
+            "Book club"
+        );
+        assert_eq!(
+            clean_name("a \u{200B} b"),
+            "a b",
+            "a hidden character between spaces"
+        );
+        let long = format!("{} tail", "x".repeat(63));
+        assert_eq!(
+            clean_name(&long),
+            "x".repeat(63),
+            "no space left at the cap"
+        );
+    }
+
+    #[test]
+    fn names_match_whatever_their_spacing() {
+        assert!(same_name("Mal lory", "Mal  lory"));
+        assert!(same_name("mal lory", "Mal\u{3000}lory"));
+        assert!(same_name(" Mal lory ", "Mal\tlory"));
+        assert!(!same_name("Mallory", "Mal lory"));
+        assert!(!same_name("Mal", "Mal lory"));
     }
 
     #[test]

@@ -1,0 +1,32 @@
+name: Permissions in other forms
+permissions: { contents: read }
+
+on:
+  push:
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    permissions: write-all
+    steps:
+      - run: echo plan
+
+  build:
+    runs-on: ubuntu-22.04
+    permissions: { contents: write, id-token: write }
+    steps:
+      - run: echo build
+
+  test:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: "write"
+    steps:
+      - run: echo test
+
+  host:
+    runs-on: ubuntu-22.04
+    permissions: { attestations: write, contents: write, id-token: write }
+    steps:
+      - run: echo host

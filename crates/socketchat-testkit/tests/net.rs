@@ -122,6 +122,10 @@ async fn large_requests_reach_a_slow_server_whole() {
     let c = Conn::connect("127.0.0.1", proxy.port, s.fpr())
         .await
         .unwrap();
+    // Only a signed-in connection may send large frames.
+    c.register_account(s.server_invite().token, &KeyPair::generate())
+        .await
+        .unwrap();
     let big = || Request::Post {
         group: GroupId([0; 16]),
         mls: vec![7; 700_000],
@@ -137,7 +141,7 @@ async fn large_requests_reach_a_slow_server_whole() {
     })
     .await
     .expect("a large request never reached the server whole");
-    // Signed out, the server turns each one down, but it answers each one.
+    // In no room, the app is turned down each time, but each one is answered.
     for r in [replies.0, replies.1, replies.2, replies.3] {
         assert!(
             matches!(r, Ok(Response::Refused(_)) | Err(NetError::Server(_))),

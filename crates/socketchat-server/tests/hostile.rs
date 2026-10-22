@@ -69,7 +69,7 @@ fn blob(parts: &[Vec<u8>]) -> Vec<u8> {
     to_frame(&parts.to_vec()).unwrap()[4..].to_vec()
 }
 
-// ---------- C2: replies a client never reads ----------
+// ---------- Replies a client never reads ----------
 
 #[tokio::test]
 async fn unread_replies_stay_bounded() {
@@ -107,7 +107,7 @@ async fn unread_replies_stay_bounded() {
     assert!(most <= 64, "{most} replies queued for one connection");
 }
 
-// ---------- C3: fetch replies over 1 MiB ----------
+// ---------- Fetch replies over 1 MiB ----------
 
 #[tokio::test]
 async fn big_entries_come_back_across_fetches() {
@@ -163,7 +163,7 @@ async fn post_refuses_message_too_large_to_fetch() {
     );
 }
 
-// ---------- C4: junk join requests ----------
+// ---------- Junk join requests ----------
 
 async fn lodge(e: &Env, a: &mut Person, make: impl FnOnce(&Person) -> Vec<u8>) -> Response {
     let mut c = e.person().await;
@@ -212,7 +212,8 @@ async fn junk_join_blobs_refused() {
 #[tokio::test]
 async fn many_pending_joins_come_back_in_pages() {
     const N: usize = 380;
-    let e = env().await;
+    // More joins than one room may have waiting by default.
+    let e = env_with(|c| c.max_room_welcomes = 1000).await;
     let mut a = e.admin().await;
     let gid = a.gid.unwrap();
     let mut j = e.raw().await;
@@ -275,7 +276,7 @@ async fn many_pending_joins_come_back_in_pages() {
     assert!(pages >= 2, "{pages} pages");
 }
 
-// ---------- I4: silent and idle connections ----------
+// ---------- Silent and idle connections ----------
 
 #[tokio::test]
 async fn silent_connection_closed_before_hello() {
@@ -307,7 +308,7 @@ async fn idle_connection_closed() {
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 
-// ---------- M3: a failed request must not lock everyone out ----------
+// ---------- A failed request must not lock everyone out ----------
 
 #[tokio::test]
 async fn database_lock_survives_a_failed_request() {
@@ -342,7 +343,7 @@ async fn database_lock_survives_a_failed_request() {
     assert_eq!(r, Response::Ok);
 }
 
-// ---------- M5: a failed write leaves nothing half done ----------
+// ---------- A failed write leaves nothing half done ----------
 
 #[tokio::test]
 async fn failed_commit_leaves_group_unchanged() {
@@ -394,7 +395,7 @@ async fn failed_group_create_leaves_nothing() {
     assert_eq!(a.create_only(SUITE).await, Response::Ok);
 }
 
-// ---------- M4: account minting ----------
+// ---------- Account minting ----------
 
 #[tokio::test]
 async fn spent_group_invite_registers_no_new_account() {

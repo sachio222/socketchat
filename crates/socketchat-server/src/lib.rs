@@ -11,6 +11,8 @@ pub mod db;
 mod files;
 mod groups;
 mod invites;
+mod perms;
+mod quota;
 mod retention;
 pub mod tls;
 
@@ -105,10 +107,28 @@ pub struct InitReport {
     pub cert_fpr: [u8; 32],
 }
 
+/// A one-line warning when `public_host` is not a name or an IP address,
+/// which a server set up by an earlier release can hold: apps from 0.5.1
+/// refuse the invite links it makes. The host is quoted with escapes, so
+/// the line prints safely.
+pub fn public_host_warning(cfg: &Config) -> Option<String> {
+    (!socketchat_proto::valid_host(&cfg.public_host)).then(|| {
+        format!(
+            "Warning: public_host {:?} is not a name or an IP address, so Socketchat 0.5.1 apps refuse the invite links this server makes. Write a name in another script in its xn-- form.",
+            cfg.public_host
+        )
+    })
+}
+
 /// Sets up a new server in `data_dir`: config file, certificate and an empty
 /// database. Refuses to touch a directory that already has a certificate.
 pub fn init(data_dir: &Path, public_host: &str) -> Result<InitReport, ServerError> {
-    std::fs::create_dir_all(data_dir)?;
+    if !socketchat_proto::valid_host(public_host) {
+        return Err(ServerError::Config(format!(
+            "--host {public_host:?} is not a name or an IP address, so invite links cannot carry it. Use a name such as chat.example.com, an IP address, or a name in another script in its xn-- form."
+        )));
+    }
+    perms::create_private_dir(data_dir)?;
     // An absolute path as given, not resolved through links: canonicalize
     // would give \\?\C:\... on Windows, which then shows up in the config.
     let data_dir = std::path::absolute(data_dir)?;
@@ -173,6 +193,11 @@ pub(crate) struct State {
     pub queued: Arc<conn::Queued>,
     /// Room for connections being turned away with a reply.
     pub refusals: Arc<tokio::sync::Semaphore>,
+    /// What connections not yet signed in may hold in partly received
+    /// frames, over every connection.
+    pub pre_sign_in: Arc<conn::Budget>,
+    /// The server's stored bytes as last counted.
+    pub stored: Mutex<quota::Stored>,
 }
 
 /// Locks `m` even when a thread panicked while holding it. Requests that
@@ -220,11 +245,26 @@ pub struct ServerHandle {
 impl Server {
     /// Binds the listener and starts serving in the background.
     pub async fn start(cfg: Config) -> Result<ServerHandle, ServerError> {
+        // Folders and files from earlier releases, or made by hand, may be
+        // open to other accounts on this machine.
+        let tightened = perms::tighten(&cfg.data_dir);
+        if !tightened.is_empty() {
+            eprintln!(
+                "socketchat-server: limited {} file(s) and folder(s) in {} to this account",
+                tightened.len(),
+                cfg.data_dir.display()
+            );
+        }
         let acceptor: TlsAcceptor = tls::acceptor(&cfg.data_dir)?;
         let cert_fpr = tls::fingerprint(&cfg.data_dir)?;
         let conn = db::open(&cfg.data_dir)?;
         let listener = TcpListener::bind(cfg.listen).await?;
         let addr = listener.local_addr()?;
+        // 0 would refuse every connection's first large frame; it counts as 1.
+        let cfg_budget = cfg
+            .max_buffered_before_sign_in_mb
+            .max(1)
+            .saturating_mul(1_000_000);
         let state = Arc::new(State {
             cfg,
             db: Mutex::new(conn),
@@ -234,6 +274,8 @@ impl Server {
             per_ip: Default::default(),
             queued: Default::default(),
             refusals: Arc::new(tokio::sync::Semaphore::new(conn::MAX_REFUSALS)),
+            pre_sign_in: Arc::new(conn::Budget::new(cfg_budget)),
+            stored: Default::default(),
         });
         let (stop, stop_rx) = watch::channel(false);
         let sweeper = state.clone();
@@ -312,6 +354,13 @@ impl ServerHandle {
     pub fn queued_bytes(&self) -> usize {
         self.state.queued.bytes.load(Ordering::Relaxed)
     }
+
+    /// Bytes that connections not yet signed in hold in partly received
+    /// frames. For tests.
+    #[doc(hidden)]
+    pub fn held_before_sign_in(&self) -> usize {
+        self.state.pre_sign_in.used()
+    }
 }
 
 impl Drop for ServerHandle {
@@ -342,6 +391,34 @@ mod lock_tests {
 #[cfg(test)]
 mod init_tests {
     use super::*;
+
+    /// A server set up by an earlier release can hold a host that 0.5.1
+    /// apps refuse in links; `server run` says so when it starts.
+    #[test]
+    fn a_host_links_cannot_carry_gets_a_warning() {
+        let mut cfg = Config::default();
+        assert_eq!(public_host_warning(&cfg), None);
+        cfg.public_host = "pаypal.com".into();
+        let w = public_host_warning(&cfg).unwrap();
+        assert!(w.contains("xn--"), "{w}");
+        assert!(!w.contains('\n'), "one line: {w}");
+        cfg.public_host = "evil\u{1b}[2J".into();
+        assert!(!public_host_warning(&cfg).unwrap().contains('\u{1b}'));
+    }
+
+    /// Apps refuse a link whose host is not a name or an address, so
+    /// `init` refuses one before it writes anything.
+    #[test]
+    fn init_refuses_a_host_links_cannot_carry() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["two words", "chat.example.com/x", "pаypal.com", ""] {
+            let dir = tmp.path().join("srv");
+            let e = init(&dir, bad).unwrap_err().to_string();
+            assert!(e.contains("not a name or an IP address"), "{bad:?}: {e}");
+            assert!(!dir.join(config::CONFIG_FILE).exists(), "{bad:?}");
+        }
+        init(&tmp.path().join("v6"), "::1").unwrap();
+    }
 
     #[test]
     fn init_stores_a_plain_absolute_path() {

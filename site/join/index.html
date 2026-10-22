@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Join a Socketchat room</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--mute:#615f58;--line:#d9d6cc;--code:#efede6;--accent:#1f5f4a;--btn:#1f5f4a;--btnfg:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#161715;--fg:#e8e6df;--mute:#a09d94;--line:#34352f;--code:#20211e;--accent:#7fc4a8;--btn:#7fc4a8;--btnfg:#10110f}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main,footer{max-width:640px;margin:0 auto;padding:0 16px}
+main{padding-top:40px;padding-bottom:24px}
+h1{font-size:1.7rem;line-height:1.25;margin:0 0 .6em;font-weight:650}
+h2{font-size:1.1rem;margin:1.8em 0 .4em;font-weight:650}
+p{margin:0 0 1em}
+a{color:var(--accent)}
+.mute{color:var(--mute)}
+.os{margin:1em 0 .3em;font-size:.9rem;color:var(--mute)}
+.cmd{display:flex;gap:8px;align-items:flex-start;margin:0 0 .8em}
+pre{flex:1;min-width:0;margin:0;padding:12px 14px;background:var(--code);border:1px solid var(--line);border-radius:6px;overflow-x:auto;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}
+button{flex:none;font:inherit;font-size:.9rem;padding:8px 14px;border:0;border-radius:6px;background:var(--btn);color:var(--btnfg);cursor:pointer}
+button:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+.note{margin-top:2em;padding-top:1em;border-top:1px solid var(--line);font-size:.9rem;color:var(--mute)}
+footer{padding-top:16px;padding-bottom:40px;font-size:.9rem;color:var(--mute);border-top:1px solid var(--line)}
+footer{margin-top:16px}
+[hidden]{display:none!important}
+@media (max-width:480px){.cmd{flex-direction:column;align-items:stretch}pre{flex:none;max-width:100%}button{align-self:flex-start}}
+</style>
+</head>
+<body>
+<main>
+<h1 id="lead">Someone invited you to a Socketchat room.</h1>
+<p id="bad" hidden>This invite link looks incomplete. Ask the person who sent it for a new one.</p>
+<p>Socketchat is an encrypted chat that runs in a terminal. The server passes messages along but cannot read them. Only the people in a chat can.</p>
+
+<h2>Step 1. Install Socketchat</h2>
+<div id="installs">
+<div id="unix">
+<p class="os">macOS or Linux, in a terminal</p>
+<div class="cmd"><pre>curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh</pre><button type="button">Copy</button></div>
+</div>
+<div id="win">
+<p class="os">Windows, in PowerShell</p>
+<div class="cmd"><pre>powershell -ExecutionPolicy Bypass -c "irm https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.ps1 | iex"</pre><button type="button">Copy</button></div>
+</div>
+</div>
+<p>When it finishes, open a new terminal.</p>
+
+<div id="join" hidden>
+<h2>Step 2. Join the room</h2>
+<p>In the new terminal, run:</p>
+<div class="cmd"><pre id="joincmd"></pre><button type="button">Copy</button></div>
+<p>Socketchat asks for a display name and a passphrase. The passphrase locks Socketchat's data on this computer. It cannot be recovered, so keep it somewhere safe.</p>
+</div>
+
+<noscript><p>This page needs JavaScript to read your invite. The install commands above work without it.</p></noscript>
+<p class="note">Your invite stays in your browser. The part of a link after the # is never sent to a website, so socketchat.org does not receive it.</p>
+</main>
+<footer>
+<a href="https://github.com/sachio222/socketchat_v4">Socketchat on GitHub</a> &middot; Open source, MIT or Apache 2.0
+</footer>
+<script>
+(function () {
+  var raw = location.hash.slice(1);
+  var ok = raw.length < 2000 && /^socketchat:\/\/[A-Za-z0-9._~:\/?#&=%+@!,;\-\[\]]+$/.test(raw);
+  if (ok) {
+    document.getElementById('joincmd').textContent = 'socketchat join "' + raw + '"';
+    document.getElementById('join').hidden = false;
+  } else {
+    document.getElementById('lead').textContent = 'Install Socketchat';
+    document.getElementById('bad').hidden = false;
+  }
+  if (/Windows/.test(navigator.userAgent)) {
+    var box = document.getElementById('installs');
+    box.insertBefore(document.getElementById('win'), document.getElementById('unix'));
+  }
+  var btns = document.querySelectorAll('.cmd button');
+  Array.prototype.forEach.call(btns, function (b) {
+    b.addEventListener('click', function () {
+      var pre = b.parentNode.querySelector('pre');
+      var text = pre.textContent;
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); };
+      var fallback = function () {
+        var r = document.createRange(); r.selectNodeContents(pre);
+        var s = getSelection(); s.removeAllRanges(); s.addRange(r);
+        b.textContent = 'Press copy now'; setTimeout(function () { b.textContent = 'Copy'; }, 2500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } else { fallback(); }
+    });
+  });
+})();
+</script>
+</body>
+</html>

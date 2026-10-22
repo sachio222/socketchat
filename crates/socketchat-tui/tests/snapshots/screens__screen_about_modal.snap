@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: s
+---
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+│# Book club       ││09:14:05 Ada: Who is bringing the book││✓ Ada* (you)      │
+│@ Bo             3││         list?                        ││✓ Bo              │
+│# Climbing Sat… 12││09:15:12 Bo: Me. Sending it now.      ││  Cy              │
+│                  ││09:15:40 · Bo sent books.pdf (84 KB)  ││                  │
+│                  ││09:16:58 Cy: Got it, thanks. Saturday ││                  │
+│                  ││         still works for me, and I can││                  │
+│ ┌ About ───────────────────────────────────────────────────────────────────┐ │
+│ │socketchat 0.5.1                                                          │ │
+│ │                                                                          │ │
+│ │Socketchat is encrypted chat with a server you run yourself. The server   │ │
+│ │passes messages along but cannot read them.                               │ │
+│ │                                                                          │ │
+│ │https://github.com/sachio222/socketchat_v4                                │ │
+│ │License: MIT or Apache 2.0                                                │ │
+│ └────────────────────────────────────────────────────────────────[ Close ]─┘ │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  What's on your mind? #Book club                               / for commands│
+└──────────────────────────────────────────────────────────────────────────────┘
+Esc close                                                       socketchat 0.5.1

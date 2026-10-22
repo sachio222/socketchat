@@ -1,10 +1,10 @@
-# Contributing to socketchat
+# Contributing to Socketchat
 
-Thank you for helping. This page covers how to build and test socketchat, how the code is laid out, how reviews work, and two rules every change follows: no home-made cryptography, and careful dependencies. Everyone who takes part follows the [code of conduct](CODE_OF_CONDUCT.md). If you want a bigger project to work on, [ROADMAP.md](ROADMAP.md) lists planned work.
+Thank you for helping. This page covers how to build and test Socketchat, how the code is laid out, how reviews work, and two rules every change follows: no home-made cryptography, and careful dependencies. Everyone who takes part follows the [code of conduct](CODE_OF_CONDUCT.md). If you want a bigger project to work on, [ROADMAP.md](ROADMAP.md) lists planned work.
 
 ## Build and test
 
-You need the Rust toolchain from [rustup.rs](https://rustup.rs), version 1.91 or newer; `rust-toolchain.toml` picks the stable channel. On Linux, install the OpenSSL headers that SQLCipher (the encrypted local database) builds against:
+You need the Rust toolchain from [rustup.rs](https://rustup.rs), version 1.91 or newer; `rust-toolchain.toml` picks Rust 1.98.1, the version CI and releases build with, and rustup installs it the first time you build here. On Linux, install the OpenSSL headers that SQLCipher (the encrypted local database) builds against:
 
 ```
 sudo apt install build-essential pkg-config libssl-dev
@@ -70,7 +70,7 @@ It fails when `Cargo.lock` holds a library released less than 30 days ago, unles
 
 ## No home-made cryptography
 
-Every cryptographic primitive and protocol in socketchat comes from a reviewed library or a published standard. A pull request that adds home-made cryptography will be declined.
+Every cryptographic primitive and protocol in Socketchat comes from a reviewed library or a published standard. A pull request that adds home-made cryptography will be declined.
 
 This counts as home-made:
 

@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/servers.rs
+expression: "render(&app, &crew(), 80, 24)"
+---
+┌ Chats ───────────┐┌ Book club · chat.socketchat.org ─────┐┌ People ──────────┐
+│# Book club       ││                                      ││                  │
+│# Climbing Saturd…││                                      ││                  │
+│# Old crew        ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│ ┌ Room details ────────────────────────────────────────────────────────────┐ │
+│ │Name: Book club                                                           │ │
+│ │Server: chat.socketchat.org                                               │ │
+│ │Admins: Ada                                                               │ │
+│ │Members: 2                                                                │ │
+│ │Created: 2026-03-02                                                       │ │
+│ │You joined: 2026-03-02                                                    │ │
+│ │Muted: no                                                                 │ │
+│ └────────────────────────────────────────────────────────────────[ Close ]─┘ │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  What's on your mind? #Book club                               / for commands│
+└──────────────────────────────────────────────────────────────────────────────┘
+Esc close                                                       socketchat 0.5.1

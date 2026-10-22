@@ -1,10 +1,10 @@
-# socketchat v4 design
+# Socketchat v4 design
 
-Status: the design socketchat v4.0 was built from, 2026-10-19. Where the code differs, the code and SECURITY.md describe what v4.0 does.
+Status: the design Socketchat v4.0 was built from, 2026-10-19. Where the code differs, the code and SECURITY.md describe what v4.0 does.
 
 ## What this is and why
 
-socketchat v4 is an encrypted group chat for people who want to run their own server. You install it from GitHub, start a server on any small machine, and invite people with a link. The server passes messages along but can never read them.
+Socketchat v4 is an encrypted group chat for people who want to run their own server. You install it from GitHub, start a server on any small machine, and invite people with a link. The server passes messages along but can never read them.
 
 v1 through v3 were Python experiments. v3 claimed end-to-end encryption, but its server handed out everyone's keys, so whoever ran the server could read every message. v4 is a rewrite that fixes this at the root: it uses a published standard for group encryption and an audited library to run it.
 
@@ -52,7 +52,7 @@ The gap v4 fills: no project today pairs a tiny self-hosted server with standard
 
 ## Stance on use
 
-socketchat is for people who want private conversations they control. It is not for illegal content or for people who mean harm. The project states this in an acceptable-use statement (`ACCEPTABLE_USE.md`), linked from the README and printed when a server starts for the first time. Contributors follow a code of conduct (Contributor Covenant 2.1). Each server's operator answers for what happens on their server. The license stays a standard open-source license; the stance is a statement, not a license term.
+Socketchat is for people who want private conversations they control. It is not for illegal content or for people who mean harm. The project states this in an acceptable-use statement (`ACCEPTABLE_USE.md`), linked from the README and printed when a server starts for the first time. Contributors follow a code of conduct (Contributor Covenant 2.1). Each server's operator answers for what happens on their server. The license stays a standard open-source license; the stance is a statement, not a license term.
 
 ## How people use it
 
@@ -82,12 +82,12 @@ socketchat                            # opens the chat screen
 - Everyone picks their own display name and can change it.
 - Others see that name by default. Anyone can rename a contact on their own screen; only they see the new name.
 - Names are not unique and cannot be searched.
-- Trust follows the key, not the name. A name change posts a notice in every shared chat. Someone new who calls themselves "Jake" does not inherit Jake's verified mark.
+- Trust follows the key, not the name. A name change posts a notice in every shared chat. Someone new who calls themselves "Ana" does not inherit Ana's verified mark.
 - Display names travel inside encrypted messages. The server never sees them.
 
 ### Verification
 
-- An invite link carries the fingerprint of the inviter's identity key. When the new member's app receives the Welcome, it checks that the person who added them holds that key, and marks them verified. A server that tries to insert itself fails this check and the app shows a red warning.
+- An invite link carries the fingerprint of the inviter's identity key. When the new member's app receives the Welcome, it checks the invite against that key. It marks the inviter verified once the inviter's app confirms the join from inside the group, and until then says it is waiting for them. A server that tries to insert itself fails this check and the app shows a red warning.
 - `/verify <name>` shows the safety number and a QR code for an in-person check.
 - The member list shows a mark beside each verified person.
 
@@ -100,7 +100,7 @@ A terminal interface with four areas:
 - Right: members of the current group, with verified marks.
 - Bottom: the input line and a one-line help bar with the keys for the current area.
 
-Keys: Tab moves between areas, Ctrl-K opens a quick switcher, Page Up and Page Down scroll, Enter sends, Esc cancels. Slash commands: `/invite`, `/invite --dm`, `/join <link>`, `/new <group name>`, `/dm <name>`, `/send <path>`, `/save <file> [dir]`, `/verify <name>`, `/rename <name> <new>`, `/name <new>`, `/kick <name>`, `/leave`, `/help`, `/quit`.
+Keys: Tab moves between areas, or completes a command that starts with `/`; Ctrl-K opens a quick switcher; Page Up and Page Down scroll; Enter sends; Esc cancels. The mouse opens a room, moves between areas, scrolls and presses the buttons on boxes, until `/mouse off` gives it back to the terminal. Slash commands: `/invite`, `/invite --dm`, `/join <link>`, `/new <group name>`, `/dm <name>`, `/send <path>`, `/save <file> [dir]`, `/verify <name>`, `/rename <name> <new>`, `/name <new>`, `/kick <name>`, `/leave`, `/servers`, `/forget <number>`, `/theme`, `/mouse on|off`, `/help`, `/quit`.
 
 The screen stays readable at 80 by 24 characters and works over SSH.
 
@@ -118,7 +118,7 @@ Files stream through memory one chunk at a time, so a large video never loads wh
 ### Limits the app and docs state plainly
 
 - **Receivers control what you send.** They can save, copy, screenshot or forward it. Encryption protects a file on its way, not after it arrives.
-- **Photos carry hidden data.** Phone photos usually hold the location where they were taken and the device model (EXIF data). v4 removes this from JPEG, PNG and WebP images before sending, and says so.
+- **Photos carry hidden data.** Phone photos usually hold the location where they were taken and the device model (EXIF data). v4 removes this from JPEG, PNG, WebP and GIF images before sending, says so, and asks before sending a photo it cannot clean.
 - **Videos keep their hidden data.** v4 does not remove location or device data from video files. The app shows a warning before sending any video and asks for a yes.
 - **No take-backs.** Deleting a file removes your copy only.
 - **The server sees size and timing.** It sees how big an encrypted file is and when it moves, never what is inside.
@@ -240,8 +240,8 @@ Redeeming an invite:
 3. It uploads a KeyPackage for that group key against the token. The KeyPackage carries the joiner's signature over the token and the new mailbox key, made with a signing key derived from the invite secret.
 4. The server notifies the inviter's client. If the inviter is offline, any group admin who is online can act. The joiner's screen says who it is waiting for.
 5. That client finds the matching voucher and keys, which members receive together inside the group's encrypted messages. It checks the signature with the public key it holds, adds the KeyPackage with a Commit, and sends the Welcome to the joiner's mailbox along with the inviter's signed voucher. The voucher travels sealed under a key derived from the invite secret, so the server cannot read it.
-6. The joiner processes the Welcome and checks the voucher's signature against the identity fingerprint in the link. The join counts as verified when that signature holds and the adder is either the group key the voucher names or an admin of the group. Anything else shows the red warning.
-7. The joiner posts a proof made from the invite secret itself, bound to their new group key. Only the inviter's client can check it, and only someone holding the link can make it, so the inviter marks the newcomer verified only then. The client stores the proof before posting it, and posts it again on a later sync if the connection drops first.
+6. The joiner processes the Welcome and checks the voucher's signature against the identity fingerprint in the link. When that signature holds, the adder is either the group key the voucher names or an admin of the group, and that group key is in the group, the join waits for the inviter. It counts as verified once that group key posts a profile in the group, bound to the identity that signed the voucher. The inviter's client posts its profile after every add, so this happens on its own. Anything else shows the red warning.
+7. The joiner posts a proof made from the invite secret itself, bound to their new group key. Only the inviter's client can check it, and only someone holding the link can make it, so the inviter marks the newcomer verified only then. It accepts one proof per link, from the key that joined with it. The client stores the proof before posting it, and posts it again on a later sync if the connection drops first.
 
 Members hold only the public half of the request key, so they can check a join request but cannot make one. A member who tries to bring someone in through an admin's link, for example in a group where only admins may invite, makes a request that every client ignores.
 
@@ -265,6 +265,7 @@ MLS has no built-in roles, so v4 keeps them in group state that every member and
 - The same PublicMessages tell the server who is in each group, which it needs for routing, deleting acknowledged entries and expiring files.
 - Leaving: `/leave` sends a Remove proposal for yourself, and the next online member's client commits it on its own.
 - If the last admin leaves, their leave Commit must promote the longest-standing member, and the server refuses it otherwise.
+- Each app also checks these rules before it applies a change, refuses any change that no member signed, and judges the longest-standing member from its own record of who joined when.
 
 This choice is a tradeoff: the server learns each group's membership changes and admin list, as per-group keys and mailbox IDs. It still never sees names, text or files. "Group membership and the server" above explains the limits and the roadmap.
 
@@ -285,6 +286,14 @@ SQLite in WAL mode, one file. Tables for accounts, mailboxes, groups, group memb
 - `require_standard_suite` (default false)
 - `max_connections` (default 1,000)
 - `max_per_ip` (default 256)
+- `max_frame_before_sign_in` (default 8,192 bytes)
+- `max_buffered_before_sign_in_mb` (default 8)
+- `max_accounts_from_room_links` (default 100)
+- `max_room_messages_mb` (default 200)
+- `max_room_files_mb` (default 4,000)
+- `max_member_files_mb` (default 4,000)
+- `max_room_welcomes` (default 100)
+- `max_stored_mb` (default 8,000)
 
 ### Performance targets
 
@@ -316,9 +325,7 @@ SQLite in WAL mode, one file. Tables for accounts, mailboxes, groups, group memb
 
 ## Documentation
 
-All reader-facing documents follow Jake's house writing rules.
-
-- `README.md`: what socketchat is, a quick start under five minutes, terminal screenshots, and links to everything below.
+- `README.md`: what Socketchat is, a quick start under five minutes, terminal screenshots, and links to everything below.
 - `SECURITY.md`: what the server sees and never sees, crypto choices, the post-quantum draft status, and how to report a vulnerability.
 - `ACCEPTABLE_USE.md`: the stance on use.
 - `ROADMAP.md`: planned work, with full membership hiding first, plus multi-device linking and the move to the final post-quantum suite.
@@ -331,23 +338,21 @@ All reader-facing documents follow Jake's house writing rules.
 
 ## License
 
-`MIT OR Apache-2.0`, the usual dual license in Rust projects. This is the builder's call, open to Jake's override.
+`MIT OR Apache-2.0`, the usual dual license in Rust projects.
 
-## Calls made after review (not yet confirmed by Jake)
-
-These answer questions from a builder's review of this design. Each is the designer's call:
+## Decisions and their tradeoffs
 
 - An invite secret in the link fragment, plus an inviter-signed voucher, so any admin can complete a join and a server can never forge one.
-- Commits travel as signed PublicMessages, so the server enforces admin rights and learns membership. This is a privacy tradeoff, flagged for Jake.
+- Commits travel as signed PublicMessages, so the server enforces admin rights and learns membership. This trades some privacy for those checks; "Group membership and the server" above explains the limits.
 - A join request waits up to 7 days once lodged.
 - `/invite --dm` for direct messages with people you share no group with.
 - Weekly refresh covers encryption keys only. Resetting your signing key is a separate, visible action.
 - Suite 0x004F through openmls_rust_crypto's experimental path, with the audit's coverage stated honestly.
-- A fresh group key and mailbox per group, with the identity key kept off the server, so stored server data cannot link one person across groups. Full membership hiding goes first on the roadmap and in a "help wanted" issue. (Added 2026-10-19 at Jake's request that membership hiding be addressed.)
+- A fresh group key and mailbox per group, with the identity key kept off the server, so stored server data cannot link one person across groups. Full membership hiding goes first on the roadmap and in a "help wanted" issue.
 
-Proof spike, 2026-10-19: suite 0x004F, server checks of signed Commits with no group secrets, admin refusal, `welcome_sender`, self-leave, SQLCipher storage, and a native Linux aarch64 build all work with the crate versions above.
+A proof of concept on 2026-10-19 showed that suite 0x004F, server checks of signed Commits with no group secrets, admin refusal, `welcome_sender`, self-leave, SQLCipher storage, and a native Linux aarch64 build all work with the crate versions above.
 
-## Left to the builder
+## Left to the implementation
 
 - Exact crate versions and feature flags, within the libraries named here.
 - Table layouts, frame enum details and error types.

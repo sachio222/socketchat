@@ -1,6 +1,6 @@
 # Roadmap
 
-This is the work planned after socketchat v4.0, in priority order. Each item says what it is, why v4.0 does not have it, and how you can help. If you want to pick one up, open an issue first so we can agree on the approach; [CONTRIBUTING.md](CONTRIBUTING.md) explains how reviews work.
+This is the work planned after Socketchat v4.0, in priority order. Each item says what it is, why v4.0 does not have it, and how you can help. If you want to pick one up, open an issue first so we can agree on the approach; [CONTRIBUTING.md](CONTRIBUTING.md) explains how reviews work.
 
 ## 1. Hide group membership from the server
 
@@ -14,15 +14,15 @@ This is the work planned after socketchat v4.0, in priority order. Each item say
 
 ## 2. Post-quantum protection for the connection
 
-**What it is.** The connection between an app and the server uses TLS 1.3 with classical X25519 key exchange. Message and file contents inside it already have post-quantum protection through MLS; the connection itself does not. rustls, the TLS library socketchat uses, offers the hybrid X25519MLKEM768 key exchange through its aws-lc-rs crypto provider.
+**What it is.** The connection between an app and the server uses TLS 1.3 with classical X25519 key exchange. Message and file contents inside it already have post-quantum protection through MLS; the connection itself does not. rustls, the TLS library Socketchat uses, offers the hybrid X25519MLKEM768 key exchange through its aws-lc-rs crypto provider.
 
-**Why it is not in v4.0.** socketchat uses rustls with the ring provider, which has no ML-KEM. Switching to aws-lc-rs adds a native library that must build and pass tests on every platform the project supports: macOS, Windows, and Linux on Intel, AMD and 64-bit ARM. The move should also wait for rustls 0.23.46 or later, which fixes a downgrade problem in hybrid key exchange (RUSTSEC-2026-0349).
+**Why it is not in v4.0.** Socketchat uses rustls with the ring provider, which has no ML-KEM. Switching to aws-lc-rs adds a native library that must build and pass tests on every platform the project supports: macOS, Windows, and Linux on Intel, AMD and 64-bit ARM. The move should also wait for rustls 0.23.46 or later, which fixes a downgrade problem in hybrid key exchange (RUSTSEC-2026-0349).
 
 **How to help.** Try the aws-lc-rs provider on Linux x86_64, macOS arm64 and Linux aarch64, and report build times and memory use on a Raspberry Pi.
 
 ## 3. Move to the final post-quantum MLS suite
 
-**What it is.** socketchat's default suite, 0x004F, comes from an IETF draft that is not final. When the IETF publishes the final post-quantum suite, new groups should use it.
+**What it is.** Socketchat's default suite, 0x004F, comes from an IETF draft that is not final. When the IETF publishes the final post-quantum suite, new groups should use it.
 
 **Why it is not in v4.0.** The final suite does not exist yet. The suite choice already sits in one file, `crates/socketchat-core/src/suite.rs`. Existing groups are harder: MLS fixes a group's suite for its whole life. RFC 9420 has a ReInit proposal for moving a group to a new suite, and the v4.0 server refuses it today.
 
@@ -48,6 +48,6 @@ This is the work planned after socketchat v4.0, in priority order. Each item say
 
 **What it is.** Federation: people on different servers sharing one group.
 
-**Why it is not in v4.0.** Everyone in a group uses the same server, and the server's checks on group changes assume it holds the whole group log. Federation would change the trust model and add metadata that crosses servers. We have no design yet and no promise that it fits socketchat.
+**Why it is not in v4.0.** Everyone in a group uses the same server, and the server's checks on group changes assume it holds the whole group log. Federation would change the trust model and add metadata that crosses servers. We have no design yet and no promise that it fits Socketchat.
 
 **How to help.** Write up how federation could work with MLS, and what each server would learn, before any code.

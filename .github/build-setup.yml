@@ -8,3 +8,19 @@
   shell: pwsh
   run: |
     "OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+# rust-toolchain.toml names the exact Rust version for every build. Install
+# it, components included, and stop if cargo would build with another one.
+- name: Install the Rust version in rust-toolchain.toml
+  shell: bash
+  run: |
+    rustup toolchain install
+    want="$(tr -d '\r' <rust-toolchain.toml | sed -n 's/^channel = "\(.*\)"/\1/p')"
+    rustc --version
+    rustc --version | grep -F "rustc $want " >/dev/null
+
+# dist runs `cargo build` without --locked. Fetch with --locked first, so the
+# build fails when Cargo.lock is out of date instead of quietly changing it.
+- name: Check Cargo.lock is up to date
+  shell: bash
+  run: cargo fetch --locked

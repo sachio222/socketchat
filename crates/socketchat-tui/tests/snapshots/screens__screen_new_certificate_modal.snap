@@ -8,7 +8,7 @@ expression: "render(&app, &crew(), 80, 24)"
 │# Climbing Sat… 12││09:15:12 Bo: Me. Sending it now.      ││  Cy              │
 │ ┌ New server certificate ──────────────────────────────────────────────────┐ │
 │ │This link names a different certificate for chat.example.com from the one │ │
-│ │socketchat trusts. That happens when the server's operator sets it up     │ │
+│ │Socketchat trusts. That happens when the server's operator sets it up     │ │
 │ │again, and when someone sends a fake link.                                │ │
 │ │                                                                          │ │
 │ │Trusted now                                                               │ │
@@ -20,9 +20,9 @@ expression: "render(&app, &crew(), 80, 24)"
 │ │                                                                          │ │
 │ │Press Y only if the operator told you they set the server up again.       │ │
 │ │Nothing changes unless the new certificate works.                         │ │
-│ └──────────────────────────────────────────────────────────────────────────┘ │
+│ └───────────────────────────────[ Trust the new one ]─[ Keep the old one ]─┘ │
 └──────────────────┘└──────────────────────────────────────┘└──────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  What's on your mind, Book club?                               / for commands│
+│  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-Y trust the new certificate · N keep the old one
+Y trust the new certificate · N keep the old one                socketchat 0.5.1

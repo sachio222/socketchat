@@ -48,7 +48,9 @@ async fn group_invite_join_verified_by_inviter() {
 }
 
 #[tokio::test]
-async fn join_completed_by_other_admin_when_inviter_offline_is_verified() {
+/// An admin lets the joiner in while the inviter is offline. The join waits
+/// for the inviter, and is verified on both sides once she is back.
+async fn join_completed_by_other_admin_waits_for_inviter() {
     let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
@@ -63,12 +65,133 @@ async fn join_completed_by_other_admin_when_inviter_offline_is_verified() {
     let link = a.invite(Some(g), false).await.unwrap().0;
     settle(&mut [&mut a, &mut c]).await;
     // Ada goes offline; Cy, an admin, completes the join.
+    let away = a.reopen_later();
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    settle(&mut [&mut c, &mut b]).await;
+    let ev = drain(&mut b).await;
+    assert_eq!(
+        joined(&ev),
+        Some(&Verification::Waiting {
+            inviter: "the person who invited you".into()
+        }),
+        "{ev:?}"
+    );
+    let ak = c.members(g).iter().find(|m| m.name == "Ada").unwrap().key;
+    assert!(!b.members(g).iter().any(|m| m.key == ak && m.verified));
+
+    // Ada comes back, sees Bo added, shares her name, and Bo's proof counts.
+    let mut b = b.reopen().await;
+    let mut a = away.open().await;
+    settle(&mut [&mut a, &mut c, &mut b]).await;
+    let ev = drain(&mut b).await;
+    assert!(
+        ev.iter().any(|e| matches!(e,
+            Event::InviteConfirmed { group, inviter } if *group == g && inviter == "Ada")),
+        "{ev:?}"
+    );
+    assert!(b.members(g).iter().any(|m| m.key == ak && m.verified));
+    let bk = b.my_group_key(g).unwrap();
+    assert!(a.members(g).iter().any(|m| m.key == bk && m.verified));
+}
+
+/// A join that waits for an inviter who leaves the room before confirming
+/// it ends as unverified, with a warning, instead of waiting forever.
+#[tokio::test]
+async fn join_waiting_for_inviter_who_left_is_unverified() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let mut c = TestClient::profile_only("Cy").await;
+    c.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut c]).await;
+    let ck = c.my_group_key(g).unwrap();
+    a.make_admin(g, &ck).await.unwrap();
+    let ak = a.my_group_key(g).unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
+    settle(&mut [&mut a, &mut c]).await;
     drop(a);
     let mut b = TestClient::profile_only("Bo").await;
     b.join(&link).await.unwrap();
     settle(&mut [&mut c, &mut b]).await;
     let ev = drain(&mut b).await;
-    assert_eq!(joined(&ev), Some(&Verification::Verified), "{ev:?}");
+    assert!(
+        matches!(joined(&ev), Some(Verification::Waiting { .. })),
+        "{ev:?}"
+    );
+    c.remove_member(g, &ak).await.unwrap();
+    settle(&mut [&mut c, &mut b]).await;
+    let ev = drain(&mut b).await;
+    assert!(
+        ev.iter().any(|e| matches!(e,
+            Event::Warning(w) if w.contains("could not be confirmed"))),
+        "{ev:?}"
+    );
+    assert!(b.members(g).iter().all(|m| m.me || !m.verified));
+}
+
+/// The inviter's app still owes its profile after it closes between the
+/// add and posting the profile. On its next start it posts it, and the
+/// join ends verified with nothing else done.
+#[tokio::test]
+async fn owed_profile_survives_inviter_restart() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    // Ada's add goes through, then her app closes before her profile does.
+    a.test_fail_next_after_add(g);
+    a.sync().await.unwrap();
+    let away = a.reopen_later();
+    b.sync().await.unwrap();
+    b.sync().await.unwrap();
+    let ev = drain(&mut b).await;
+    assert!(
+        matches!(joined(&ev), Some(Verification::Waiting { .. })),
+        "{ev:?}"
+    );
+    let mut a = away.open().await;
+    settle(&mut [&mut a, &mut b]).await;
+    let ev = drain(&mut b).await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::InviteConfirmed { inviter, .. } if inviter == "Ada")),
+        "{ev:?}"
+    );
+    assert!(b.members(g).iter().any(|m| m.name == "Ada" && m.verified));
+}
+
+/// The joiner's app shows the waiting state, then the confirmation, when
+/// the inviter's name arrives after the joiner first reads the room.
+#[tokio::test]
+async fn late_confirmation_from_inviter_marks_join_verified() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    // Ada's add goes through, but sharing her name fails this once.
+    a.test_fail_next_after_add(g);
+    a.sync().await.unwrap();
+    b.sync().await.unwrap();
+    let ev = drain(&mut b).await;
+    assert!(
+        matches!(joined(&ev), Some(Verification::Waiting { .. })),
+        "{ev:?}"
+    );
+    settle(&mut [&mut a, &mut b]).await;
+    let ev = drain(&mut b).await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::InviteConfirmed { inviter, .. } if inviter == "Ada")),
+        "{ev:?}"
+    );
+    assert!(b.members(g).iter().any(|m| m.name == "Ada" && m.verified));
 }
 
 #[tokio::test]
@@ -267,4 +390,332 @@ async fn cancelling_a_used_link_keeps_the_join() {
     settle(&mut [&mut a, &mut b]).await;
     assert_eq!(b.groups().len(), 1, "Bo never got in");
     assert!(bo_verified_in(&a, g), "{:?}", a.members(g));
+}
+
+/// Ada's room with Cy in it, each app knowing the other's name.
+async fn room_with_cy(s: &TestServer) -> (TestClient, TestClient, socketchat_proto::msg::GroupId) {
+    let mut a = TestClient::new(s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let mut c = TestClient::profile_only("Cy").await;
+    c.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut c]).await;
+    (a, c, g)
+}
+
+/// Once Cy is removed, the links Cy made let nobody in.
+#[tokio::test]
+async fn removed_members_link_lets_nobody_in() {
+    let s = TestServer::start().await;
+    let (mut a, mut c, g) = room_with_cy(&s).await;
+    let link = c.invite(Some(g), false).await.unwrap().0;
+    settle(&mut [&mut a, &mut c]).await;
+    let ck = c.my_group_key(g).unwrap();
+    a.remove_member(g, &ck).await.unwrap();
+    settle(&mut [&mut a, &mut c]).await;
+    let mut b = TestClient::profile_only("Bo").await;
+    let r = b.join(&link).await;
+    assert!(
+        matches!(r, Err(CoreError::Net(NetError::Refused(_)))),
+        "{r:?}"
+    );
+    settle(&mut [&mut a, &mut b]).await;
+    assert_eq!(a.members(g).len(), 1, "{:?}", a.members(g));
+    assert!(b.groups().is_empty());
+}
+
+/// Bo asks to join through Cy's link, then Cy is removed before anyone
+/// lets Bo in. The admin's app does not complete the join.
+#[tokio::test]
+async fn join_through_link_of_member_removed_meanwhile_waits() {
+    let s = TestServer::start().await;
+    let (mut a, mut c, g) = room_with_cy(&s).await;
+    let link = c.invite(Some(g), false).await.unwrap().0;
+    settle(&mut [&mut a, &mut c]).await;
+    let mut b = TestClient::profile_only("Bo").await;
+    assert!(matches!(
+        b.join(&link).await.unwrap(),
+        JoinStatus::Waiting { .. }
+    ));
+    let ck = c.my_group_key(g).unwrap();
+    a.remove_member(g, &ck).await.unwrap();
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    assert_eq!(a.members(g).len(), 1, "{:?}", a.members(g));
+    assert!(b.groups().is_empty());
+}
+
+/// An app never adds back the key of an admin who was removed, even when
+/// the server lets that key register again.
+#[tokio::test]
+async fn removed_admins_key_is_not_added_back() {
+    let s = TestServer::start().await;
+    let (mut a, mut c, g) = room_with_cy(&s).await;
+    let ck = c.my_group_key(g).unwrap();
+    a.make_admin(g, &ck).await.unwrap();
+    settle(&mut [&mut a, &mut c]).await;
+    let old_key = c.test_group_key_pair(g).unwrap();
+    a.remove_member(g, &ck).await.unwrap();
+    settle(&mut [&mut a, &mut c]).await;
+    // The server's record of who left is gone.
+    let _ = rusqlite_conn(&s).execute("DELETE FROM retired_keys", []);
+    let link = a.invite(Some(g), false).await.unwrap().0;
+    let mut back = TestClient::profile_only("Cy").await;
+    back.test_join_with_mailbox_key(&link, old_key)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut back]).await;
+    assert!(
+        a.members(g).iter().all(|m| m.key != ck),
+        "{:?}",
+        a.members(g)
+    );
+    assert!(back.groups().is_empty());
+}
+
+const LINK_MAKER_LEFT: &str = "This invite link stopped working because the person who made it left the room. Ask someone in the room for a new link.";
+
+/// Bo asked to join through Cy's link, then Cy was removed. Bo's app says
+/// why the link stopped working and stops waiting.
+#[tokio::test]
+async fn joiner_hears_when_the_links_maker_left() {
+    let s = TestServer::start().await;
+    let (mut a, mut c, g) = room_with_cy(&s).await;
+    let link = c.invite(Some(g), false).await.unwrap().0;
+    settle(&mut [&mut a, &mut c]).await;
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    assert_eq!(b.test_pending_joins(), 1);
+    let ck = c.my_group_key(g).unwrap();
+    a.remove_member(g, &ck).await.unwrap();
+    b.sync().await.unwrap();
+    let ev = drain(&mut b).await;
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Warning(w) if w == LINK_MAKER_LEFT)),
+        "{ev:?}"
+    );
+    assert_eq!(b.test_pending_joins(), 0);
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    assert_eq!(a.members(g).len(), 1, "{:?}", a.members(g));
+    assert!(b.groups().is_empty());
+    assert!(!drain(&mut b)
+        .await
+        .iter()
+        .any(|e| matches!(e, Event::Warning(_))));
+}
+
+/// A rename an admin sent before being removed, replayed later by the
+/// server, changes nothing.
+#[tokio::test]
+async fn replayed_rename_from_a_removed_admin_is_ignored() {
+    let s = TestServer::start().await;
+    let (mut a, mut c, g) = room_with_cy(&s).await;
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    let ck = c.my_group_key(g).unwrap();
+    a.make_admin(g, &ck).await.unwrap();
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    c.rename_room(g, "Cy's room").await.unwrap();
+    let old: Vec<u8> = rusqlite_conn(&s)
+        .query_row(
+            "SELECT mls FROM log WHERE group_id = ?1 ORDER BY seq DESC LIMIT 1",
+            [g.0.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    a.remove_member(g, &ck).await.unwrap();
+    a.rename_room(g, "Ada's room").await.unwrap();
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    socketchat_testkit::append_to_log(&s, g, &old);
+    settle(&mut [&mut a, &mut b]).await;
+    let name = |x: &TestClient| x.groups().iter().find(|r| r.id == g).unwrap().name.clone();
+    assert_eq!(name(&b), "Ada's room");
+    assert_eq!(name(&a), "Ada's room");
+}
+
+/// A joiner whose invite could not be confirmed keeps its name and
+/// identity key out of the room, and makes no links there, until it marks
+/// someone in the room verified.
+#[tokio::test]
+async fn unconfirmed_joiner_shares_name_once_they_verify_someone() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let mut c = TestClient::profile_only("Cy").await;
+    c.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut c]).await;
+    let ck = c.my_group_key(g).unwrap();
+    a.make_admin(g, &ck).await.unwrap();
+    let ak = a.my_group_key(g).unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
+    settle(&mut [&mut a, &mut c]).await;
+    drop(a);
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    settle(&mut [&mut c, &mut b]).await;
+    c.remove_member(g, &ak).await.unwrap();
+    settle(&mut [&mut c, &mut b]).await;
+    let bk = b.my_group_key(g).unwrap();
+    let named = |c: &TestClient| c.members(g).iter().any(|m| m.key == bk && m.name == "Bo");
+    assert!(!named(&c), "{:?}", c.members(g));
+    assert!(b.invite(Some(g), false).await.is_err());
+    assert!(b.mark_verified(g, &ck).unwrap());
+    settle(&mut [&mut c, &mut b]).await;
+    assert!(named(&c), "{:?}", c.members(g));
+    assert!(b.invite(Some(g), false).await.is_ok());
+}
+
+/// The inviter's app lets someone in a day after they asked, when the
+/// invite's own 24 hours are over. The join waits for the inviter, and her
+/// profile confirms it, so the new member is verified and named on both
+/// sides.
+#[tokio::test]
+async fn late_join_after_the_invite_expired_is_confirmed_by_the_inviter() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    b.advance_clock(25 * 3600);
+    settle(&mut [&mut a, &mut b]).await;
+    let ev = drain(&mut b).await;
+    assert_eq!(joined(&ev), Some(&Verification::Verified), "{ev:?}");
+    settle(&mut [&mut a, &mut b]).await;
+    let bk = b.my_group_key(g).unwrap();
+    assert!(
+        a.members(g)
+            .iter()
+            .any(|m| m.key == bk && m.name == "Bo" && m.verified),
+        "{:?}",
+        a.members(g)
+    );
+}
+
+/// A joiner whose own invite is not confirmed is told what to do before
+/// making a link there: wait for the inviter while one is expected, and
+/// compare safety numbers once the inviter can no longer confirm it.
+#[tokio::test]
+async fn held_joiner_is_told_what_to_wait_for() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let mut c = TestClient::profile_only("Cy").await;
+    c.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut c]).await;
+    let ck = c.my_group_key(g).unwrap();
+    a.make_admin(g, &ck).await.unwrap();
+    let ak = a.my_group_key(g).unwrap();
+    let link = a.invite(Some(g), false).await.unwrap().0;
+    settle(&mut [&mut a, &mut c]).await;
+    drop(a);
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    settle(&mut [&mut c, &mut b]).await;
+    let waiting = b.invite(Some(g), false).await.unwrap_err().to_string();
+    assert!(
+        waiting.contains("Wait for the person who invited you to confirm it."),
+        "{waiting}"
+    );
+    c.remove_member(g, &ak).await.unwrap();
+    settle(&mut [&mut c, &mut b]).await;
+    let unconfirmed = b.invite(Some(g), false).await.unwrap_err().to_string();
+    assert!(
+        unconfirmed.contains("Compare safety numbers with someone there"),
+        "{unconfirmed}"
+    );
+}
+
+/// A voucher signed by someone other than the person in the link stays a
+/// failed check when it has also expired: only an expired voucher that is
+/// otherwise genuine waits for the inviter.
+#[tokio::test]
+async fn forged_voucher_that_also_expired_stays_unverified() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let (link, exp) = a.invite(Some(g), false).await.unwrap();
+    let secret = link.secret.unwrap();
+    let mut b = TestClient::profile_only("Bo").await;
+    b.join(&link).await.unwrap();
+    a.sync().await.unwrap();
+    let forged = socketchat_core::keys::Voucher::new(
+        &KeyPair::generate(),
+        link.token,
+        &secret,
+        g,
+        a.my_group_key(g).unwrap(),
+        exp,
+    );
+    let sealed = socketchat_core::keys::seal_voucher(
+        &socketchat_core::keys::voucher_seal_key(&secret),
+        &forged,
+    );
+    let changed = socketchat_testkit::open_server_db(&s)
+        .execute("UPDATE welcomes SET voucher = ?1", [sealed])
+        .unwrap();
+    assert_eq!(changed, 1);
+    b.advance_clock(25 * 3600);
+    settle(&mut [&mut a, &mut b]).await;
+    let ev = drain(&mut b).await;
+    assert!(
+        matches!(joined(&ev), Some(Verification::Unverified { reason })
+            if reason.contains("someone other than the person in the link")),
+        "{ev:?}"
+    );
+}
+
+/// A link handed to the app in code, past the text parser, with a host
+/// that is not a name or an address: the app refuses it before storing a
+/// server, so no later warning can carry that host to a terminal.
+#[tokio::test]
+async fn join_refuses_a_link_whose_host_is_not_a_name_or_address() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::profile_only("Ada").await;
+    let mut link = s.server_invite();
+    link.host = "evil\u{1b}]0;owned\u{7}\u{1b}[2J.example.com".into();
+    let r = a.join(&link).await;
+    assert!(r.is_err(), "{r:?}");
+    a.take_events();
+    a.invites().await.unwrap();
+    let said: Vec<String> = a
+        .take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Warning(w) => Some(w),
+            _ => None,
+        })
+        .collect();
+    assert!(said.is_empty(), "no server was stored: {said:?}");
+}
+
+/// A long host name in a warning keeps every character: names are cut at
+/// 64 characters, hosts are not.
+#[tokio::test]
+async fn warnings_show_a_long_host_in_full() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::profile_only("Ada").await;
+    let mut link = s.server_invite();
+    link.host = format!("{}.{}.invalid", "a".repeat(60), "b".repeat(30));
+    assert!(a.join(&link).await.is_err());
+    a.take_events();
+    a.invites().await.unwrap();
+    let said: Vec<String> = a
+        .take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Warning(w) => Some(w),
+            _ => None,
+        })
+        .collect();
+    assert!(said.iter().any(|w| w.contains(&link.host)), "{said:?}");
 }

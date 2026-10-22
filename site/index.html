@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Socketchat, encrypted chat you host yourself</title>
+<meta name="description" content="Socketchat is an encrypted terminal chat with a server you run yourself.">
+<style>
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--mute:#615f58;--line:#d9d6cc;--code:#efede6;--accent:#1f5f4a;--btn:#1f5f4a;--btnfg:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#161715;--fg:#e8e6df;--mute:#a09d94;--line:#34352f;--code:#20211e;--accent:#7fc4a8;--btn:#7fc4a8;--btnfg:#10110f}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main,footer{max-width:640px;margin:0 auto;padding:0 16px}
+main{padding-top:40px;padding-bottom:24px}
+h1{font-size:1.7rem;line-height:1.25;margin:0 0 .6em;font-weight:650}
+h2{font-size:1.1rem;margin:1.8em 0 .4em;font-weight:650}
+p{margin:0 0 1em}
+a{color:var(--accent)}
+.mute{color:var(--mute)}
+.os{margin:1em 0 .3em;font-size:.9rem;color:var(--mute)}
+.cmd{display:flex;gap:8px;align-items:flex-start;margin:0 0 .8em}
+pre{flex:1;min-width:0;margin:0;padding:12px 14px;background:var(--code);border:1px solid var(--line);border-radius:6px;overflow-x:auto;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}
+button{flex:none;font:inherit;font-size:.9rem;padding:8px 14px;border:0;border-radius:6px;background:var(--btn);color:var(--btnfg);cursor:pointer}
+button:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+.note{margin-top:2em;padding-top:1em;border-top:1px solid var(--line);font-size:.9rem;color:var(--mute)}
+footer{padding-top:16px;padding-bottom:40px;font-size:.9rem;color:var(--mute);border-top:1px solid var(--line)}
+footer{margin-top:16px}
+[hidden]{display:none!important}
+@media (max-width:480px){.cmd{flex-direction:column;align-items:stretch}pre{flex:none;max-width:100%}button{align-self:flex-start}}
+</style>
+</head>
+<body>
+<main>
+<h1>Socketchat</h1>
+<p>Socketchat is a full-featured encrypted chat with a server you run yourself. The server runs anywhere, from a cloud server or a home computer down to a small device such as a Raspberry Pi, and you invite people with a link. The server passes messages along but cannot read them: messages, files and changes to who is in a room are end-to-end encrypted, which means only the people in a chat can read them.</p>
+<ul>
+<li>Rooms, which are group chats, and direct messages.</li>
+<li>Invite links, shown as text and as a QR code.</li>
+<li>Safety numbers, so you can check that nobody sits between you and a friend.</li>
+<li>Files, photos and videos. Photos lose their location and device data before they leave.</li>
+<li>Post-quantum protection, meaning protection against a future quantum computer, on by default.</li>
+</ul>
+<p>Socketchat is a terminal app written in Rust. Its encryption comes from a published standard and an audited library, with no home-made cryptography.</p>
+
+<h2>Install</h2>
+<p class="os">macOS or Linux, in a terminal</p>
+<pre>curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh</pre>
+<p class="os">Windows, in PowerShell</p>
+<pre>powershell -ExecutionPolicy Bypass -c "irm https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.ps1 | iex"</pre>
+<p>Open a new terminal afterwards. The README has the steps to start a server and invite a friend.</p>
+<p><a href="https://github.com/sachio222/socketchat_v4">Read the README on GitHub</a></p>
+</main>
+<footer>
+<a href="https://github.com/sachio222/socketchat_v4">Socketchat on GitHub</a> &middot; Open source, MIT or Apache 2.0
+</footer>
+</body>
+</html>

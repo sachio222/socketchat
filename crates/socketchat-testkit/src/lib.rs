@@ -103,6 +103,91 @@ pub fn open_server_db(s: &TestServer) -> Db {
     rusqlite::Connection::open(s.dir.path().join(socketchat_server::db::DB_FILE)).expect("db")
 }
 
+/// Appends `mls` to a room's log on the server, as an operator who
+/// writes to the database directly could. Returns its sequence number.
+pub fn append_to_log(s: &TestServer, group: socketchat_proto::msg::GroupId, mls: &[u8]) -> u64 {
+    let db = open_server_db(s);
+    let seq: i64 = db
+        .query_row(
+            "SELECT next_seq FROM groups WHERE id = ?1",
+            [group.0.as_slice()],
+            |r| r.get(0),
+        )
+        .expect("room on the server");
+    db.execute(
+        "INSERT INTO log (group_id, seq, mls, created_unix) VALUES (?1, ?2, ?3, 0)",
+        rusqlite::params![group.0.as_slice(), seq, mls],
+    )
+    .expect("log row");
+    db.execute(
+        "UPDATE groups SET next_seq = next_seq + 1 WHERE id = ?1",
+        [group.0.as_slice()],
+    )
+    .expect("next seq");
+    seq as u64
+}
+
+/// An MLS external commit that adds a new leaf to the room described by
+/// `group_info` and `ratchet_tree`, for tests of changes from outside a
+/// room.
+pub fn outside_commit(group_info: &[u8], ratchet_tree: &[u8]) -> Vec<u8> {
+    use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
+    use openmls::prelude::{
+        LeafNodeParameters, MlsGroup, MlsMessageBodyIn, MlsMessageIn, RatchetTreeIn,
+    };
+    use openmls_traits::OpenMlsProvider as _;
+    use socketchat_core::suite::{capabilities, group_join_config};
+
+    let MlsMessageBodyIn::GroupInfo(gi) = MlsMessageIn::tls_deserialize_exact(group_info)
+        .expect("group info")
+        .extract()
+    else {
+        panic!("not a GroupInfo")
+    };
+    let tree = RatchetTreeIn::tls_deserialize_exact(ratchet_tree).expect("ratchet tree");
+    let prov = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    let key = KeyPair::generate();
+    let (_, bundle) = MlsGroup::external_commit_builder()
+        .with_ratchet_tree(tree)
+        .with_config(group_join_config())
+        .build_group(&prov, gi, key.credential())
+        .expect("external commit group")
+        .leaf_node_parameters(
+            LeafNodeParameters::builder()
+                .with_capabilities(capabilities())
+                .build(),
+        )
+        .load_psks(prov.storage())
+        .expect("psks")
+        .build(prov.rand(), prov.crypto(), &key, |_| true)
+        .expect("external commit")
+        .finalize(&prov)
+        .expect("finalize");
+    bundle.commit().tls_serialize_detached().expect("encode")
+}
+
+/// A Welcome for the owner of the KeyPackages in `blob` that does not lead
+/// into the room `group`.
+pub fn welcome_into_copy(group: socketchat_proto::msg::GroupId, blob: &[u8]) -> Vec<u8> {
+    use openmls::prelude::tls_codec::Serialize as _;
+    use openmls::prelude::MlsGroup;
+    use socketchat_core::suite::{group_create_config, SUITE};
+
+    let prov = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    let key = KeyPair::generate();
+    let mut copy = MlsGroup::new_with_group_id(
+        &prov,
+        &key,
+        &group_create_config(SUITE, &[key.public()]),
+        openmls::group::GroupId::from_slice(&group.0),
+        key.credential(),
+    )
+    .expect("group");
+    let kp = socketchat_core::invite::pick_key_package(&prov, blob, SUITE).expect("KeyPackage");
+    let (_, welcome, _) = copy.add_members(&prov, &key, &[kp]).expect("add");
+    welcome.tls_serialize_detached().expect("encode")
+}
+
 /// KeyPackages a hostile server might swap in for a real joiner's.
 pub fn forged_key_package_blob() -> Vec<u8> {
     let prov = openmls_rust_crypto::OpenMlsRustCrypto::default();

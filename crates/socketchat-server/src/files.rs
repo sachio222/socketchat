@@ -8,7 +8,7 @@ use socketchat_proto::msg::{FileId, GroupId as Gid, Key, Response};
 
 use crate::conn::ConnState;
 use crate::groups::{joined_keys, member_key};
-use crate::State;
+use crate::{quota, State};
 
 /// Plaintext bytes per chunk, plus the 16-byte tag the cipher adds.
 const MAX_CHUNK: usize = 64 * 1024 + 16;
@@ -64,6 +64,20 @@ pub fn begin(state: &State, cs: &ConnState, group: Gid, size: u64) -> Response {
     let Some(me) = member_key(&db, cs, &group) else {
         return Response::Refused("you are not a member of this group".into());
     };
+    // Apps cannot resume or cancel an upload, so one cut short stays
+    // unfinished. A member keeps at most `OPEN_UPLOADS`: starting another
+    // past that drops their oldest unfinished one.
+    for id in quota::uploads_to_drop(&db, &me) {
+        if let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) {
+            delete(state, &db, &FileId(id));
+        }
+    }
+    // A file must fit its sender's, its room's and the server's limits at
+    // the size it announces. Until it finishes it counts at the bytes
+    // received, and each piece is checked again as it arrives.
+    if let Some(r) = quota::file_refused(state, &db, &group, &me, size.max(quota::FILE_FLOOR)) {
+        return r;
+    }
     let id = FileId(crate::random_token().0);
     let ok = db.execute(
         "INSERT INTO files (id, group_id, size, uploader, created_unix) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -99,10 +113,17 @@ pub fn chunk(state: &State, cs: &ConnState, file: FileId, index: u32, data: &[u8
     if f.complete || index as u64 != f.chunks || f.chunks >= chunk_count(f.size) {
         return Response::Refused("chunks must arrive in order and within the file's size".into());
     }
+    let Ok(uploader) = <[u8; 32]>::try_from(f.uploader.as_slice()).map(Key) else {
+        return Response::Error("stored upload is malformed".into());
+    };
+    let bytes = data.len().saturating_sub(16) as u64;
+    if let Some(r) = quota::file_refused(state, &db, &f.group, &uploader, bytes) {
+        return r;
+    }
     drop(db);
     let dir = file_dir(state, &file);
-    if std::fs::create_dir_all(&dir)
-        .and_then(|_| std::fs::write(dir.join(index.to_string()), data))
+    if crate::perms::create_private_dir(&dir)
+        .and_then(|_| crate::perms::write_private(&dir.join(index.to_string()), data))
         .is_err()
     {
         return Response::Error("could not store the chunk".into());
@@ -112,6 +133,7 @@ pub fn chunk(state: &State, cs: &ConnState, file: FileId, index: u32, data: &[u8
         "UPDATE files SET chunks = chunks + 1 WHERE id = ?1",
         [file.0.as_slice()],
     );
+    quota::note_stored(state, 0, data.len().saturating_sub(16) as u64);
     Response::Ok
 }
 
@@ -163,6 +185,33 @@ pub(crate) fn delete(state: &State, db: &rusqlite::Connection, file: &FileId) {
         "DELETE FROM file_done WHERE file_id = ?1",
         [file.0.as_slice()],
     );
+}
+
+/// Deletes the rows of finished files in `group` that no member but their
+/// sender still waits for, as after someone leaves, and returns their IDs so
+/// the caller can delete the chunks once the transaction is in.
+pub(crate) fn drop_unwanted(
+    db: &rusqlite::Connection,
+    group: &Gid,
+) -> rusqlite::Result<Vec<FileId>> {
+    let ids: Vec<Vec<u8>> = db
+        .prepare(
+            "SELECT id FROM files f WHERE f.group_id = ?1 AND f.complete = 1 AND NOT EXISTS (
+                 SELECT 1 FROM mailboxes m
+                 WHERE m.group_id = ?1 AND m.joined_seq IS NOT NULL AND m.key != f.uploader
+                   AND NOT EXISTS (SELECT 1 FROM file_done d WHERE d.file_id = f.id AND d.mailbox = m.key))",
+        )?
+        .query_map([group.0.as_slice()], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::new();
+    for id in ids {
+        db.execute("DELETE FROM files WHERE id = ?1", [&id])?;
+        db.execute("DELETE FROM file_done WHERE file_id = ?1", [&id])?;
+        if let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) {
+            out.push(FileId(id));
+        }
+    }
+    Ok(out)
 }
 
 /// A member has the file. Once every member but the sender does, it goes.

@@ -1,0 +1,15 @@
+name: Docker actions
+permissions:
+  contents: read
+
+on:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: docker://alpine:3.20
+      - uses: docker://alpine@sha256:abc123
+      - uses: docker://alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      - uses: "docker://ghcr.io/example/tool:1.2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

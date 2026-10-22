@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/servers.rs
+expression: s
+---
+┌ Chats ───────────┐┌ Book club · chat.socketchat.org ─────┐┌ People ──────────┐
+│# Book club       ││                                      ││                  │
+│# Climbing Saturd…││                                      ││                  │
+│# Old crew        ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  What's on your mind? #Book club                               / for commands│
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter send · /help commands · Tab move · Ctrl-K switch chat · Ctrl-C quit

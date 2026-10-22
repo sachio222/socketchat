@@ -8,7 +8,10 @@ pub mod link;
 pub mod msg;
 
 pub use frame::{encode_frame, FrameDecoder, FrameError, MAX_FRAME};
-pub use link::{InviteLink, LinkError, Token};
+pub use link::{
+    from_web_link, invite_message, to_web_link, valid_host, InviteLink, LinkError, Token, SITE_URL,
+    WEB_JOIN_URL,
+};
 
 /// Newest protocol number: sent in the first frame of every connection.
 pub const PROTOCOL_VERSION: u16 = 2;

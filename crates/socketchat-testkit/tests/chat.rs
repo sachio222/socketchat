@@ -274,3 +274,31 @@ async fn commit_in_flight_when_connection_drops_applies_once() {
     settle(&mut [&mut a, &mut b]).await;
     assert_eq!(texts(&b, g), vec!["Ada: after the drop"]);
 }
+
+/// A direct message between two members who have not verified each other
+/// opens with both names showing, and no line about a hidden name.
+#[tokio::test]
+async fn dm_between_unverified_members_keeps_names() {
+    let s = TestServer::start().await;
+    let (g, mut all) = group(&s, &["Ada", "Bo", "Cy"]).await;
+    let ck = key_of(&all[2], g);
+    let dm = all[1].dm(g, &ck).await.unwrap();
+    settle_all(&mut all).await;
+    let ev = drain(&mut all[2]).await;
+    assert!(
+        ev.iter().any(|e| matches!(e,
+            Event::Joined { group, verification: Verification::Unverified { .. } } if *group == dm)),
+        "{ev:?}"
+    );
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, Event::Warning(w) if w.contains("stays hidden"))),
+        "{ev:?}"
+    );
+    settle_all(&mut all).await;
+    assert!(
+        all[1].members(dm).iter().any(|m| m.name == "Cy"),
+        "{:?}",
+        all[1].members(dm)
+    );
+}

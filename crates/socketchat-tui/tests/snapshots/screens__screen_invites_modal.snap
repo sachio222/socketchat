@@ -15,7 +15,7 @@ expression: s
 │ │1. Book club: expires in 1 hour                                           │ │
 │ │2. Climbing Saturdays: expires in 23 hours                                │ │
 │ │3. Server invite: expires in 24 hours                                     │ │
-│ └──────────────────────────────────────────────────────────────────────────┘ │
+│ └────────────────────────────────────────────────────────────────[ Close ]─┘ │
 │                  ││                                      ││                  │
 │                  ││                                      ││                  │
 │                  ││                                      ││                  │
@@ -23,6 +23,6 @@ expression: s
 │                  ││                                      ││                  │
 └──────────────────┘└──────────────────────────────────────┘└──────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  What's on your mind, Book club?                               / for commands│
+│  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-/cancel <number> stops a link · Esc close
+/cancel <number> stops a link · Esc close                       socketchat 0.5.1

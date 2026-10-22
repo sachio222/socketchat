@@ -27,6 +27,7 @@ use tokio::sync::{mpsc, watch, Notify, OwnedSemaphorePermit};
 use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 
+use crate::config::SIGN_IN_FRAME_FLOOR;
 use crate::{auth, files, groups, invites, relock, State};
 
 /// Frames one connection may have waiting to be written.
@@ -56,6 +57,10 @@ const REFUSE_LIMIT: Duration = Duration::from_secs(5);
 /// The most a connection being turned away may send before its Hello is
 /// whole. A Hello is a few bytes.
 const REFUSE_READ_MAX: usize = 64;
+
+/// Largest frame body accepted before Hello. A Hello's body is at most 4
+/// bytes; nothing else may come first.
+const HELLO_MAX: usize = 16;
 
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
@@ -227,6 +232,68 @@ impl Drop for Reserved {
         if self.held > 0 {
             self.acct.give(self.held);
         }
+    }
+}
+
+/// Bytes that connections not yet signed in hold in partly received
+/// frames, over every connection, and the most they may hold.
+pub struct Budget {
+    used: AtomicUsize,
+    max: usize,
+}
+
+impl Budget {
+    pub fn new(max: usize) -> Budget {
+        Budget {
+            used: AtomicUsize::new(0),
+            max,
+        }
+    }
+
+    /// Bytes counted now.
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
+}
+
+/// What one connection counts against the budget, given back on drop.
+struct Charge {
+    budget: Arc<Budget>,
+    held: usize,
+}
+
+impl Charge {
+    fn new(budget: Arc<Budget>) -> Charge {
+        Charge { budget, held: 0 }
+    }
+
+    /// Counts `n` bytes for this connection in place of what it counted
+    /// before. False when that would go over the budget; the count is then
+    /// left as it was.
+    fn set(&mut self, n: usize) -> bool {
+        let b = &self.budget;
+        if n <= self.held {
+            b.used.fetch_sub(self.held - n, Ordering::AcqRel);
+            self.held = n;
+            return true;
+        }
+        let more = n - self.held;
+        let fits = b
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |u| {
+                u.checked_add(more).filter(|&t| t <= b.max)
+            })
+            .is_ok();
+        if fits {
+            self.held = n;
+        }
+        fits
+    }
+}
+
+impl Drop for Charge {
+    fn drop(&mut self) {
+        self.set(0);
     }
 }
 
@@ -440,6 +507,8 @@ pub async fn serve(
 ) {
     let count = state.conns.fetch_add(1, Ordering::Relaxed) + 1;
     let _guard = CountGuard(state.clone());
+    // Whatever it sends, a connection must sign in this soon.
+    let sign_in_by = Instant::now() + state.cfg.timing.sign_in;
     let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
         Ok(Ok(s)) => s,
         _ => return,
@@ -465,14 +534,34 @@ pub async fn serve(
     };
     let _online = OnlineGuard(state.clone(), cs.id);
     let mut dec = FrameDecoder::default();
+    dec.set_limit(HELLO_MAX);
     let mut buf = vec![0u8; 16 * 1024];
     let mut greeted = false;
+    // Until it signs in, a connection may send only small frames, and what
+    // it holds in a partly received frame counts against a budget shared
+    // by every such connection.
+    let mut signed_in = false;
+    let mut charge = Charge::new(state.pre_sign_in.clone());
+    let sign_in_frame = state
+        .cfg
+        .max_frame_before_sign_in
+        .clamp(SIGN_IN_FRAME_FLOOR, MAX_FRAME);
     // Hello must come soon after TLS; after that, a request must come
     // within the idle limit of the last one.
     let mut deadline = Instant::now() + timing.hello;
 
     'conn: loop {
         loop {
+            let due = if signed_in {
+                deadline
+            } else {
+                deadline.min(sign_in_by)
+            };
+            // Frames already received wait their turn behind the deadline
+            // too.
+            if Instant::now() >= due {
+                break 'conn;
+            }
             let body = match dec.next_frame() {
                 Ok(Some(b)) => b,
                 Ok(None) => break,
@@ -494,6 +583,7 @@ pub async fn serve(
                         break 'conn;
                     }
                     greeted = true;
+                    dec.set_limit(sign_in_frame);
                     cs.version = version;
                     tx.push_frame(&ServerFrame::HelloOk { version });
                     deadline = Instant::now() + timing.idle;
@@ -502,19 +592,21 @@ pub async fn serve(
                     // Wait for room for the reply, in bytes and in frames,
                     // before doing the work.
                     let reserved = tokio::select! {
+                        biased;
+                        _ = tokio::time::sleep_until(due) => break 'conn,
                         r = Reserved::wait(&acct) => r,
                         _ = stop.changed() => break 'conn,
                         _ = close.notified() => break 'conn,
-                        _ = tokio::time::sleep_until(deadline) => break 'conn,
                     };
                     let permit = tokio::select! {
+                        biased;
+                        _ = tokio::time::sleep_until(due) => break 'conn,
                         p = tx.inner.reserve() => match p {
                             Ok(p) => p,
                             Err(_) => break 'conn,
                         },
                         _ = stop.changed() => break 'conn,
                         _ = close.notified() => break 'conn,
-                        _ = tokio::time::sleep_until(deadline) => break 'conn,
                     };
                     let resp = if body.min_version() > cs.version {
                         Response::Refused("this server needs a newer app for that".into())
@@ -525,15 +617,36 @@ pub async fn serve(
                         reserved.send(permit, b);
                     }
                     deadline = Instant::now() + timing.idle;
+                    if !signed_in && !cs.proven.is_empty() {
+                        signed_in = true;
+                        dec.set_limit(MAX_FRAME);
+                        charge.set(0);
+                    }
                 }
                 _ => break 'conn,
             }
         }
+        // Before sign-in, read no more than the largest frame allowed, and
+        // count what a partly received one holds past the first
+        // `SIGN_IN_FRAME_FLOOR` bytes.
+        let (due, room) = if signed_in {
+            (deadline, buf.len())
+        } else {
+            if !charge.set(dec.held().saturating_sub(SIGN_IN_FRAME_FLOOR)) {
+                break;
+            }
+            let most = if greeted { sign_in_frame } else { HELLO_MAX };
+            let room = (4 + most)
+                .saturating_sub(dec.buffered())
+                .clamp(1, buf.len());
+            (deadline.min(sign_in_by), room)
+        };
         tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(due) => break,
             _ = stop.changed() => break,
             _ = close.notified() => break,
-            _ = tokio::time::sleep_until(deadline) => break,
-            r = rd.read(&mut buf) => match r {
+            r = rd.read(&mut buf[..room]) => match r {
                 Ok(0) | Err(_) => break,
                 Ok(n) => dec.push(&buf[..n]),
             },
@@ -782,6 +895,75 @@ mod tests {
         assert_ne!(source(a), source(c));
         let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
         assert_eq!(source(mapped), "192.0.2.7".parse::<IpAddr>().unwrap());
+    }
+
+    /// Connections share the budget: a charge that would go over it is
+    /// refused and leaves the count alone, and a connection's charge goes
+    /// back when it shrinks or the connection ends.
+    #[test]
+    fn charges_share_one_budget() {
+        let budget = Arc::new(Budget::new(1000));
+        let mut a = Charge::new(budget.clone());
+        let mut b = Charge::new(budget.clone());
+        assert!(a.set(600));
+        assert!(!b.set(500));
+        assert_eq!(budget.used(), 600);
+        assert!(b.set(400));
+        assert_eq!(budget.used(), 1000);
+        assert!(a.set(100));
+        assert!(b.set(900));
+        assert_eq!(budget.used(), 1000);
+        drop(a);
+        assert_eq!(budget.used(), 900);
+        assert!(b.set(0));
+        drop(b);
+        assert_eq!(budget.used(), 0);
+    }
+
+    /// Before Hello only a Hello may come, and the requests an app sends
+    /// before it signs in fit the smallest frame limit an operator can set.
+    #[test]
+    fn sign_in_requests_fit_the_limits() {
+        use socketchat_core::keys::KeyPair;
+        use socketchat_proto::Token;
+        let hello = to_frame(&ClientFrame::Hello { version: u16::MAX }).unwrap();
+        assert!(hello.len() - 4 <= HELLO_MAX, "{}", hello.len());
+        let k = KeyPair::generate();
+        let sig = k.sign(socketchat_core::keys::CTX_AUTH, b"x");
+        let req = |body| ClientFrame::Req { id: u32::MAX, body };
+        let largest = [
+            req(Request::Challenge),
+            req(Request::Prove {
+                key: k.public(),
+                sig,
+            }),
+            req(Request::RegisterAccount {
+                token: Token([0xff; 16]),
+                key: k.public(),
+                sig,
+            }),
+            req(Request::RegisterMailbox {
+                token: Some(Token([0xff; 16])),
+                key: k.public(),
+                sig,
+            }),
+        ]
+        .iter()
+        .map(|f| to_frame(f).unwrap().len() - 4)
+        .max()
+        .unwrap();
+        assert!(largest <= SIGN_IN_FRAME_FLOOR / 4, "{largest}");
+        // An app whose keys the server no longer knows may still ask about
+        // the links it made, 100 at a time.
+        let list = to_frame(&req(Request::ListInvites {
+            server_tokens: vec![Token([0xff; 16]); 100],
+        }))
+        .unwrap();
+        assert!(
+            list.len() - 4 <= crate::config::MAX_FRAME_BEFORE_SIGN_IN / 4,
+            "{}",
+            list.len()
+        );
     }
 
     #[test]

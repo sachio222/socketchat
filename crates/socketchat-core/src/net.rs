@@ -35,10 +35,10 @@ pub enum NetError {
     Tls(String),
     #[error("could not reach the server: {0}")]
     Io(String),
-    #[error("the server speaks protocol {0}; update socketchat")]
+    #[error("the server speaks protocol {0}; update Socketchat")]
     Version(u16),
     #[error(
-        "this server runs an older version of socketchat that can't do that yet; ask the person who runs it to update it"
+        "this server runs an older version of Socketchat that can't do that yet; ask the person who runs it to update it"
     )]
     Unsupported { needs: u16, server: u16 },
     #[error("the connection to the server dropped")]

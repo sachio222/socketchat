@@ -6,14 +6,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use socketchat_core::client::{Client, Event, JoinStatus, Verification};
+use socketchat_core::client::{server_text, Client, Event, JoinStatus, ServerView, Verification};
 use socketchat_core::invite::hours_text;
 use socketchat_core::keys::fingerprint_text;
-use socketchat_core::sanitize::{clean_name, clean_text};
+use socketchat_core::sanitize::{clean_name, clean_text, same_name};
 use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
 use socketchat_proto::InviteLink;
-use socketchat_server::{acceptable_use_text, init, make_server_invite, Config, Server};
+use socketchat_server::{
+    acceptable_use_text, init, make_server_invite, public_host_warning, Config, Server,
+};
+use socketchat_tui::app::{forget_warning, forgot_text, server_row};
 
 #[derive(Parser)]
 #[command(
@@ -29,7 +32,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Set up, run and invite people to a socketchat server.
+    /// Set up, run and invite people to a Socketchat server.
     Server {
         #[command(subcommand)]
         cmd: ServerCmd,
@@ -38,13 +41,19 @@ enum Cmd {
     Join {
         link: String,
         /// Trust the server certificate in this link in place of the one
-        /// socketchat already trusts for that server, after its operator set
+        /// Socketchat already trusts for that server, after its operator set
         /// it up again.
         #[arg(long)]
         new_certificate: bool,
     },
     /// Start a new group chat.
-    New { name: String },
+    New {
+        name: String,
+        /// The server to make it on, by its number in `socketchat
+        /// servers`. Without it, the newest server you joined.
+        #[arg(long, value_name = "NUMBER")]
+        server: Option<usize>,
+    },
     /// Print an invite link on one line.
     Invite {
         /// The group to invite into. Leave out with --dm for a new two-person chat.
@@ -59,6 +68,16 @@ enum Cmd {
         /// Stop the link at this number in the list from working.
         #[arg(long, value_name = "NUMBER")]
         cancel: Option<usize>,
+    },
+    /// See your servers and whether each can be reached, or forget one.
+    Servers {
+        /// Delete the server at this number in the list, and its rooms,
+        /// from this computer. The server is not told.
+        #[arg(long, value_name = "NUMBER")]
+        forget: Option<usize>,
+        /// Forget without asking first.
+        #[arg(long, requires = "forget")]
+        yes: bool,
     },
     /// Send a message to a group (for scripts).
     Send {
@@ -108,6 +127,15 @@ enum ServerCmd {
     },
 }
 
+/// What `socketchat` prints on a computer with no profile yet.
+const GETTING_STARTED: &str = "\
+Socketchat has no profile on this computer yet. To start:
+  socketchat server init                    set up a local server
+  socketchat server run                     start a local server
+  socketchat join '<invite link>'           join a server you were invited to
+Then run socketchat to open the chat screen.
+For a server friends on other computers can reach, add --host <address> to server init.";
+
 /// A failure with the exit code it maps to.
 struct Fail(u8, String);
 
@@ -118,6 +146,10 @@ impl From<CoreError> for Fail {
             CoreError::NoProfile => Fail(
                 1,
                 "No profile here yet. Ask someone for an invite link, then run: socketchat join <link>".into(),
+            ),
+            e @ CoreError::Unreachable { .. } => Fail(
+                1,
+                format!("{e} Run socketchat servers to see your servers."),
             ),
             e => Fail(1, e.to_string()),
         }
@@ -153,21 +185,62 @@ fn server_dir(given: Option<PathBuf>) -> PathBuf {
     })
 }
 
-fn passphrase(confirm: bool) -> Result<String, Fail> {
-    if let Ok(p) = std::env::var("SOCKETCHAT_PASSPHRASE") {
-        return Ok(p);
+const EMPTY_VAR: &str = "SOCKETCHAT_PASSPHRASE is set but empty. Set it to your passphrase, or unset it to type the passphrase instead. Nothing was changed.";
+const EMPTY_TYPED: &str = "A passphrase cannot be empty.";
+
+/// The passphrase from `SOCKETCHAT_PASSPHRASE`, or typed at a prompt, and
+/// whether it came from the variable. It may be empty; the caller decides.
+/// A variable that is not text is refused, never skipped for the prompt.
+fn read_passphrase() -> Result<(String, bool), Fail> {
+    match std::env::var("SOCKETCHAT_PASSPHRASE") {
+        Ok(p) => Ok((p, true)),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Fail(
+            1,
+            "SOCKETCHAT_PASSPHRASE is not valid text. Set it to your passphrase, or unset it to type the passphrase instead. Nothing was changed.".into(),
+        )),
+        Err(std::env::VarError::NotPresent) => {
+            Ok((rpassword::prompt_password("Passphrase: ")?, false))
+        }
     }
-    let p = rpassword::prompt_password("Passphrase: ")?;
+}
+
+/// The passphrase for a new profile, which is never empty.
+fn new_passphrase() -> Result<String, Fail> {
+    let (p, from_var) = read_passphrase()?;
     if p.is_empty() {
-        return Err(Fail(1, "A passphrase cannot be empty.".into()));
+        let says = if from_var { EMPTY_VAR } else { EMPTY_TYPED };
+        return Err(Fail(1, says.into()));
     }
-    if confirm && rpassword::prompt_password("Same passphrase again: ")? != p {
+    if !from_var && rpassword::prompt_password("Same passphrase again: ")? != p {
         return Err(Fail(
             1,
             "The two passphrases did not match. Nothing was set up.".into(),
         ));
     }
     Ok(p)
+}
+
+/// Opens the profile in `dir`. An empty passphrase opens only a profile an
+/// earlier release made with one, and Socketchat says so each time.
+async fn open_profile(dir: &std::path::Path) -> Result<Client, Fail> {
+    let (p, from_var) = read_passphrase()?;
+    let c = match Client::open(dir, &p).await {
+        Ok(c) => c,
+        Err(CoreError::WrongPassphrase) if p.is_empty() => {
+            let says = if from_var { EMPTY_VAR } else { EMPTY_TYPED };
+            return Err(Fail(1, says.into()));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if p.is_empty() {
+        eprintln!(
+            "This profile has no passphrase, so anyone who can copy its folder can read what Socketchat keeps there."
+        );
+    }
+    for line in c.open_notes() {
+        eprintln!("{line}");
+    }
+    Ok(c)
 }
 
 fn display_name() -> Result<String, Fail> {
@@ -190,31 +263,35 @@ fn display_name() -> Result<String, Fail> {
 
 async fn open() -> Result<Client, Fail> {
     let dir = profile_dir();
-    if !dir.join(socketchat_core::store::DB_FILE).exists() {
+    if !socketchat_core::store::has_profile(&dir) {
         return Err(CoreError::NoProfile.into());
     }
-    Ok(Client::open(&dir, &passphrase(false)?).await?)
+    open_profile(&dir).await
 }
 
 async fn open_or_create() -> Result<Client, Fail> {
     let dir = profile_dir();
-    if dir.join(socketchat_core::store::DB_FILE).exists() {
-        return Ok(Client::open(&dir, &passphrase(false)?).await?);
+    if socketchat_core::store::has_profile(&dir) {
+        return open_profile(&dir).await;
     }
-    eprintln!("Setting up socketchat on this computer.");
+    eprintln!("Setting up Socketchat on this computer.");
     let name = display_name()?;
     eprintln!(
-        "Your passphrase encrypts everything socketchat keeps here. Nobody can recover it for you."
+        "Your passphrase encrypts everything Socketchat keeps here. Nobody can recover it for you."
     );
-    let pass = passphrase(true)?;
-    Ok(Client::create_profile(&dir, &pass, &name).await?)
+    let pass = new_passphrase()?;
+    let c = Client::create_profile(&dir, &pass, &name).await?;
+    for line in c.open_notes() {
+        eprintln!("{line}");
+    }
+    Ok(c)
 }
 
 fn group_by_name(c: &Client, name: &str) -> Result<GroupId, Fail> {
     let hits: Vec<GroupId> = c
         .groups()
         .into_iter()
-        .filter(|g| !g.left && g.name.eq_ignore_ascii_case(name))
+        .filter(|g| !g.left && same_name(name, &g.name))
         .map(|g| g.id)
         .collect();
     match hits.as_slice() {
@@ -231,9 +308,63 @@ fn group_name(c: &Client, g: GroupId) -> String {
     c.groups()
         .into_iter()
         .find(|x| x.id == g)
-        .map(|x| x.name)
+        .map(|x| clean_name(&x.name))
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "a new chat".into())
+}
+
+/// How far `log` and `sync` indent a message's second and later lines.
+const MORE: &str = "    ";
+
+/// One message as `log` and `sync` print it: `head`, such as "Bo: ", then
+/// the text, with each further line of the text indented. A line that
+/// starts at the left edge therefore always begins a message, so nobody
+/// can write a line that passes for someone else's message.
+fn message_lines(head: &str, text: &str) -> String {
+    let text = clean_text(text);
+    let mut lines = text.split('\n');
+    let mut out = format!("{head}{}", lines.next().unwrap_or(""));
+    for l in lines {
+        out.push('\n');
+        out.push_str(MORE);
+        out.push_str(l);
+    }
+    out
+}
+
+/// The server at number `n` in `socketchat servers`.
+fn server_number(c: &Client, n: usize) -> Result<ServerView, Fail> {
+    n.checked_sub(1)
+        .and_then(|i| c.servers(None).into_iter().nth(i))
+        .ok_or_else(|| {
+            Fail(
+                1,
+                format!("There is no server {n}. Run socketchat servers to see the list."),
+            )
+        })
+}
+
+/// Asks on the terminal before forgetting server `s`, number `n`. Away
+/// from a terminal nobody can answer, so it says to add --yes.
+fn ask_to_forget(s: &ServerView, n: usize) -> Result<bool, Fail> {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err(Fail(
+            1,
+            format!(
+                "To forget {} without being asked, run: socketchat servers --forget {n} --yes",
+                s.text
+            ),
+        ));
+    }
+    eprintln!(
+        "{}",
+        forget_warning(&s.text, s.rooms, "open socketchat and /leave")
+    );
+    eprint!("Type y and press Enter to forget it: ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 /// Syncs a few times and prints what happened.
@@ -248,16 +379,36 @@ async fn sync_and_report(c: &mut Client) -> Result<(), Fail> {
             Event::Joined { group, verification } => match verification {
                 Verification::Verified => println!("You joined {}. The person who invited you is verified.", group_name(c, group)),
                 Verification::Unverified { reason } => println!(
-                    "You joined {}, but the invite could not be checked: {reason}. Compare safety numbers before you trust anyone there.",
-                    group_name(c, group)
+                    "You joined {}, but the invite could not be checked: {}. Compare safety numbers before you trust anyone there.",
+                    group_name(c, group),
+                    clean_text(&reason).replace('\n', " ")
+                ),
+                Verification::Waiting { inviter } => println!(
+                    "You joined {}. Waiting for {} to confirm this invite.",
+                    group_name(c, group),
+                    clean_name(&inviter)
                 ),
             },
-            Event::JoinRequestHandled { group } => println!("Someone you invited joined {}.", group_name(c, group)),
-            Event::Message { group, line } => println!("[{}] {}: {}", group_name(c, group), line.sender, line.text),
-            Event::Left { name, .. } => println!(
-                "You are no longer in {}.",
-                if name.is_empty() { "a chat" } else { &name }
+            Event::InviteConfirmed { group, inviter } => println!(
+                "{} confirmed your invite to {} and is now verified.",
+                clean_name(&inviter),
+                group_name(c, group)
             ),
+            Event::JoinRequestHandled { group } => println!("Someone you invited joined {}.", group_name(c, group)),
+            Event::Message { group, line } => println!(
+                "{}",
+                message_lines(
+                    &format!("[{}] {}: ", group_name(c, group), clean_name(&line.sender)),
+                    &line.text
+                )
+            ),
+            Event::Left { name, .. } => {
+                let name = clean_name(&name);
+                println!(
+                    "You are no longer in {}.",
+                    if name.is_empty() { "a chat" } else { &name }
+                )
+            }
             Event::Warning(w) => eprintln!("{}", clean_text(&w)),
             _ => {}
         }
@@ -309,6 +460,9 @@ async fn server(cmd: ServerCmd) -> Result<(), Fail> {
                 Some(f) => Config::load_file(&f)?,
                 None => Config::load(&server_dir(data_dir))?,
             };
+            if let Some(w) = public_host_warning(&cfg) {
+                eprintln!("{w}");
+            }
             let h = Server::start(cfg).await?;
             // Status lines never stop the server: if whoever started it
             // stopped reading, the writes just fail quietly.
@@ -318,7 +472,7 @@ async fn server(cmd: ServerCmd) -> Result<(), Fail> {
                 let _ = out.flush();
             };
             say(format!(
-                "socketchat server listening on {}\nCertificate fingerprint: {}",
+                "Socketchat server listening on {}\nCertificate fingerprint: {}",
                 h.addr,
                 fingerprint_text(&h.cert_fpr)
             ));
@@ -346,7 +500,7 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             new_certificate,
         }) => {
             let link: InviteLink = link.trim().parse().map_err(|e| {
-                Fail(1, format!("That is not a socketchat invite link ({e}). Links start with socketchat://"))
+                Fail(1, format!("That is not a Socketchat invite link ({e}). Links start with socketchat://"))
             })?;
             let mut c = open_or_create().await?;
             let joined = if new_certificate {
@@ -371,11 +525,11 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
                     report_warnings(&mut c);
                     println!(
                         "You are on {}. Start a group with: socketchat new <name>",
-                        clean_name(&link.host)
+                        server_text(&link.host, link.port)
                     );
                 }
                 JoinStatus::Waiting { for_name } => {
-                    println!("Waiting for {for_name} to let you in.");
+                    println!("Waiting for {} to let you in.", clean_name(&for_name));
                     sync_and_report(&mut c).await?;
                 }
             }
@@ -384,10 +538,47 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             }
             Ok(())
         }
-        Some(Cmd::New { name }) => {
+        Some(Cmd::New { name, server }) => {
             let mut c = open().await?;
-            c.create_group(&name).await?;
-            println!("Made {name}. Invite people with: socketchat invite --group \"{name}\"");
+            let server = match server {
+                Some(n) => Some(server_number(&c, n)?.id),
+                None => c.new_room_server(None),
+            };
+            let g = match server {
+                Some(s) => c.create_group_at(s, &name).await?,
+                None => c.create_group(&name).await?,
+            };
+            let on = c.room_server(g).unwrap_or_default();
+            println!(
+                "Made {name} on {on}. Invite people with: socketchat invite --group \"{name}\""
+            );
+            Ok(())
+        }
+        Some(Cmd::Servers { forget, yes }) => {
+            let mut c = open().await?;
+            c.sync().await?;
+            let list = c.servers(None);
+            match forget {
+                None if list.is_empty() => {
+                    println!("You have no servers yet. Join one with: socketchat join <link>")
+                }
+                None => {
+                    for (i, s) in list.iter().enumerate() {
+                        println!("{}", server_row(i + 1, s));
+                    }
+                }
+                Some(n) => {
+                    let s = server_number(&c, n)?;
+                    if yes || ask_to_forget(&s, n)? {
+                        let rooms = c.forget_server(s.id)?;
+                        println!("{}", forgot_text(&s.text, rooms));
+                    } else {
+                        println!("Kept {}.", s.text);
+                    }
+                }
+            }
+            c.purge_read(None);
+            report_warnings(&mut c);
             Ok(())
         }
         Some(Cmd::Invite { group, dm }) => {
@@ -467,11 +658,12 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             let gid = group_by_name(&c, &group)?;
             let lines = c.lines_to_read(gid, limit);
             for l in &lines {
-                if l.notice {
-                    println!("· {}", l.text);
+                let head = if l.notice {
+                    "· ".to_string()
                 } else {
-                    println!("{}: {}", l.sender, l.text);
-                }
+                    format!("{}: ", clean_name(&l.sender))
+                };
+                println!("{}", message_lines(&head, &l.text));
             }
             if let Some(newest) = lines.last() {
                 c.mark_seen_upto(gid, newest.seq)?;
@@ -485,6 +677,11 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             sync_and_report(&mut c).await
         }
         None => {
+            // A first run right after installing: say how to start.
+            if !profile_dir().join(socketchat_core::store::DB_FILE).exists() {
+                println!("{GETTING_STARTED}");
+                return Ok(());
+            }
             let c = open().await?;
             socketchat_tui::run(c).await?;
             Ok(())
@@ -511,5 +708,23 @@ fn main() -> ExitCode {
             eprintln!("{}", clean_text(&msg));
             ExitCode::from(code)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_lines;
+
+    #[test]
+    fn later_lines_of_a_message_are_indented() {
+        assert_eq!(message_lines("Bo: ", "hi"), "Bo: hi");
+        assert_eq!(
+            message_lines("Bo: ", "ok\nAda: send it\n· Ada left.\n"),
+            "Bo: ok\n    Ada: send it\n    · Ada left.\n    "
+        );
+        assert_eq!(
+            message_lines("[Crew] Bo: ", "a\r\n\u{1b}[2Kb\u{202e}c"),
+            "[Crew] Bo: a\n    [2Kbc"
+        );
     }
 }

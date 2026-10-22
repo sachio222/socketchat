@@ -5,6 +5,8 @@
 //! with a random salt kept beside the file, together with the Argon2id
 //! settings it was made with. Neither is secret.
 //!
+//! On Unix the profile folder is for its owner only (see `perms`).
+//!
 //! One app at a time opens a profile: the store holds an operating-system
 //! lock on a file in the profile folder for as long as it is open.
 
@@ -25,18 +27,32 @@ pub const SALT_FILE: &str = "salt";
 /// Held locked while an app has the profile open.
 pub const LOCK_FILE: &str = "lock";
 
-/// Argon2id settings for new profiles: OWASP's recommended minimum (19 MiB,
-/// 2 passes, 1 lane), so a Raspberry Pi opens a profile in well under a
-/// second. Each profile stores the settings it was made with, so raising
-/// these later never locks anyone out.
-const ARGON_MEM_KIB: u32 = 19 * 1024;
-const ARGON_PASSES: u32 = 2;
-const ARGON_LANES: u32 = 1;
+/// Argon2id settings for new profiles: RFC 9106's second recommended
+/// option (64 MiB, 3 passes, 4 lanes), for machines that cannot spare its
+/// first (2 GiB). An Apple M1 Max derives the key in 0.09 s; a Raspberry
+/// Pi Zero 2 W, with 512 MB and four 1 GHz Cortex-A53 cores, should take
+/// 1.3 to 2 seconds, since this crate fills the lanes one after another. Each
+/// profile stores the settings it was made with, so raising these later
+/// never locks anyone out.
+const ARGON_MEM_KIB: u32 = 64 * 1024;
+const ARGON_PASSES: u32 = 3;
+const ARGON_LANES: u32 = 4;
+
+/// The settings of profiles whose salt file is a bare salt, made before
+/// the settings were stored: OWASP's minimum, 19 MiB, 2 passes, 1 lane.
+/// These never change.
+const FIRST_MEM_KIB: u32 = 19 * 1024;
+const FIRST_PASSES: u32 = 2;
+const FIRST_LANES: u32 = 1;
 
 /// The salt file starts with these bytes when it also holds the Argon2id
-/// settings: `sckdf`, then format version 1.
+/// settings: `sckdf`, then format version 1. New numbers in the same
+/// layout need no new version: 0.4.0 and later read any settings within
+/// the limits below. Only a new layout gets a new version byte.
 const KDF_MAGIC: &[u8; 6] = b"sckdf\x01";
 const SALT_LEN: usize = 16;
+/// The longest salt file: the magic, three settings and the salt.
+const SALT_FILE_MAX: usize = KDF_MAGIC.len() + 12 + SALT_LEN;
 
 /// The most a salt file may ask for: 256 MiB of memory, 16 passes, 8
 /// lanes. Anything above, or less than 8 KiB of memory per lane (Argon2's
@@ -80,14 +96,14 @@ impl Kdf {
     }
 
     /// Reads a salt file. A bare 16-byte salt comes from a profile made
-    /// before the settings were stored, which used today's defaults.
+    /// before the settings were stored, which used the first settings.
     fn decode(b: &[u8]) -> Result<Kdf, CoreError> {
         let bad = || CoreError::Storage("the profile's salt file is damaged".into());
         if b.len() == SALT_LEN {
             return Ok(Kdf {
-                mem_kib: ARGON_MEM_KIB,
-                passes: ARGON_PASSES,
-                lanes: ARGON_LANES,
+                mem_kib: FIRST_MEM_KIB,
+                passes: FIRST_PASSES,
+                lanes: FIRST_LANES,
                 salt: b.try_into().map_err(|_| bad())?,
             });
         }
@@ -228,6 +244,17 @@ CREATE TABLE IF NOT EXISTS close_kept (
     close_id BLOB NOT NULL,
     PRIMARY KEY (group_id, close_id)
 );
+CREATE TABLE IF NOT EXISTS owed_reposts (
+    group_id BLOB PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS held_profiles (
+    group_id BLOB PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS awaited_inviters (
+    group_id BLOB PRIMARY KEY,
+    group_key BLOB NOT NULL,
+    identity BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ended_rooms (
     group_id BLOB PRIMARY KEY,
     name TEXT NOT NULL,
@@ -248,6 +275,9 @@ pub const ROOM_STATE_TABLES: &[&str] = &[
     "expected_joiners",
     "close_votes",
     "close_kept",
+    "awaited_inviters",
+    "owed_reposts",
+    "held_profiles",
     // Server links have no `group_id`, so ending a room leaves them be.
     "invites_made",
 ];
@@ -319,6 +349,8 @@ pub struct Store {
     dir: PathBuf,
     /// Locked for as long as this store is open; dropping it unlocks.
     _lock: std::fs::File,
+    /// What opening changed or could not change, for the person to read.
+    notes: Vec<String>,
     /// The next checkpoint reports a busy log, for tests.
     #[cfg(feature = "test-hooks")]
     busy_next_checkpoint: std::cell::Cell<bool>,
@@ -382,7 +414,15 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("groups", "seen_seq", "INTEGER NOT NULL DEFAULT 0"),
     ("groups", "muted", "INTEGER NOT NULL DEFAULT 0"),
     ("groups", "closing", "BLOB"),
+    ("profile", "theme", "TEXT"),
+    ("profile", "mouse", "INTEGER"),
     ("pending_joins", "key_package_refs", "BLOB"),
+    ("vouchers", "joiner", "BLOB"),
+    ("files", "sender_group_key", "BLOB"),
+    ("files", "added_unix", "INTEGER NOT NULL DEFAULT 0"),
+    // The server an ended room was on, so forgetting that server finds
+    // it. Rooms that ended before this column have none.
+    ("ended_rooms", "server_id", "INTEGER"),
 ];
 
 fn migrate(conn: &Connection) -> Result<(), CoreError> {
@@ -410,7 +450,7 @@ fn migrate(conn: &Connection) -> Result<(), CoreError> {
 
 /// Takes the profile's lock, or says another app has it.
 fn lock(dir: &Path) -> Result<std::fs::File, CoreError> {
-    let f = std::fs::OpenOptions::new()
+    let f = crate::perms::private_options()
         .create(true)
         .truncate(false)
         .write(true)
@@ -436,20 +476,164 @@ fn provider(path: &Path, key: &[u8; 32]) -> Result<Provider, CoreError> {
     Ok(Provider::new(storage))
 }
 
+/// Whether `dir` holds a profile: a database with something in it. A salt
+/// file beside an empty database, or beside none, is a profile whose making
+/// stopped before anything was stored; no passphrase opens it, and making a
+/// profile there starts over.
+pub fn has_profile(dir: &Path) -> bool {
+    #[cfg(feature = "test-hooks")]
+    crate::keep_test_hooks_marker();
+    let size = |name: &str| std::fs::metadata(dir.join(name)).map_or(0, |m| m.len());
+    size(DB_FILE) > 0 || size(&format!("{DB_FILE}-wal")) > 0
+}
+
+/// The name a salt file is written under until it is complete.
+fn salt_new_name() -> String {
+    format!("{SALT_FILE}.new")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The point where this thread's next `Store::create` stops, as if the
+    /// app were killed there: "salt" before the salt file gets its name,
+    /// "key" while deriving the key, "aside" after the first file is moved
+    /// aside.
+    static CRASH_AT: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+}
+
+/// Stops here when a test asked to crash at `at`.
+#[cfg(test)]
+fn crash_point(at: &'static str) -> Result<(), CoreError> {
+    if CRASH_AT.get() == at {
+        CRASH_AT.set("");
+        return Err(CoreError::Other(format!("stopped at {at}")));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn crash_point(_at: &'static str) -> Result<(), CoreError> {
+    Ok(())
+}
+
+/// Before a new profile is made in `dir`, which holds none: moves aside
+/// what a create that stopped part way left, a `salt.new` file or an empty
+/// database beside a salt file in Socketchat's format, and says so. Nothing is deleted. A salt
+/// file without a database may be waiting for it, and a file named `salt`
+/// in another format is someone else's; both are refused and left alone.
+fn set_aside_unfinished(dir: &Path, report: &mut crate::perms::Report) -> Result<(), CoreError> {
+    let there = |name: &str| std::fs::symlink_metadata(dir.join(name)).is_ok();
+    let db = dir.join(DB_FILE);
+    let salt = dir.join(SALT_FILE);
+    let mut names = Vec::new();
+    // A salt file being written goes under this name until it is complete,
+    // so whatever is left here was never a whole salt file.
+    let salt_new = salt_new_name();
+    if there(&salt_new) {
+        names.push(salt_new);
+    }
+    if there(SALT_FILE) {
+        if !there(DB_FILE) {
+            return Err(CoreError::Other(format!(
+                "The profile folder holds a salt file, {}, without its database, {DB_FILE}. Put the database back, or move the salt file aside to make a new profile here.",
+                salt.display()
+            )));
+        }
+        let ours = crate::perms::read_bounded(&salt, SALT_FILE_MAX + 1)
+            .ok()
+            .is_some_and(|b| Kdf::decode(&b).is_ok());
+        if !ours {
+            return Err(CoreError::Other(format!(
+                "The profile folder {} holds a file named {SALT_FILE} that is not a Socketchat salt file, beside an empty {}. Socketchat left both as they are; move them aside to make a new profile here.",
+                dir.display(),
+                db.display()
+            )));
+        }
+        // The salt file first and the database last: stopped part way,
+        // this leaves an empty database with or without our salt file,
+        // which the next create finishes.
+        names.extend([
+            SALT_FILE.to_string(),
+            format!("{DB_FILE}-journal"),
+            format!("{DB_FILE}-wal"),
+            format!("{DB_FILE}-shm"),
+            DB_FILE.to_string(),
+        ]);
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
+    let stamp = crate::now_unix();
+    let mut moved = Vec::new();
+    for name in names {
+        let from = dir.join(&name);
+        if std::fs::symlink_metadata(&from).is_err() {
+            continue;
+        }
+        let mut aside = format!("{name}.unfinished-{stamp}");
+        let mut n = 1;
+        while std::fs::symlink_metadata(dir.join(&aside)).is_ok() {
+            aside = format!("{name}.unfinished-{stamp}-{n}");
+            n += 1;
+        }
+        std::fs::rename(&from, dir.join(&aside))?;
+        moved.push(aside);
+        crash_point("aside")?;
+    }
+    report.note(format!(
+        "Socketchat moved an unfinished profile aside, as {}, and made a new one in its place.",
+        moved.join(", ")
+    ));
+    Ok(())
+}
+
 impl Store {
     /// Makes a new, empty profile store in `dir`.
     pub fn create(dir: &Path, passphrase: &str) -> Result<(Store, Provider), CoreError> {
+        if passphrase.is_empty() {
+            return Err(CoreError::Other("A passphrase cannot be empty.".into()));
+        }
+        Self::create_unchecked(dir, passphrase)
+    }
+
+    /// [`Store::create`] without the empty-passphrase check: how 0.5.0
+    /// made profiles, kept for tests of the profiles it left behind.
+    #[cfg(feature = "test-hooks")]
+    pub fn create_with_any_passphrase(
+        dir: &Path,
+        passphrase: &str,
+    ) -> Result<(Store, Provider), CoreError> {
+        Self::create_unchecked(dir, passphrase)
+    }
+
+    fn create_unchecked(dir: &Path, passphrase: &str) -> Result<(Store, Provider), CoreError> {
         let db = dir.join(DB_FILE);
-        if db.exists() || dir.join(SALT_FILE).exists() {
+        if has_profile(dir) {
             return Err(CoreError::ProfileExists);
         }
-        std::fs::create_dir_all(dir)?;
+        let mut report = crate::perms::Report::default();
+        crate::perms::create_private_dir(dir)?;
+        crate::perms::guard_dir(dir, &mut report)?;
         let lock = lock(dir)?;
-        if db.exists() || dir.join(SALT_FILE).exists() {
+        if has_profile(dir) {
             return Err(CoreError::ProfileExists);
         }
+        set_aside_unfinished(dir, &mut report)?;
+        // The empty database first, then the salt file, then the key: a
+        // create stopped at any point leaves an empty database alone or
+        // beside its salt file, which the next create finishes, and never a
+        // salt file without a database, which means a database is missing.
+        // No passphrase opens an empty database (see `has_profile`).
+        crate::perms::touch_private(&db, &mut report)?;
         let kdf = Kdf::new();
-        std::fs::write(dir.join(SALT_FILE), kdf.encode())?;
+        // Written in full under another name, then renamed: the salt file
+        // is either missing or whole, even after a power cut.
+        let salt_new = dir.join(salt_new_name());
+        crate::perms::write_private(&salt_new, &kdf.encode())?;
+        crash_point("salt")?;
+        std::fs::rename(&salt_new, dir.join(SALT_FILE))?;
+        crate::perms::sync_dir(dir);
+        crash_point("key")?;
         let key = derive_key(passphrase, &kdf)?;
         let conn = open_keyed(&db, &key)?;
         migrate(&conn)?;
@@ -459,6 +643,7 @@ impl Store {
                 conn,
                 dir: dir.to_path_buf(),
                 _lock: lock,
+                notes: report.lines(dir),
                 #[cfg(feature = "test-hooks")]
                 busy_next_checkpoint: std::cell::Cell::new(false),
             },
@@ -470,11 +655,28 @@ impl Store {
     pub fn open(dir: &Path, passphrase: &str) -> Result<(Store, Provider), CoreError> {
         let db = dir.join(DB_FILE);
         let salt_path = dir.join(SALT_FILE);
-        if !db.exists() || !salt_path.exists() {
+        if !has_profile(dir) {
             return Err(CoreError::NoProfile);
         }
+        if std::fs::symlink_metadata(&salt_path).is_err() {
+            return Err(CoreError::Other(format!(
+                "The profile's salt file, {}, is missing. Nothing can open {} without it; if you moved it, put it back.",
+                salt_path.display(),
+                db.display()
+            )));
+        }
+        let mut report = crate::perms::Report::default();
+        crate::perms::guard_dir(dir, &mut report)?;
         let lock = lock(dir)?;
-        let kdf = Kdf::decode(&std::fs::read(salt_path)?)?;
+        crate::perms::narrow_profile_files(dir, &mut report);
+        let salt = crate::perms::read_bounded(&salt_path, SALT_FILE_MAX + 1).map_err(|e| {
+            if crate::perms::is_link(&e) {
+                CoreError::Storage("the profile's salt file is a link to another place".into())
+            } else {
+                e.into()
+            }
+        })?;
+        let kdf = Kdf::decode(&salt)?;
         let key = derive_key(passphrase, &kdf)?;
         let conn = open_keyed(&db, &key)?;
         migrate(&conn)?;
@@ -484,6 +686,7 @@ impl Store {
                 conn,
                 dir: dir.to_path_buf(),
                 _lock: lock,
+                notes: report.lines(dir),
                 #[cfg(feature = "test-hooks")]
                 busy_next_checkpoint: std::cell::Cell::new(false),
             },
@@ -493,6 +696,11 @@ impl Store {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// What opening changed or could not change, for the person to read.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     pub fn conn(&self) -> &Connection {
@@ -515,6 +723,36 @@ impl Store {
                 display_name,
             })),
         }
+    }
+
+    /// The colors this person picked for the chat screen, if they did.
+    pub fn theme(&self) -> Result<Option<String>, CoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT theme FROM profile WHERE id = 1", [], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    pub fn set_theme(&self, theme: &str) -> Result<(), CoreError> {
+        self.conn
+            .execute("UPDATE profile SET theme = ?1 WHERE id = 1", params![theme])?;
+        Ok(())
+    }
+
+    /// Whether the chat screen takes mouse clicks, if this person said.
+    pub fn mouse(&self) -> Result<Option<bool>, CoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT mouse FROM profile WHERE id = 1", [], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    pub fn set_mouse(&self, on: bool) -> Result<(), CoreError> {
+        self.conn
+            .execute("UPDATE profile SET mouse = ?1 WHERE id = 1", params![on])?;
+        Ok(())
     }
 
     pub fn set_profile(&self, p: &Profile) -> Result<(), CoreError> {
@@ -1288,13 +1526,23 @@ impl Store {
         }))
     }
 
-    pub fn add_file(&self, g: &GroupId, offer: &crate::files::FileOffer) -> Result<(), CoreError> {
+    /// Keeps a file offer with the key of the member who sent it.
+    pub fn add_file(
+        &self,
+        g: &GroupId,
+        offer: &crate::files::FileOffer,
+        sender: Option<&Key>,
+        added_unix: u64,
+    ) -> Result<(), CoreError> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO files (id, group_id, offer) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO files (id, group_id, offer, sender_group_key, added_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 offer.id.0.as_slice(),
                 g.0.as_slice(),
-                postcard::to_stdvec(offer)?
+                postcard::to_stdvec(offer)?,
+                sender.map(|k| k.0.to_vec()),
+                added_unix as i64
             ],
         )?;
         Ok(())
@@ -1302,13 +1550,35 @@ impl Store {
 
     /// Files offered in a group, oldest first.
     pub fn files(&self, g: &GroupId) -> Result<Vec<crate::files::FileOffer>, CoreError> {
-        let mut st = self
-            .conn
-            .prepare("SELECT offer FROM files WHERE group_id = ?1 ORDER BY rowid")?;
-        let rows = st.query_map([g.0.as_slice()], |r| r.get::<_, Vec<u8>>(0))?;
+        Ok(self
+            .files_with_senders(g)?
+            .into_iter()
+            .map(|(offer, _, _)| offer)
+            .collect())
+    }
+
+    /// Files offered in a group, oldest first, each with its sender's key
+    /// (none for files kept before senders were) and when it arrived.
+    #[allow(clippy::type_complexity)]
+    pub fn files_with_senders(
+        &self,
+        g: &GroupId,
+    ) -> Result<Vec<(crate::files::FileOffer, Option<Key>, u64)>, CoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT offer, sender_group_key, added_unix FROM files
+             WHERE group_id = ?1 ORDER BY rowid",
+        )?;
+        let rows = st.query_map([g.0.as_slice()], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                key_col(r.get(1)?),
+                r.get::<_, i64>(2)? as u64,
+            ))
+        })?;
         let mut out = vec![];
-        for b in rows {
-            out.push(postcard::from_bytes(&b?)?);
+        for row in rows {
+            let (b, sender, at) = row?;
+            out.push((postcard::from_bytes(&b)?, sender, at));
         }
         Ok(out)
     }
@@ -1436,8 +1706,8 @@ impl Store {
     /// profile opens.
     pub fn begin_end(&self, g: &GroupId, why: i64, ended_unix: u64) -> Result<(), CoreError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO ended_rooms (group_id, name, is_dm, why, ended_unix, seen_seq)
-             SELECT id, name, is_dm, ?2, ?3, seen_seq FROM groups WHERE id = ?1",
+            "INSERT OR REPLACE INTO ended_rooms (group_id, name, is_dm, why, ended_unix, seen_seq, server_id)
+             SELECT id, name, is_dm, ?2, ?3, seen_seq, server_id FROM groups WHERE id = ?1",
             params![g.0.as_slice(), why, ended_unix as i64],
         )?;
         Ok(())
@@ -1533,6 +1803,54 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Deletes a server and everything this profile keeps for it, in one
+    /// transaction: each of its rooms as [`Store::delete_room`] deletes
+    /// one (keys, group state, history, files list, proofs, closing state),
+    /// rooms there that ended and wait to be read, with their history, the
+    /// joins waiting there, the links made there, and the server's row with
+    /// its pinned certificate and account key. Returns the rooms deleted.
+    /// Nothing on any other server changes. An ended room recorded without
+    /// its server stays until it is read or expires.
+    pub fn forget_server(&self, server_id: i64) -> Result<Vec<GroupId>, CoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let rooms: Vec<GroupId> = {
+            let mut st = tx.prepare(
+                "SELECT id FROM groups WHERE server_id = ?1
+                 UNION SELECT group_id FROM ended_rooms WHERE server_id = ?1",
+            )?;
+            let rows = st.query_map([server_id], |r| r.get::<_, Vec<u8>>(0))?;
+            let mut out = Vec::new();
+            for id in rows {
+                if let Ok(id) = <[u8; 16]>::try_from(id?) {
+                    out.push(GroupId(id));
+                }
+            }
+            out
+        };
+        for g in &rooms {
+            delete_state(&tx, g, &openmls_key(g)?)?;
+            for table in ROOM_HISTORY_TABLES {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE group_id = ?1"),
+                    [g.0.as_slice()],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM ended_rooms WHERE group_id = ?1",
+                [g.0.as_slice()],
+            )?;
+        }
+        for table in ["pending_joins", "invites_made"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE server_id = ?1"),
+                [server_id],
+            )?;
+        }
+        tx.execute("DELETE FROM servers WHERE id = ?1", [server_id])?;
+        tx.commit()?;
+        Ok(rooms)
     }
 
     /// Deletes a live room's history on this computer in one transaction,
@@ -1735,6 +2053,171 @@ impl Store {
         }))
     }
 
+    /// Records the key that joined with a link this client made. The first
+    /// key recorded for `token` stays.
+    pub fn set_voucher_joiner(
+        &self,
+        g: &GroupId,
+        token: &Token,
+        key: &Key,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE vouchers SET joiner = ?3
+             WHERE group_id = ?1 AND token = ?2 AND mine = 1 AND joiner IS NULL",
+            params![g.0.as_slice(), token.0.as_slice(), key.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// The key that joined with a link this client made, once an add for
+    /// it was seen.
+    pub fn voucher_joiner(&self, g: &GroupId, token: &Token) -> Result<Option<Key>, CoreError> {
+        let k: Option<Option<Vec<u8>>> = self
+            .conn
+            .query_row(
+                "SELECT joiner FROM vouchers WHERE group_id = ?1 AND token = ?2 AND mine = 1",
+                params![g.0.as_slice(), token.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(key_col(k.flatten()))
+    }
+
+    /// Links this client made in a group that nobody has joined with yet.
+    pub fn unjoined_vouchers(&self, g: &GroupId) -> Result<Vec<Token>, CoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT token FROM vouchers
+             WHERE group_id = ?1 AND mine = 1 AND secret IS NOT NULL AND joiner IS NULL",
+        )?;
+        let rows = st.query_map([g.0.as_slice()], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for t in rows {
+            if let Ok(t) = t?.try_into() {
+                out.push(Token(t));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Forgets the secret of a link this client made once its joiner has
+    /// proved they hold it, so no later proof for it counts.
+    pub fn drop_voucher_secret(&self, g: &GroupId, token: &Token) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE vouchers SET secret = NULL WHERE group_id = ?1 AND token = ?2",
+            params![g.0.as_slice(), token.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Remembers that this member owes a room its profile, after someone
+    /// joined, until it is posted.
+    pub fn owe_repost(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO owed_reposts (group_id) VALUES (?1)",
+            [g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Marks a room's owed profile as posted.
+    pub fn paid_repost(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM owed_reposts WHERE group_id = ?1",
+            [g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Rooms this member owes its profile.
+    pub fn owed_reposts(&self) -> Result<Vec<GroupId>, CoreError> {
+        let mut st = self.conn.prepare("SELECT group_id FROM owed_reposts")?;
+        let rows = st.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for g in rows {
+            if let Ok(g) = g?.try_into() {
+                out.push(GroupId(g));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Keeps this member's profile and app version out of a room until its
+    /// join is confirmed or the person marks someone there verified.
+    pub fn hold_profile(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO held_profiles (group_id) VALUES (?1)",
+            [g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Lets this member's profile go out in a room.
+    pub fn release_profile(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM held_profiles WHERE group_id = ?1",
+            [g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether this member's profile is kept out of a room.
+    pub fn profile_held(&self, g: &GroupId) -> Result<bool, CoreError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM held_profiles WHERE group_id = ?1)",
+            [g.0.as_slice()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Remembers whose confirmation a join waits for: the inviter's key in
+    /// the group and the identity that signed the invite.
+    pub fn await_inviter(&self, g: &GroupId, key: &Key, identity: &Key) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO awaited_inviters (group_id, group_key, identity)
+             VALUES (?1, ?2, ?3)",
+            params![g.0.as_slice(), key.0.as_slice(), identity.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// The inviter's key in the group and their identity, while the join
+    /// waits for them to confirm it.
+    pub fn awaited_inviter(&self, g: &GroupId) -> Result<Option<(Key, Key)>, CoreError> {
+        let row: Option<(Vec<u8>, Vec<u8>)> = self
+            .conn
+            .query_row(
+                "SELECT group_key, identity FROM awaited_inviters WHERE group_id = ?1",
+                [g.0.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.and_then(|(k, i)| Some((key_col(Some(k))?, key_col(Some(i))?))))
+    }
+
+    /// Stops waiting for an inviter's confirmation in a group.
+    pub fn clear_awaited_inviter(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM awaited_inviters WHERE group_id = ?1",
+            [g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// A name this person goes by in any room: the one set on this device,
+    /// else the one they gave.
+    pub fn name_of_identity(&self, identity: &Key) -> Result<Option<String>, CoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT COALESCE(NULLIF(local_name, ''), display_name) FROM members
+                 WHERE identity = ?1 AND (COALESCE(local_name, '') != '' OR display_name != '')
+                 LIMIT 1",
+                [identity.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// True once, the first time the expected joiner introduces themselves.
     pub fn take_expected_joiner(&self, g: &GroupId, key: &Key) -> Result<bool, CoreError> {
         let n = self.conn.execute(
@@ -1886,12 +2369,28 @@ mod tests {
         ));
     }
 
+    /// Profiles made by 0.4.0 and 0.5.0 store 19 MiB, 2 passes and 1 lane,
+    /// and keep opening after new profiles get stronger settings.
     #[test]
-    fn profile_with_bare_salt_opens_with_todays_params() {
+    fn profile_from_0_5_0_settings_opens() {
+        let d = tempfile::tempdir().unwrap();
+        profile_with_params(d.path(), "pass phrase", 19 * 1024, 2, 1);
+        assert!(Store::open(d.path(), "pass phrase").is_ok());
+        assert!(matches!(
+            Store::open(d.path(), "wrong"),
+            Err(CoreError::WrongPassphrase)
+        ));
+    }
+
+    /// A bare 16-byte salt comes from a profile made before the settings
+    /// were stored. Those profiles used 19 MiB, 2 passes and 1 lane, and
+    /// still open with exactly those, whatever new profiles get.
+    #[test]
+    fn profile_with_bare_salt_opens_with_the_first_settings() {
         let d = tempfile::tempdir().unwrap();
         let salt = [5u8; 16];
         std::fs::write(d.path().join(SALT_FILE), salt).unwrap();
-        let params = Params::new(ARGON_MEM_KIB, ARGON_PASSES, 1, Some(32)).unwrap();
+        let params = Params::new(19 * 1024, 2, 1, Some(32)).unwrap();
         let mut key = [0u8; 32];
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password_into(b"k", &salt, &mut key)
@@ -1927,6 +2426,11 @@ mod tests {
             (63, 2, 8),
             (19 * 1024, 0, 1),
             (19 * 1024, 2, 0),
+            // 64 GiB of memory, and a million passes.
+            (64 * 1024 * 1024, 2, 1),
+            (u32::MAX, 2, 1),
+            (19 * 1024, 1_000_000, 1),
+            (19 * 1024, 2, u32::MAX),
         ] {
             let err = Kdf::decode(&file(m, t, p)).unwrap_err();
             assert_eq!(
@@ -1937,16 +2441,262 @@ mod tests {
         }
     }
 
+    /// A salt file that is cut short, too long, empty or of an unknown
+    /// format version is damaged, never read with guessed settings.
+    #[test]
+    fn salt_file_cut_or_of_unknown_format_is_damaged() {
+        let mut good = KDF_MAGIC.to_vec();
+        for v in [19 * 1024u32, 2, 1] {
+            good.extend_from_slice(&v.to_be_bytes());
+        }
+        good.extend_from_slice(&[1; SALT_LEN]);
+        assert!(Kdf::decode(&good).is_ok());
+        let mut v2 = good.clone();
+        v2[5] = 2;
+        let mut long = good.clone();
+        long.push(0);
+        let mut other_magic = good.clone();
+        other_magic[0] = b'S';
+        for bad in [
+            Vec::new(),
+            vec![1; SALT_LEN - 1],
+            vec![1; SALT_LEN + 1],
+            good[..good.len() - 1].to_vec(),
+            KDF_MAGIC.to_vec(),
+            long,
+            v2,
+            other_magic,
+        ] {
+            let err = Kdf::decode(&bad).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "local storage: the profile's salt file is damaged",
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// New profiles get RFC 9106's second recommended Argon2id settings:
+    /// 64 MiB, 3 passes, 4 lanes. The salt file records them in format 1,
+    /// which 0.4.0 and 0.5.0 also read.
     #[test]
     fn new_profile_stores_its_kdf_params() {
         let d = tempfile::tempdir().unwrap();
         drop(Store::create(d.path(), "k").unwrap());
         let file = std::fs::read(d.path().join(SALT_FILE)).unwrap();
         assert!(file.starts_with(b"sckdf\x01"), "{file:?}");
-        assert_eq!(&file[6..10], &ARGON_MEM_KIB.to_be_bytes());
-        assert_eq!(&file[10..14], &ARGON_PASSES.to_be_bytes());
-        assert_eq!(&file[14..18], &1u32.to_be_bytes());
+        assert_eq!(&file[6..10], &(64u32 * 1024).to_be_bytes());
+        assert_eq!(&file[10..14], &3u32.to_be_bytes());
+        assert_eq!(&file[14..18], &4u32.to_be_bytes());
         assert_eq!(file.len(), 34);
+        // Within what any reader accepts, so 0.5.0 opens it too.
+        let kdf = Kdf::decode(&file).unwrap();
+        assert_eq!((kdf.mem_kib, kdf.passes, kdf.lanes), (64 * 1024, 3, 4));
+        let key = derive_key("k", &kdf).unwrap();
+        assert!(open_keyed(&d.path().join(DB_FILE), &key).is_ok());
+    }
+
+    /// A profile an earlier release made with an empty passphrase still
+    /// opens with it.
+    #[test]
+    fn profile_with_an_empty_passphrase_still_opens() {
+        let d = tempfile::tempdir().unwrap();
+        profile_with_params(d.path(), "", 19 * 1024, 2, 1);
+        assert!(Store::open(d.path(), "").is_ok());
+        assert!(matches!(
+            Store::open(d.path(), "x"),
+            Err(CoreError::WrongPassphrase)
+        ));
+    }
+
+    /// A salt file in Socketchat's format, with settings cheap to test.
+    fn valid_salt_file() -> Vec<u8> {
+        let mut salt = KDF_MAGIC.to_vec();
+        for v in [8 * 1024u32, 1, 1] {
+            salt.extend_from_slice(&v.to_be_bytes());
+        }
+        salt.extend_from_slice(&[3; SALT_LEN]);
+        salt
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// An empty database beside a salt file is what a create that stopped
+    /// part way leaves. No passphrase opens it. Making a profile there
+    /// moves both aside, never deletes them, says so, and starts over.
+    #[test]
+    fn an_unfinished_profile_is_moved_aside_and_made_again() {
+        let d = tempfile::tempdir().unwrap();
+        let salt = valid_salt_file();
+        std::fs::write(d.path().join(SALT_FILE), &salt).unwrap();
+        std::fs::write(d.path().join(DB_FILE), b"").unwrap();
+        for pass in ["anything", "k", ""] {
+            assert!(
+                matches!(Store::open(d.path(), pass), Err(CoreError::NoProfile)),
+                "pass={pass:?}"
+            );
+        }
+        assert_eq!(std::fs::metadata(d.path().join(DB_FILE)).unwrap().len(), 0);
+        assert!(!has_profile(d.path()));
+
+        let (s, _p) = Store::create(d.path(), "k").unwrap();
+        let moved: Vec<String> = names_in(d.path())
+            .into_iter()
+            .filter(|n| n.contains(".unfinished-"))
+            .collect();
+        assert_eq!(moved.len(), 2, "{:?}", names_in(d.path()));
+        let salt_aside = moved.iter().find(|n| n.starts_with("salt.")).unwrap();
+        assert_eq!(std::fs::read(d.path().join(salt_aside)).unwrap(), salt);
+        assert!(moved.iter().any(|n| n.starts_with("socketchat.db.")));
+        assert!(
+            s.notes()
+                .iter()
+                .any(|l| l.contains("moved") && l.contains(salt_aside.as_str())),
+            "{:?}",
+            s.notes()
+        );
+        drop(s);
+        assert!(has_profile(d.path()));
+        assert!(Store::open(d.path(), "k").is_ok());
+        assert!(matches!(
+            Store::open(d.path(), "anything"),
+            Err(CoreError::WrongPassphrase)
+        ));
+    }
+
+    /// A create stopped while it derives the key, or while it moves an
+    /// unfinished profile aside, leaves a folder the next create finishes.
+    #[test]
+    fn a_create_stopped_at_any_point_is_finished_by_the_next() {
+        for at in ["salt", "key", "aside"] {
+            let d = tempfile::tempdir().unwrap();
+            if at == "aside" {
+                std::fs::write(d.path().join(SALT_FILE), valid_salt_file()).unwrap();
+                std::fs::write(d.path().join(DB_FILE), b"").unwrap();
+            }
+            CRASH_AT.set(at);
+            let stopped = Store::create(d.path(), "k").err().expect("stopped");
+            assert_eq!(stopped.to_string(), format!("stopped at {at}"));
+            assert!(!has_profile(d.path()), "{at}");
+            if at == "salt" {
+                // Written in full under another name, never half under
+                // its own.
+                assert!(
+                    !d.path().join(SALT_FILE).exists(),
+                    "{:?}",
+                    names_in(d.path())
+                );
+                let new = std::fs::read(d.path().join(format!("{SALT_FILE}.new"))).unwrap();
+                assert!(Kdf::decode(&new).is_ok());
+            }
+            let (s, _p) = Store::create(d.path(), "k")
+                .unwrap_or_else(|e| panic!("{at}: {e} in {:?}", names_in(d.path())));
+            drop(s);
+            assert!(Store::open(d.path(), "k").is_ok(), "{at}");
+        }
+    }
+
+    /// A salt file with no database may wait for its database (a restore,
+    /// a sync, a database moved aside). Making a profile there is refused,
+    /// names the salt file and leaves it as it is.
+    #[test]
+    fn a_salt_file_without_its_database_is_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let salt = valid_salt_file();
+        std::fs::write(d.path().join(SALT_FILE), &salt).unwrap();
+        assert!(matches!(
+            Store::open(d.path(), "k"),
+            Err(CoreError::NoProfile)
+        ));
+        let err = Store::create(d.path(), "k").err().expect("refused");
+        let said = err.to_string();
+        assert!(said.contains("without its database"), "{said}");
+        assert!(
+            said.contains(&d.path().join(SALT_FILE).display().to_string()),
+            "{said}"
+        );
+        assert_eq!(std::fs::read(d.path().join(SALT_FILE)).unwrap(), salt);
+        assert!(!d.path().join(DB_FILE).exists());
+    }
+
+    /// A file named `salt` that is not Socketchat's, beside an empty
+    /// database, belongs to someone else: both stay as they are.
+    #[test]
+    fn a_file_named_salt_that_is_not_ours_is_left_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let other = b"not a socketchat salt file\n".to_vec();
+        std::fs::write(d.path().join(SALT_FILE), &other).unwrap();
+        std::fs::write(d.path().join(DB_FILE), b"").unwrap();
+        let err = Store::create(d.path(), "k").err().expect("refused");
+        assert!(err.to_string().contains("salt"), "{err}");
+        assert_eq!(std::fs::read(d.path().join(SALT_FILE)).unwrap(), other);
+        assert_eq!(std::fs::metadata(d.path().join(DB_FILE)).unwrap().len(), 0);
+        assert_eq!(names_in(d.path()), vec!["lock", "salt", "socketchat.db"]);
+    }
+
+    /// A database whose salt file is gone says so, since nothing opens it
+    /// without the salt.
+    #[test]
+    fn a_database_without_its_salt_file_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        drop(Store::create(d.path(), "k").unwrap());
+        std::fs::rename(d.path().join(SALT_FILE), d.path().join("kept")).unwrap();
+        let err = Store::open(d.path(), "k").err().expect("refused");
+        let said = err.to_string();
+        assert!(said.contains("salt file"), "{said}");
+        assert!(said.contains("missing"), "{said}");
+        assert!(!said.contains("socketchat join"), "{said}");
+    }
+
+    /// The salt file is read only as a real file, and only as far as the
+    /// longest salt file can go.
+    #[cfg(unix)]
+    #[test]
+    fn salt_file_is_never_read_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("p");
+        drop(Store::create(&dir, "k").unwrap());
+        let moved = d.path().join("salt-elsewhere");
+        std::fs::rename(dir.join(SALT_FILE), &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, dir.join(SALT_FILE)).unwrap();
+        let err = Store::open(&dir, "k").err().expect("refused");
+        assert_eq!(
+            err.to_string(),
+            "local storage: the profile's salt file is a link to another place"
+        );
+    }
+
+    #[test]
+    fn a_long_salt_file_is_damaged() {
+        let d = tempfile::tempdir().unwrap();
+        drop(Store::create(d.path(), "k").unwrap());
+        let mut file = std::fs::read(d.path().join(SALT_FILE)).unwrap();
+        file.resize(1 << 20, 0);
+        std::fs::write(d.path().join(SALT_FILE), file).unwrap();
+        let err = Store::open(d.path(), "k").err().expect("refused");
+        assert_eq!(
+            err.to_string(),
+            "local storage: the profile's salt file is damaged"
+        );
+    }
+
+    /// An empty passphrase never makes a profile, whatever front end
+    /// passes it.
+    #[test]
+    fn create_refuses_an_empty_passphrase() {
+        let d = tempfile::tempdir().unwrap();
+        let err = Store::create(d.path(), "").err().expect("refused");
+        assert_eq!(err.to_string(), "A passphrase cannot be empty.");
+        assert!(!d.path().join(DB_FILE).exists());
+        assert!(!d.path().join(SALT_FILE).exists());
     }
 
     #[test]

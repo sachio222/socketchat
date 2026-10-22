@@ -103,6 +103,18 @@ async fn mute_is_local_and_persists() {
 }
 
 #[tokio::test]
+async fn theme_choice_is_local_and_persists() {
+    let s = TestServer::start().await;
+    let (_g, a, b) = pair(&s).await;
+    assert_eq!(b.theme().unwrap(), None);
+    b.set_theme("classic").unwrap();
+    assert_eq!(b.theme().unwrap().as_deref(), Some("classic"));
+    assert_eq!(a.theme().unwrap(), None);
+    let b = b.reopen().await;
+    assert_eq!(b.theme().unwrap().as_deref(), Some("classic"));
+}
+
+#[tokio::test]
 async fn admin_renames_room_for_everyone() {
     let s = TestServer::start().await;
     let (g, mut a, mut b, mut c) = trio(&s).await;
@@ -1471,8 +1483,8 @@ async fn invites_on_protocol_1_server_warn() {
     assert!(a.invites().await.unwrap().is_empty());
     let ev = drain(&mut a).await;
     let want = format!(
-        "{} runs an older version of socketchat, so its invite links can't be listed here.",
-        s.addr().ip()
+        "{} runs an older version of Socketchat, so its invite links can't be listed here.",
+        s.addr()
     );
     let got: Vec<_> = warnings(&ev);
     assert_eq!(got.len(), 1, "{ev:?}");
@@ -1514,8 +1526,9 @@ async fn unreachable_server_does_not_blank_the_list() {
     let s2 = TestServer::start().await;
     let mut a = TestClient::new(&s1, "Ada").await;
     a.join(&s2.server_invite()).await.unwrap();
+    // Server links go on the newest server; the older one stops.
     let (link, _) = a.invite(None, false).await.unwrap();
-    s2.handle.shutdown();
+    s1.handle.shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     drain(&mut a).await;
     let rows = a.test_invite_rows();

@@ -1,0 +1,21 @@
+name: Cargo commands written in other ways
+permissions:
+  contents: read
+
+on:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: "cargo build --release"
+      - run: 'cargo test --workspace'
+      - run: cargo build --locked && cargo test
+      - run: cargo build && cargo test --locked
+      - run: cargo fetch --locked; cargo test --locked || cargo test --locked --release
+      - run: "cargo clippy --locked -- -D warnings"
+      - run: 'cargo metadata --locked --format-version 1'
+      - run: |
+          cargo doc --no-deps
+          cargo fmt --all --check

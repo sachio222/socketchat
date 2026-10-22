@@ -3,6 +3,7 @@
 pub mod app;
 pub mod commands;
 mod run;
+pub mod theme;
 pub mod ui;
 
 pub use run::run;

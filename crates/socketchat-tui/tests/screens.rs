@@ -7,9 +7,11 @@ use socketchat_core::close::CloseView;
 use socketchat_core::keys::Key;
 use socketchat_proto::msg::GroupId;
 use socketchat_tui::app::{
-    details_lines, invite_row, leave_step, sent_file_status, Action, App, Focus, LeaveStep, Modal,
+    about_lines, details_lines, invite_row, leave_step, sent_file_status, Action, App, Focus,
+    LeaveStep, Modal,
 };
 use socketchat_tui::commands::{parse_command, Command, HELP};
+use socketchat_tui::theme::{ColorSupport, Theme};
 use socketchat_tui::ui::{draw, GroupView, LineView, MemberLine, ViewModel};
 
 fn render(app: &App, vm: &ViewModel, w: u16, h: u16) -> String {
@@ -64,6 +66,7 @@ fn crew() -> ViewModel {
             MemberLine { key: k(3), name: "Cy".into(), verified: false, admin: false, me: false },
         ],
         connected: true,
+        server: None,
     }
 }
 
@@ -119,6 +122,7 @@ fn parse_every_command() {
         ("/unmute", Command::Unmute),
         ("/details", Command::Details),
         ("/clear", Command::Clear),
+        ("/about", Command::About),
         ("/help", Command::Help),
         ("/quit", Command::Quit),
     ];
@@ -152,6 +156,7 @@ fn screen_empty_first_run() {
         lines: vec![],
         members: vec![],
         connected: true,
+        server: None,
     };
     insta::assert_snapshot!(render(&App::new(), &vm, 80, 24));
 }
@@ -199,6 +204,7 @@ fn screen_invite_modal_with_qr() {
     app.modal = Some(Modal::Invite {
         link: link.into(),
         hours: 2,
+        copied: true,
     });
     let small = render(&app, &crew(), 80, 24);
     assert!(small.contains("expires in 2 hours."), "{small}");
@@ -207,12 +213,15 @@ fn screen_invite_modal_with_qr() {
     app.modal = Some(Modal::Invite {
         link: link.into(),
         hours: 1,
+        copied: true,
     });
     let one = render(&app, &crew(), 100, 50);
     assert!(one.contains("expires in 1 hour."), "{one}");
     assert_eq!(
         app.handle_key(key(KeyCode::Char('c')), &crew()),
-        vec![Action::Copy(link.into())]
+        vec![Action::Copy(format!(
+            "Join me on Socketchat, an encrypted chat.\n1. Install it from https://socketchat.org\n2. Then run: socketchat join \"{link}\""
+        ))]
     );
     assert!(app.modal.is_some(), "copying keeps the link on screen");
 }
@@ -227,6 +236,7 @@ fn invite_qr_is_true_black_on_white() {
     app.modal = Some(Modal::Invite {
         link: link.into(),
         hours: 24,
+        copied: true,
     });
     let mut t = Terminal::new(TestBackend::new(100, 50)).unwrap();
     t.draw(|f| draw(f, &app, &crew())).unwrap();
@@ -389,6 +399,8 @@ fn find_in_row(buf: &ratatui::buffer::Buffer, y: u16, needle: &str) -> Option<u1
 #[test]
 fn message_box_is_framed_and_names_the_group() {
     let mut app = App::new();
+    // These check the classic colors.
+    app.theme = Theme::classic(ColorSupport::Indexed256);
     app.selected = Some(g(1));
     let buf = buffer(&app, &crew(), 80, 24);
     let s = render(&app, &crew(), 80, 24);
@@ -396,7 +408,7 @@ fn message_box_is_framed_and_names_the_group() {
     // Three rows of box across the full width, then the help line.
     assert!(rows[20].starts_with('┌') && rows[20].ends_with('┐'), "{s}");
     assert!(rows[22].starts_with('└') && rows[22].ends_with('┘'), "{s}");
-    assert!(rows[21].contains("What's on your mind, Book club?"), "{s}");
+    assert!(rows[21].contains("What's on your mind? #Book club"), "{s}");
     assert!(rows[21].contains("/ for commands"), "{s}");
     // The box has focus by default, so its border uses the focused style.
     let corner = &buf[(0, 20)];
@@ -437,6 +449,8 @@ fn empty_message_box_cursor_leaves_the_hint_readable() {
 #[test]
 fn message_box_says_hi_in_a_direct_chat() {
     let mut app = App::new();
+    // These check the classic colors.
+    app.theme = Theme::classic(ColorSupport::Indexed256);
     app.selected = Some(g(2));
     let buf = buffer(&app, &crew(), 80, 24);
     let s = render(&app, &crew(), 80, 24);
@@ -481,14 +495,19 @@ fn message_box_shows_typing_with_the_cursor_after_it() {
 #[test]
 fn status_shows_on_the_help_line_until_the_next_key() {
     let mut app = App::new();
+    // These check the classic colors.
+    app.theme = Theme::classic(ColorSupport::Indexed256);
     app.selected = Some(g(1));
     app.status = Some("Saved to ~/Downloads/books.pdf".into());
     let buf = buffer(&app, &crew(), 80, 24);
     let s = render(&app, &crew(), 80, 24);
     let rows: Vec<&str> = s.lines().collect();
-    assert_eq!(rows[23], "Saved to ~/Downloads/books.pdf", "{s}");
+    assert!(
+        rows[23].starts_with("Saved to ~/Downloads/books.pdf"),
+        "{s}"
+    );
     assert_eq!(buf[(0, 23)].fg, Color::Yellow);
-    assert!(rows[21].contains("What's on your mind, Book club?"), "{s}");
+    assert!(rows[21].contains("What's on your mind? #Book club"), "{s}");
     insta::assert_snapshot!("message_box_status_on_help_line", s);
     app.handle_key(key(KeyCode::Char('o')), &crew());
     assert_eq!(app.status, None);
@@ -582,16 +601,18 @@ fn tab_cycles_prefix_matches_in_list_order() {
     let mut app = App::new();
     type_text(&mut app, &vm, "/switch bo");
     let mut seen = vec![];
-    for _ in 0..4 {
+    for _ in 0..5 {
         app.handle_key(key(KeyCode::Tab), &vm);
         seen.push(app.input.clone());
     }
+    // The room named exactly what was typed comes first, as Enter opens it.
     assert_eq!(
         seen,
         vec![
-            "/switch Book club",
             "/switch Bo",
+            "/switch Book club",
             "/switch Books 2",
+            "/switch Bo",
             "/switch Book club"
         ]
     );
@@ -607,6 +628,66 @@ fn tab_cycles_prefix_matches_in_list_order() {
     app.completion = None;
     app.handle_key(key(KeyCode::Tab), &vm);
     assert_eq!(app.input, "/switch Hobo");
+}
+
+/// The grey suggestion after `/switch` names the room Enter opens: the
+/// room whose name is the text comes before longer names that start
+/// with it.
+#[test]
+fn switch_ghost_names_the_room_enter_opens() {
+    let mut vm = crew();
+    vm.groups = vec![room(1, "Book club"), room(2, "Bo")];
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/switch bo");
+    assert_eq!(app.ghost(&vm), None, "Enter opens Bo, so nothing to add");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Select(g(2))]
+    );
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/switch boo");
+    assert_eq!(app.ghost(&vm).as_deref(), Some("k club"));
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Select(g(1))]
+    );
+}
+
+/// A room name kept with a wide space or two spaces in a row, as an
+/// earlier release kept it, opens with the name typed with one space, and
+/// Tab writes it with one space so the command runs.
+#[test]
+fn switch_finds_a_room_whose_name_has_odd_spacing() {
+    let mut vm = crew();
+    vm.groups = vec![
+        room(1, "Chess"),
+        room(2, "Book\u{3000}club"),
+        room(3, "Bird  watch"),
+    ];
+    for (typed, want) in [("book club", g(2)), ("bird watch", g(3))] {
+        let mut app = App::new();
+        type_text(&mut app, &vm, &format!("/switch {typed}"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter), &vm),
+            vec![Action::Select(want)],
+            "{typed}: {:?}",
+            app.status
+        );
+    }
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/switch boo");
+    app.handle_key(key(KeyCode::Tab), &vm);
+    assert_eq!(app.input, "/switch Book club");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Select(g(2))],
+        "{:?}",
+        app.status
+    );
+    let mut app = App::new();
+    app.switcher = Some("bird w".into());
+    assert_eq!(app.switcher_pick(&vm), Some(g(3)));
+    assert_eq!(app.switcher_matches(&vm).len(), 1);
 }
 
 #[test]
@@ -672,7 +753,6 @@ fn tab_completes_in_ctrl_k_switcher() {
     app.handle_key(key(KeyCode::Esc), &vm);
     app.handle_key(ctrl('k'), &vm);
     type_text(&mut app, &vm, "bo");
-    app.handle_key(key(KeyCode::Tab), &vm);
     app.handle_key(key(KeyCode::Tab), &vm);
     assert_eq!(app.switcher.as_deref(), Some("Bo"));
     // Enter opens the room Tab picked, not the first that contains it.
@@ -746,10 +826,11 @@ fn screen_invites_modal() {
         s.contains("2. Climbing Saturdays: expires in 23 hours"),
         "{s}"
     );
-    assert_eq!(
-        s.lines().nth(23).unwrap(),
-        "/cancel <number> stops a link · Esc close"
-    );
+    assert!(s
+        .lines()
+        .nth(23)
+        .unwrap()
+        .starts_with("/cancel <number> stops a link · Esc close"));
     insta::assert_snapshot!(s);
     app.modal = Some(Modal::Invites {
         rows: vec!["You have no open invite links.".into()],
@@ -767,6 +848,7 @@ fn screen_invites_modal() {
 fn details() -> RoomDetails {
     RoomDetails {
         name: "Book club".into(),
+        server: "chat.socketchat.org".into(),
         admins: vec!["Ada".into(), "Bo".into()],
         size: 3,
         // 2026-03-02 and 2026-10-19, at noon UTC.
@@ -800,6 +882,7 @@ fn details_lines_say_each_fact() {
         details_lines(&d, "Book club", true, &utc_date),
         vec![
             "Name: Book club",
+            "Server: chat.socketchat.org",
             "Admins: Ada, Bo",
             "Members: 3",
             "Created: 2026-03-02",
@@ -829,6 +912,7 @@ fn screen_details_modal() {
     app.selected = Some(g(1));
     app.modal = Some(Modal::Details {
         lines: details_lines(&details(), "Book club", true, &utc_date),
+        offset: 0,
     });
     let s = render(&app, &crew(), 80, 24);
     assert!(s.contains(" Room details "), "{s}");
@@ -904,6 +988,8 @@ fn screen_muted_and_ended_rooms_in_list() {
         ..room(6, "Art")
     });
     let mut app = App::new();
+    // These check the classic colors.
+    app.theme = Theme::classic(ColorSupport::Indexed256);
     app.selected = Some(g(3));
     let buf = buffer(&app, &vm, 80, 24);
     let s = render(&app, &vm, 80, 24);
@@ -943,7 +1029,14 @@ fn help_scrolls_to_every_command_at_80x24() {
         modal_text(&first).last().unwrap().contains("↓ more"),
         "{first}"
     );
-    assert_eq!(first.lines().nth(23).unwrap(), "Up/Down scroll · Esc close");
+    assert!(
+        first
+            .lines()
+            .nth(23)
+            .unwrap()
+            .starts_with("Up/Down scroll · Esc close"),
+        "{first}"
+    );
     let mut presses = 0;
     loop {
         let s = render(&app, &vm, 80, 24);
@@ -953,8 +1046,10 @@ fn help_scrolls_to_every_command_at_80x24() {
             "a description is cut off:\n{s}"
         );
         shown.extend(inside);
-        if s.contains(last) {
-            assert!(!s.contains("↓ more"), "nothing is left below:\n{s}");
+        // The end: the mouse note, under the last command.
+        if !s.contains("↓ more") {
+            assert!(s.contains("/mouse off."), "the box ends on the note:\n{s}");
+            assert!(shown.iter().any(|r| r.starts_with(last)), "{s}");
             break;
         }
         presses += 1;
@@ -990,7 +1085,7 @@ fn help_lists_the_new_commands_in_order() {
     let names: Vec<&str> = HELP.iter().map(|(c, _)| *c).collect();
     let at = names.iter().position(|c| *c == "/leave").unwrap();
     assert_eq!(
-        &names[at..at + 11],
+        &names[at..at + 13],
         &[
             "/leave",
             "/switch [room]",
@@ -999,6 +1094,8 @@ fn help_lists_the_new_commands_in_order() {
             "/keep",
             "/invites",
             "/cancel <number>",
+            "/servers",
+            "/forget <number>",
             "/mute",
             "/unmute",
             "/details",
@@ -1077,8 +1174,9 @@ fn tab_pick_holds_when_two_rooms_share_a_name() {
         room(5, "Bo"),
     ];
     let mut app = App::new();
+    // Tab goes Bo, Bo, then Book club: the names that are the text first.
     type_text(&mut app, &vm, "/switch bo");
-    for _ in 0..3 {
+    for _ in 0..2 {
         app.handle_key(key(KeyCode::Tab), &vm);
     }
     assert_eq!(app.input, "/switch Bo");
@@ -1089,7 +1187,7 @@ fn tab_pick_holds_when_two_rooms_share_a_name() {
     );
     // Edited after Tab: the text decides again.
     type_text(&mut app, &vm, "/switch bo");
-    for _ in 0..3 {
+    for _ in 0..2 {
         app.handle_key(key(KeyCode::Tab), &vm);
     }
     app.handle_key(key(KeyCode::Backspace), &vm);
@@ -1101,7 +1199,7 @@ fn tab_pick_holds_when_two_rooms_share_a_name() {
     // The switcher highlights, and opens, the Bo Tab picked.
     app.handle_key(ctrl('k'), &vm);
     type_text(&mut app, &vm, "bo");
-    for _ in 0..3 {
+    for _ in 0..2 {
         app.handle_key(key(KeyCode::Tab), &vm);
     }
     assert_eq!(app.switcher.as_deref(), Some("Bo"));
@@ -1109,10 +1207,691 @@ fn tab_pick_holds_when_two_rooms_share_a_name() {
     // Box at rows 6..18: "> Bo", then Book club, Bo (g2), Bo (g5).
     assert_eq!(find_in_row(&buf, 9, "Bo"), Some(21));
     assert_eq!(find_in_row(&buf, 10, "Bo"), Some(21));
-    assert!(!buf[(21, 9)].modifier.contains(Modifier::REVERSED));
-    assert!(buf[(21, 10)].modifier.contains(Modifier::REVERSED));
+    let picked = app.theme.selected.bg.unwrap();
+    assert_ne!(buf[(21, 9)].bg, picked);
+    assert_eq!(buf[(21, 10)].bg, picked);
     assert_eq!(
         app.handle_key(key(KeyCode::Enter), &vm),
         vec![Action::Select(g(5))]
     );
+}
+
+#[test]
+fn help_line_shows_the_version_at_the_right_edge_when_it_fits() {
+    let version = format!("socketchat {}", env!("CARGO_PKG_VERSION"));
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let s = render(&app, &crew(), 100, 24);
+    let last = s.lines().nth(23).unwrap();
+    assert!(
+        last.starts_with("Enter send · /help commands"),
+        "the help text stays whole: {last}"
+    );
+    assert!(last.ends_with(&version), "{last}");
+    assert_eq!(last.chars().count(), 100, "right-aligned: {last}");
+}
+
+#[test]
+fn help_line_drops_the_version_when_it_would_cut_the_help_text() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let s = render(&app, &crew(), 80, 24);
+    let last = s.lines().nth(23).unwrap();
+    assert_eq!(
+        last,
+        "Enter send · /help commands · Tab move · Ctrl-K switch chat · Ctrl-C quit"
+    );
+}
+
+#[test]
+fn screen_about_modal() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.modal = Some(Modal::About);
+    let s = render(&app, &crew(), 80, 24);
+    assert!(s.contains(" About "), "{s}");
+    // The sentence wraps, so check the short lines and the sentence's ends.
+    for line in about_lines().iter().filter(|l| l.len() < 70) {
+        assert!(s.contains(line), "{line} is missing:\n{s}");
+    }
+    assert!(s.contains("Socketchat is encrypted chat"), "{s}");
+    assert!(s.contains("but cannot read them."), "{s}");
+    assert!(about_lines()[0].ends_with(env!("CARGO_PKG_VERSION")));
+    assert!(about_lines().contains(&"License: MIT or Apache 2.0".to_string()));
+    insta::assert_snapshot!(s);
+    app.handle_key(key(KeyCode::Esc), &crew());
+    assert!(app.modal.is_none());
+}
+
+/// Every box that asks a security question: a y typed inside other words
+/// must not answer it.
+fn security_questions() -> Vec<(Modal, Action)> {
+    vec![
+        (
+            Modal::Verify {
+                name: "Bo".into(),
+                key: k(2),
+                number: "12345 67890".into(),
+            },
+            Action::MarkVerified(k(2)),
+        ),
+        (
+            Modal::ConfirmVideo {
+                group: g(1),
+                path: "/tmp/beach.mov".into(),
+            },
+            Action::ConfirmVideo(g(1), "/tmp/beach.mov".into()),
+        ),
+        (
+            Modal::ConfirmPhoto {
+                group: g(1),
+                path: "/tmp/beach.heic".into(),
+            },
+            Action::ConfirmVideo(g(1), "/tmp/beach.heic".into()),
+        ),
+        (
+            new_certificate_modal(),
+            Action::AcceptCertificate("socketchat://chat.example.com:7444/j/abc#def".into()),
+        ),
+    ]
+}
+
+#[test]
+fn security_questions_ignore_a_y_inside_other_typing() {
+    let vm = crew();
+    for (modal, _) in security_questions() {
+        for word in ["hey", "okay", "1y", " y"] {
+            let mut app = App::new();
+            app.selected = Some(g(1));
+            app.modal = Some(modal.clone());
+            let mut acts = vec![];
+            for c in word.chars() {
+                acts.extend(app.handle_key(key(KeyCode::Char(c)), &vm));
+            }
+            assert!(acts.is_empty(), "{modal:?} {word:?}: {acts:?}");
+            assert!(
+                app.modal.is_none(),
+                "{modal:?}: the first other key says no"
+            );
+        }
+        for other in [KeyCode::Down, KeyCode::Tab, KeyCode::Left] {
+            let mut app = App::new();
+            app.modal = Some(modal.clone());
+            let mut acts = app.handle_key(key(other), &vm);
+            acts.extend(app.handle_key(key(KeyCode::Char('y')), &vm));
+            assert!(acts.is_empty(), "{modal:?} {other:?} then y: {acts:?}");
+        }
+        let mut app = App::new();
+        app.modal = Some(modal.clone());
+        assert!(
+            app.handle_key(ctrl('y'), &vm).is_empty(),
+            "Ctrl+Y is not yes"
+        );
+        assert!(app.modal.is_none());
+    }
+}
+
+#[test]
+fn security_questions_take_a_y_pressed_first() {
+    let vm = crew();
+    for (modal, yes) in security_questions() {
+        let mut app = App::new();
+        app.modal = Some(modal.clone());
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y')), &vm),
+            vec![yes.clone()]
+        );
+        assert!(app.modal.is_none());
+        let mut app = App::new();
+        app.modal = Some(modal.clone());
+        let shift_y = KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT);
+        assert_eq!(app.handle_key(shift_y, &vm), vec![yes]);
+        for no in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
+            let mut app = App::new();
+            app.modal = Some(modal.clone());
+            assert!(app.handle_key(key(no), &vm).is_empty(), "{modal:?} {no:?}");
+            assert!(app.modal.is_none());
+            assert!(app.input.is_empty(), "n, Esc and Enter only answer");
+        }
+    }
+}
+
+/// A paste goes into the message box as text, whatever it holds, and
+/// nothing is sent or run until the person presses Enter.
+#[test]
+fn a_paste_is_text_in_the_message_box_and_runs_nothing() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    assert!(app
+        .handle_paste("hello\r\n/kick Bo\n/admin Cy\n")
+        .is_empty());
+    assert_eq!(app.input, "hello\n/kick Bo\n/admin Cy\n");
+    assert_eq!(app.focus, Focus::Input);
+    let acts = app.handle_key(key(KeyCode::Enter), &vm);
+    assert_eq!(
+        acts,
+        vec![Action::Send(g(1), "hello\n/kick Bo\n/admin Cy".into())],
+        "Enter sends the paste as one message"
+    );
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.handle_paste("/kick Bo");
+    assert_eq!(app.input, "/kick Bo", "a pasted command waits for Enter");
+    app.handle_paste("\u{1b}[31m\tx\u{7}");
+    assert_eq!(app.input, "/kick Bo[31m x", "control characters stay out");
+}
+
+#[test]
+fn a_paste_never_answers_a_question() {
+    let vm = crew();
+    for (modal, _) in security_questions() {
+        let mut app = App::new();
+        app.selected = Some(g(1));
+        app.modal = Some(modal.clone());
+        assert!(app.handle_paste("y").is_empty(), "{modal:?}");
+        assert!(app.modal.is_none(), "{modal:?}: a paste says no");
+        assert_eq!(app.input, "y");
+        assert!(app.handle_key(key(KeyCode::Backspace), &vm).is_empty());
+    }
+    let mut app = App::new();
+    app.modal = Some(confirm_leave());
+    assert!(app.handle_paste("y").is_empty());
+    assert!(app.modal.is_none());
+}
+
+#[test]
+fn pasted_lines_show_as_return_marks_in_the_message_box() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.handle_paste("one\ntwo");
+    let s = render(&app, &crew(), 80, 24);
+    assert!(s.contains("› one↵two"), "{s}");
+}
+
+const ONE_LINE: &str = "A command fits on one line. Remove the line breaks to run it.";
+const NO_SPACES: &str = "Remove the spaces before the / to run the command.";
+
+/// Text with a line break never runs as a command: a paste that starts
+/// with a command and hides more lines below it is refused.
+#[test]
+fn a_command_with_line_breaks_never_runs() {
+    let vm = crew();
+    for paste in [
+        format!("/send x{}", "\n".repeat(100)),
+        "\n\n/kick Bo".to_string(),
+        "/kick Bo\nhello".to_string(),
+        "/help\n".to_string(),
+    ] {
+        let mut app = App::new();
+        app.selected = Some(g(1));
+        app.handle_paste(&paste);
+        let acts = app.handle_key(key(KeyCode::Enter), &vm);
+        assert!(acts.is_empty(), "{paste:?}: {acts:?}");
+        assert_eq!(app.status.as_deref(), Some(ONE_LINE), "{paste:?}");
+        assert_eq!(app.input, paste, "the text stays in the box");
+    }
+}
+
+/// A command runs only from the start of the box, where it shows.
+#[test]
+fn a_command_after_spaces_never_runs() {
+    let vm = crew();
+    for text in [
+        "   /send x".to_string(),
+        format!("{}/kick Bo", " ".repeat(300)),
+    ] {
+        let mut app = App::new();
+        app.selected = Some(g(1));
+        app.handle_paste(&text);
+        let acts = app.handle_key(key(KeyCode::Enter), &vm);
+        assert!(acts.is_empty(), "{text:?}: {acts:?}");
+        assert_eq!(app.status.as_deref(), Some(NO_SPACES));
+        assert_eq!(app.input, text);
+    }
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    for c in "/help".chars() {
+        app.handle_key(key(KeyCode::Char(c)), &vm);
+    }
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Help)],
+        "a typed one-line command still runs"
+    );
+}
+
+/// While the box holds a command, it shows the command's start, so a long
+/// line cannot push the command out of sight.
+#[test]
+fn the_box_shows_the_start_of_a_command() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.handle_paste(&format!("/send x{}hello", " ".repeat(200)));
+    let s = render(&app, &crew(), 80, 24);
+    assert!(s.contains("› /send x"), "{s}");
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.handle_paste(&format!("{}the end", "word ".repeat(40)));
+    let s = render(&app, &crew(), 80, 24);
+    assert!(s.contains("the end"), "plain text shows its end: {s}");
+}
+
+/// The box holds at most one message's worth of text; a longer paste is
+/// cut on a character boundary and the status line says so.
+#[test]
+fn a_paste_past_the_message_limit_is_cut_and_says_so() {
+    use socketchat_core::sanitize::MAX_TEXT_BYTES;
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.handle_key(key(KeyCode::Char('a')), &vm);
+    app.handle_paste(&"é".repeat(MAX_TEXT_BYTES));
+    assert!(app.input.len() <= MAX_TEXT_BYTES, "{}", app.input.len());
+    assert!(app.input.len() > MAX_TEXT_BYTES - 2);
+    assert!(app.input[1..].chars().all(|c| c == 'é'));
+    assert_eq!(
+        app.status.as_deref(),
+        Some("The paste was cut to 16 KB, the most one message holds.")
+    );
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Char('z')), &vm);
+    }
+    assert_eq!(app.input.len(), MAX_TEXT_BYTES, "typing fills the box");
+    let before = app.input.clone();
+    app.handle_key(key(KeyCode::Char('z')), &vm);
+    assert_eq!(app.input, before, "typing stops at the limit too");
+    let mut app = App::new();
+    app.handle_paste("short");
+    assert_eq!(app.status, None);
+}
+
+/// The box shows what will be sent: direction controls go, as they do
+/// from a sent message.
+#[test]
+fn a_paste_drops_direction_controls() {
+    let mut app = App::new();
+    app.handle_paste("a\u{202e}b\u{2066}c\u{2069}\u{200f}d");
+    assert_eq!(app.input, "abcd");
+}
+
+const EXTRA_SPACES: &str = "Remove the extra spaces to run the command.";
+
+/// A command runs only when every space in it shows: runs of spaces and
+/// other blank characters could push an argument out of sight.
+#[test]
+fn a_command_with_hidden_spacing_never_runs() {
+    let vm = crew();
+    for text in [
+        format!("/send{}~/.ssh/id_ed25519", " ".repeat(300)),
+        "/send\u{2028}~/.ssh/id_ed25519".to_string(),
+        "/send\u{2029}x".to_string(),
+        "/send \u{a0}x".to_string(),
+        "/kick  Bo".to_string(),
+        "/send\u{3000}x".to_string(),
+    ] {
+        let mut app = App::new();
+        app.selected = Some(g(1));
+        app.handle_paste(&text);
+        let acts = app.handle_key(key(KeyCode::Enter), &vm);
+        assert!(acts.is_empty(), "{text:?}: {acts:?}");
+        assert_eq!(app.status.as_deref(), Some(EXTRA_SPACES), "{text:?}");
+        assert_eq!(app.input, text);
+    }
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.handle_paste("/send a b  ");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Send("a b".into()))],
+        "single spaces, and spaces at the end, are fine"
+    );
+}
+
+/// A command too long for the box shows its start and its end.
+#[test]
+fn a_long_command_shows_its_start_and_its_end() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.handle_paste(&format!("/send /tmp/{}/end.txt", "a".repeat(200)));
+    let s = render(&app, &crew(), 80, 24);
+    let row = s.lines().find(|l| l.contains('›')).unwrap();
+    assert!(row.contains("› /send /tmp/aaa"), "{row}");
+    assert!(row.contains("/end.txt"), "{row}");
+}
+
+/// Typing into a full box says why nothing appears.
+#[test]
+fn typing_into_a_full_box_says_so() {
+    use socketchat_core::sanitize::MAX_TEXT_BYTES;
+    let vm = crew();
+    let mut app = App::new();
+    app.handle_paste(&"x".repeat(MAX_TEXT_BYTES));
+    assert_eq!(app.status, None);
+    app.handle_key(key(KeyCode::Char('z')), &vm);
+    assert_eq!(app.input.len(), MAX_TEXT_BYTES);
+    assert_eq!(
+        app.status.as_deref(),
+        Some("The message box is full at 16 KB, the most one message holds.")
+    );
+}
+
+/// The message box row at 80 columns, wide characters read back without
+/// the blank cell each one leaves after itself.
+fn box_row(app: &App) -> String {
+    let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    t.draw(|f| draw(f, app, &crew())).unwrap();
+    let buf = t.backend().buffer().clone();
+    let y = (0..24)
+        .find(|&y| buf[(1u16, y)].symbol() == "›")
+        .expect("a message box row");
+    let mut row = String::new();
+    let mut x = 0;
+    while x < 80 {
+        let sym = buf[(x, y)].symbol();
+        row.push_str(sym);
+        x += if matches!(sym, "文" | "😀") { 2 } else { 1 };
+    }
+    row
+}
+
+/// Wide characters, as in Chinese or emoji, take two columns: a command
+/// full of them still shows its end in the box.
+#[test]
+fn a_command_with_wide_characters_shows_its_end() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.handle_paste(&format!("/send 😀😀/tmp/{}/end.txt", "文".repeat(60)));
+    let row = box_row(&app);
+    assert!(row.contains("› /send 😀😀/tmp/文"), "{row}");
+    assert!(row.contains("/end.txt"), "{row}");
+    assert!(row.contains('…'), "{row}");
+}
+
+/// A command that fits by its count of characters but not by its width
+/// shows its start and its end.
+#[test]
+fn a_command_wider_than_the_box_shows_its_start_and_end() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let text = format!("/send {} END", "文".repeat(50));
+    assert!(text.chars().count() < 75);
+    app.handle_paste(&text);
+    let row = box_row(&app);
+    assert!(row.contains("› /send 文"), "{row}");
+    assert!(row.contains(" END"), "{row}");
+    assert!(row.contains('…'), "{row}");
+}
+
+/// The cursor sits after wide characters, two columns for each.
+#[test]
+fn the_cursor_counts_wide_characters_as_two_columns() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.handle_paste("文文a");
+    let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    t.draw(|f| draw(f, &app, &crew())).unwrap();
+    let pos = t.get_cursor_position().unwrap();
+    // Inside the frame at column 1, after "› " (2 columns) and 5 more.
+    assert_eq!(pos.x, 1 + 2 + 5);
+}
+
+/// Narrow windows with mixed widths draw without a panic.
+#[test]
+fn narrow_boxes_with_wide_characters_draw() {
+    for w in 8..=11u16 {
+        for text in ["/文a😀b文", "文😀", "/s 文", "a😀"] {
+            let mut app = App::new();
+            app.selected = Some(g(1));
+            app.handle_paste(text);
+            render(&app, &crew(), w, 24);
+        }
+    }
+}
+
+// ---------- Tab completes slash commands ----------
+
+fn tab(app: &mut App, vm: &ViewModel) {
+    app.handle_key(key(KeyCode::Tab), vm);
+}
+
+fn back_tab(app: &mut App, vm: &ViewModel) {
+    app.handle_key(key(KeyCode::BackTab), vm);
+}
+
+fn help_row(app: &App, vm: &ViewModel) -> String {
+    render(app, vm, 80, 24).lines().nth(23).unwrap().to_string()
+}
+
+#[test]
+fn tab_completes_a_unique_command_with_a_space() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/sw");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/switch ");
+    assert_eq!(app.focus, Focus::Input);
+}
+
+#[test]
+fn tab_fills_the_common_prefix_then_cycles_in_help_order() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/in");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite", "common prefix first");
+    assert!(help_row(&app, &vm).contains("/invite  /invites"));
+    let mut seen = vec![];
+    for _ in 0..3 {
+        tab(&mut app, &vm);
+        seen.push(app.input.clone());
+    }
+    assert_eq!(seen, ["/invite", "/invites", "/invite"]);
+}
+
+#[test]
+fn shift_tab_cycles_backward() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/c");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/c", "no prefix to add");
+    let mut seen = vec![];
+    for _ in 0..3 {
+        back_tab(&mut app, &vm);
+        seen.push(app.input.clone());
+    }
+    assert_eq!(seen, ["/clear", "/cancel", "/close"]);
+    assert_eq!(app.focus, Focus::Input);
+}
+
+#[test]
+fn tab_with_no_common_prefix_lists_matches_in_the_dim_help_line() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/c");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/c");
+    assert!(help_row(&app, &vm).contains("/close  /cancel  /clear"));
+    let mut seen = vec![];
+    for _ in 0..4 {
+        tab(&mut app, &vm);
+        seen.push(app.input.clone());
+    }
+    assert_eq!(seen, ["/close", "/cancel", "/clear", "/close"]);
+}
+
+#[test]
+fn any_other_key_ends_cycling() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/c");
+    for _ in 0..3 {
+        tab(&mut app, &vm);
+    }
+    assert_eq!(app.input, "/cancel");
+    app.handle_key(key(KeyCode::Backspace), &vm);
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/cancel ", "a fresh Tab, not the next match");
+}
+
+#[test]
+fn tab_with_no_matching_command_says_so_and_keeps_the_text() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/xyz");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/xyz");
+    assert_eq!(app.status.as_deref(), Some("No command starts with /xyz"));
+    assert!(help_row(&app, &vm).contains("No command starts with /xyz"));
+    app.handle_key(key(KeyCode::Char('a')), &vm);
+    assert!(app.status.is_none());
+}
+
+#[test]
+fn tab_after_a_lone_slash_lists_commands_and_then_cycles() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/");
+    let row = help_row(&app, &vm);
+    assert!(
+        row.contains("/invite  /invite") || row.contains("/invite  /join"),
+        "{row}"
+    );
+    assert!(row.contains("/join  /new"), "{row}");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite");
+}
+
+#[test]
+fn tab_cycles_theme_names() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/theme ");
+    let mut seen = vec![];
+    for _ in 0..3 {
+        tab(&mut app, &vm);
+        seen.push(app.input.clone());
+    }
+    assert_eq!(
+        seen,
+        ["/theme phosphor", "/theme classic", "/theme phosphor"]
+    );
+    app.input = "/theme cl".into();
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/theme classic");
+}
+
+#[test]
+fn tab_outside_a_command_word_still_moves_focus() {
+    let (mut app, vm) = (App::new(), crew());
+    tab(&mut app, &vm);
+    assert_eq!(app.focus, Focus::Groups);
+    let mut app = App::new();
+    type_text(&mut app, &vm, "hello");
+    tab(&mut app, &vm);
+    assert_eq!(app.focus, Focus::Groups);
+    assert_eq!(app.input, "hello");
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/kick Bo");
+    tab(&mut app, &vm);
+    assert_eq!(app.focus, Focus::Groups);
+    assert_eq!(app.input, "/kick Bo");
+}
+
+#[test]
+fn input_help_line_mentions_tab_completing_only_while_typing_a_command() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/kick Bo");
+    assert!(help_row(&app, &vm).contains("Tab completes"));
+    let mut app = App::new();
+    assert!(!help_row(&app, &vm).contains("Tab completes"));
+    type_text(&mut app, &vm, "/kick Bo");
+    let narrow = render(&app, &vm, 30, 24);
+    assert!(!narrow.lines().nth(23).unwrap().contains("Tab completes"));
+}
+
+// ---------- inline ghost suggestion ----------
+
+fn find_text(buf: &ratatui::buffer::Buffer, w: u16, h: u16, needle: &str) -> Option<(u16, u16)> {
+    for y in 0..h {
+        let row: Vec<String> = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        let joined: String = row.concat();
+        if let Some(i) = joined.find(needle) {
+            return Some((joined[..i].chars().count() as u16, y));
+        }
+    }
+    None
+}
+
+#[test]
+fn the_rest_of_the_first_match_shows_dim_after_the_cursor() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/sw");
+    let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    t.draw(|f| draw(f, &app, &vm)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let (x, y) = find_text(&buf, 80, 24, "/switch").expect("ghost drawn");
+    assert_eq!(buf[(x + 2, y)].symbol(), "w");
+    assert_ne!(buf[(x + 2, y)].fg, app.theme.dim.fg.unwrap());
+    for (i, ch) in "itch".chars().enumerate() {
+        let cell = &buf[(x + 3 + i as u16, y)];
+        assert_eq!(cell.symbol(), ch.to_string());
+        assert_eq!(Some(cell.fg), app.theme.dim.fg, "ghost is dim");
+    }
+    assert_eq!(app.input, "/sw", "display only");
+}
+
+#[test]
+fn no_ghost_without_a_match_or_a_slash() {
+    let vm = crew();
+    for text in ["/xyz", "hello", "/kick B"] {
+        let mut app = App::new();
+        type_text(&mut app, &vm, text);
+        assert_eq!(app.ghost(&vm), None, "{text}");
+    }
+    assert_eq!(App::new().ghost(&vm), None);
+}
+
+#[test]
+fn ghost_is_what_tab_would_give() {
+    let vm = crew();
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/in");
+    assert_eq!(app.ghost(&vm).as_deref(), Some("vite"));
+    tab(&mut app, &vm);
+    assert_eq!(
+        app.ghost(&vm),
+        None,
+        "/invite is already shown; next is itself"
+    );
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/theme ");
+    assert_eq!(app.ghost(&vm).as_deref(), Some("phosphor"));
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/switch cl");
+    assert_eq!(app.ghost(&vm).as_deref(), Some("imbing Saturdays"));
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/switch ");
+    assert_eq!(app.ghost(&vm).as_deref(), Some("Book club"));
+}
+
+#[test]
+fn right_arrow_accepts_the_ghost() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/sw");
+    app.handle_key(key(KeyCode::Right), &vm);
+    assert_eq!(app.input, "/switch ");
+    app.handle_key(key(KeyCode::Right), &vm);
+    assert_eq!(app.input, "/switch Book club");
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/theme c");
+    app.handle_key(key(KeyCode::Right), &vm);
+    assert_eq!(app.input, "/theme classic");
+}
+
+#[test]
+fn a_sent_message_never_holds_ghost_text() {
+    let (mut app, vm) = (App::new(), crew());
+    app.selected = Some(g(1));
+    type_text(&mut app, &vm, "/sw");
+    assert!(app.ghost(&vm).is_some());
+    app.input = "hello /sw".into();
+    assert_eq!(app.ghost(&vm), None);
+    let acts = app.handle_key(key(KeyCode::Enter), &vm);
+    assert_eq!(acts, vec![Action::Send(g(1), "hello /sw".into())]);
 }

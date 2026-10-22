@@ -1,5 +1,5 @@
-//! Findings from the re-review of 4077bf8: slow and silent readers, the
-//! per-address limit, and the Windows stall on big replies.
+//! Slow and silent readers, the per-address limit, big replies on a slow
+//! link, and long lists of join requests and open invite links.
 
 mod common;
 
@@ -101,7 +101,7 @@ async fn big_replies_reach_a_slow_reader_whole() {
     }
 }
 
-// ---------- R1: a client that stops reading ----------
+// ---------- A client that stops reading ----------
 
 /// A client that stops reading kept its connection slot after the idle
 /// limit, because the task waited forever on a writer stuck writing to a
@@ -191,7 +191,7 @@ async fn connections_per_address_are_capped() {
     one.challenge().await;
 }
 
-// ---------- R2: replies a member never reads, counted in bytes ----------
+// ---------- Replies a member never reads, counted in bytes ----------
 
 /// The queue was bounded in frames, not bytes: a member who never reads
 /// parked 64 near-1 MiB fetch replies per connection.
@@ -235,7 +235,7 @@ async fn rr_unread_big_replies_bounded_in_bytes() {
     );
 }
 
-// ---------- R9: join requests past the first page; open invite links ----------
+// ---------- Join requests past the first page; open invite links ----------
 
 /// Seconds since the Unix epoch.
 fn unix_now() -> i64 {

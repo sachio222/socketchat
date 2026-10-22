@@ -1,0 +1,11 @@
+name: Write everything
+permissions: write-all
+
+on:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: echo test

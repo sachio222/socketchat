@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/servers.rs
+expression: s
+---
+┌ Chats ───────────┐┌ Book club · chat.socketchat.org ─────┐┌ People ──────────┐
+│# Book club       ││                                      ││                  │
+│# Climbing Saturd…││                                      ││                  │
+│# Old crew        ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│ ┌ Your servers ────────────────────────────────────────────────────────────┐ │
+│ │1. chat.socketchat.org: 2 rooms, connected (new rooms go here)            │ │
+│ │2. Jacobs-MacBook-Pro-2.local: 4 rooms, could not reach: connection       │ │
+│ │refused                                                                   │ │
+│ │3. 127.0.0.1:9000: no rooms, not connected yet                            │ │
+│ └────────────────────────────────────────────────────────────────[ Close ]─┘ │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  What's on your mind? #Book club                               / for commands│
+└──────────────────────────────────────────────────────────────────────────────┘
+/forget <number> forgets a server · Esc close                   socketchat 0.5.1

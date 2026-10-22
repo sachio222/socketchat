@@ -25,7 +25,7 @@ pub fn create(dir: &Path, host: &str) -> Result<[u8; 32], ServerError> {
     }
     let ck = rcgen::generate_simple_self_signed(vec![host.to_string()])
         .map_err(|e| ServerError::Tls(e.to_string()))?;
-    std::fs::write(&cert_path, ck.cert.der())?;
+    crate::perms::write_private(&cert_path, ck.cert.der())?;
     write_private(&key_path, &ck.signing_key.serialize_der())?;
     Ok(Sha256::digest(ck.cert.der()).into())
 }

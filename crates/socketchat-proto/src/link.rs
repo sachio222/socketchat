@@ -15,6 +15,37 @@ use thiserror::Error;
 
 const SCHEME: &str = "socketchat://";
 
+/// Join page that shows a friend how to install socketchat. The invite
+/// goes after `#`, which browsers never send to the web server.
+pub const WEB_JOIN_URL: &str = "https://socketchat.org/join";
+
+/// The web form of a `socketchat://` link, or `None` for anything else.
+pub fn to_web_link(link: &str) -> Option<String> {
+    let link = link.trim();
+    link.starts_with(SCHEME)
+        .then(|| format!("{WEB_JOIN_URL}#{link}"))
+}
+
+/// Where people learn to install Socketchat.
+pub const SITE_URL: &str = "https://socketchat.org";
+
+/// What the invite box copies: a line about Socketchat, where to install
+/// it and the command that uses `link`, ready to paste into a terminal.
+/// The quotes keep the link whole in every shell.
+pub fn invite_message(link: &str) -> String {
+    format!(
+        "Join me on Socketchat, an encrypted chat.\n1. Install it from {SITE_URL}\n2. Then run: socketchat join \"{}\"",
+        link.trim()
+    )
+}
+
+/// The `socketchat://` link inside a web link, or `None` when the text is
+/// not a web link made by [`to_web_link`].
+pub fn from_web_link(web: &str) -> Option<&str> {
+    let bare = web.trim().strip_prefix(WEB_JOIN_URL)?.strip_prefix('#')?;
+    bare.starts_with(SCHEME).then_some(bare)
+}
+
 /// Random invite token the server stores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Token(pub [u8; 16]);
@@ -36,7 +67,7 @@ pub struct InviteLink {
 pub enum LinkError {
     #[error("an invite link starts with socketchat://")]
     Scheme,
-    #[error("the link has no server address")]
+    #[error("the server address in the link is not a name or an IP address")]
     Host,
     #[error("the port in the link is not a number")]
     Port,
@@ -44,6 +75,59 @@ pub enum LinkError {
     Token,
     #[error("the part after # is cut short or changed; ask for a fresh link")]
     Fragment,
+}
+
+/// Longest host name DNS allows, in characters.
+const MAX_HOST: usize = 253;
+
+/// Whether `host` is a server address a link may carry: an IPv4 or IPv6
+/// address, or a host name made of ASCII letters, digits, hyphens and
+/// underscores in dot-separated labels of 1 to 63 characters, none
+/// starting or ending with a hyphen. That leaves out spaces, control
+/// characters and every character outside ASCII, so a host prints safely
+/// and cannot pass for another name written in look-alike letters. A name
+/// in another script travels in its ASCII form (`xn--...`), which is what
+/// DNS looks up anyway.
+pub fn valid_host(host: &str) -> bool {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let name = host.strip_suffix('.').unwrap_or(host);
+    !name.is_empty()
+        && name.len() <= MAX_HOST
+        && name.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
+/// Splits `addr`, the part before `/j/`, into host and port. An IPv6
+/// address comes in brackets (`[::1]:7444`), or bare with the port after
+/// its last colon, as older servers wrote it.
+fn host_and_port(addr: &str) -> Result<(&str, u16), LinkError> {
+    if let Some(rest) = addr.strip_prefix('[') {
+        let (host, after) = rest.split_once(']').ok_or(LinkError::Host)?;
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(LinkError::Host);
+        }
+        let port = match after {
+            "" => crate::DEFAULT_PORT,
+            p => p
+                .strip_prefix(':')
+                .ok_or(LinkError::Host)?
+                .parse()
+                .map_err(|_| LinkError::Port)?,
+        };
+        return Ok((host, port));
+    }
+    match addr.rsplit_once(':') {
+        Some((h, p)) => Ok((h, p.parse().map_err(|_| LinkError::Port)?)),
+        None => Ok((addr, crate::DEFAULT_PORT)),
+    }
 }
 
 fn b64<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -71,14 +155,12 @@ impl FromStr for InviteLink {
     type Err = LinkError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = from_web_link(s).unwrap_or(s);
         let rest = s.trim().strip_prefix(SCHEME).ok_or(LinkError::Scheme)?;
         let (addr, rest) = rest.split_once("/j/").ok_or(LinkError::Token)?;
         let (token, fragment) = rest.split_once('#').ok_or(LinkError::Fragment)?;
-        let (host, port) = match addr.rsplit_once(':') {
-            Some((h, p)) => (h, p.parse().map_err(|_| LinkError::Port)?),
-            None => (addr, crate::DEFAULT_PORT),
-        };
-        if host.is_empty() {
+        let (host, port) = host_and_port(addr)?;
+        if !valid_host(host) {
             return Err(LinkError::Host);
         }
         let token = Token(b64(token).ok_or(LinkError::Token)?);
@@ -169,5 +251,120 @@ mod tests {
             ..group_link()
         };
         assert_eq!(l.to_string().parse::<InviteLink>().unwrap(), l);
+    }
+
+    fn with_host(addr: &str) -> String {
+        group_link()
+            .to_string()
+            .replace("chat.example.com:7444", addr)
+    }
+
+    #[test]
+    fn link_refuses_a_host_that_is_not_a_name_or_address() {
+        for addr in [
+            "evil\u{1b}[31m.example.com:7444",
+            "evil\u{7}.example.com:7444",
+            "two words:7444",
+            "user@chat.example.com:7444",
+            "chat.example.com?x=1:7444",
+            "chat.example.com/x:7444",
+            "-chat.example.com:7444",
+            "chat-.example.com:7444",
+            "chat..example.com:7444",
+            ".:7444",
+            "pаypal.com:7444",
+            "chat.example.com\u{202e}moc:7444",
+            "xn--pypal-4ve.com\u{200b}:7444",
+            "[::1:7444",
+            "[not an address]:7444",
+            "[::1]x:7444",
+        ] {
+            assert_eq!(
+                with_host(addr).parse::<InviteLink>(),
+                Err(LinkError::Host),
+                "{addr:?}"
+            );
+        }
+        let long = format!("{}.com:7444", "a".repeat(64));
+        assert_eq!(with_host(&long).parse::<InviteLink>(), Err(LinkError::Host));
+        let too_long = format!("{}com:7444", "abcdefghi.".repeat(26));
+        assert_eq!(
+            with_host(&too_long).parse::<InviteLink>(),
+            Err(LinkError::Host)
+        );
+    }
+
+    #[test]
+    fn link_takes_names_and_addresses() {
+        for (addr, host, port) in [
+            ("localhost:7444", "localhost", 7444),
+            ("Chat.Example.com:7444", "Chat.Example.com", 7444),
+            ("chat.example.com.:7444", "chat.example.com.", 7444),
+            ("xn--pypal-4ve.com:7444", "xn--pypal-4ve.com", 7444),
+            ("home_box.lan:7444", "home_box.lan", 7444),
+            ("10.0.0.7:9000", "10.0.0.7", 9000),
+            ("[::1]:7444", "::1", 7444),
+            ("[2001:db8::7]", "2001:db8::7", crate::DEFAULT_PORT),
+            ("2001:db8::7:7444", "2001:db8::7", 7444),
+        ] {
+            let l = with_host(addr).parse::<InviteLink>().unwrap();
+            assert_eq!((l.host.as_str(), l.port), (host, port), "{addr}");
+        }
+    }
+
+    #[test]
+    fn link_checks_a_host_given_in_code() {
+        assert!(valid_host("chat.example.com"));
+        assert!(valid_host("::1"));
+        assert!(!valid_host("evil\u{1b}[2J"));
+        assert!(!valid_host(""));
+    }
+
+    #[test]
+    fn web_link_roundtrip() {
+        let bare = group_link().to_string();
+        let web = to_web_link(&bare).unwrap();
+        assert_eq!(web, format!("https://socketchat.org/join#{bare}"));
+        assert_eq!(from_web_link(&web), Some(bare.as_str()));
+        assert_eq!(web.parse::<InviteLink>().unwrap(), group_link());
+    }
+
+    #[test]
+    fn invite_message_holds_a_command_to_paste() {
+        let bare = group_link().to_string();
+        assert_eq!(
+            invite_message(&format!(" {bare}\n")),
+            format!(
+                "Join me on Socketchat, an encrypted chat.\n1. Install it from https://socketchat.org\n2. Then run: socketchat join \"{bare}\""
+            )
+        );
+    }
+
+    #[test]
+    fn web_link_needs_a_socketchat_link() {
+        assert_eq!(to_web_link("https://example.com/x"), None);
+        assert_eq!(to_web_link(""), None);
+    }
+
+    #[test]
+    fn web_link_without_fragment_is_not_one() {
+        assert_eq!(from_web_link("https://socketchat.org/join"), None);
+        assert_eq!(from_web_link("socketchat://chat.example.com/j/x#y"), None);
+    }
+
+    #[test]
+    fn web_link_wrong_host_is_not_one() {
+        let bare = group_link().to_string();
+        let web = format!("https://example.com/join#{bare}");
+        assert_eq!(from_web_link(&web), None);
+        assert_eq!(web.parse::<InviteLink>(), Err(LinkError::Scheme));
+    }
+
+    #[test]
+    fn web_link_empty_fragment_is_a_bad_link() {
+        let web = format!("{WEB_JOIN_URL}#");
+        assert_eq!(web.parse::<InviteLink>(), Err(LinkError::Scheme));
+        let junk = format!("{WEB_JOIN_URL}#nonsense");
+        assert_eq!(junk.parse::<InviteLink>(), Err(LinkError::Scheme));
     }
 }

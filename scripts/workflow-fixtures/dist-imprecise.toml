@@ -1,0 +1,10 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.32.0"
+# precise-builds = true
+precise-builds = false
+
+[other]
+precise-builds = true

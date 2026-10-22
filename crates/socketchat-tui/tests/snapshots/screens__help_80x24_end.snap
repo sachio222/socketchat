@@ -4,25 +4,25 @@ expression: at_end
 ---
 ┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
 │#┌ Commands ────────────────────────────────────────────────────────────────┐ │
-│@│/dm <name>            start a two-person chat with someone in this chat   │ │
-│#│/send <path>          send a file, photo or video                         │ │
-│ │/save <file> [folder] save a file someone sent                            │ │
-│ │/verify <name>        compare safety numbers with someone                 │ │
-│ │/rename <name> <new>  rename someone on your screen only                  │ │
-│ │/name <new>           change the name others see for you                  │ │
-│ │/kick <name>          remove someone (admins)                             │ │
-│ │/admin <name>         make someone an admin (admins)                      │ │
-│ │/leave                leave this chat and delete its history here         │ │
-│ │/switch [room]        open another room; Tab completes the name           │ │
+│@│/leave                leave this chat and delete its history here         │ │
+│#│/switch [room]        open another room; Tab completes the name           │ │
 │ │/title <name>         rename this room for everyone (admins)              │ │
 │ │/close                close this room for everyone (admins agree)         │ │
 │ │/keep                 say no to closing this room (admins)                │ │
 │ │/invites              see your open invite links                          │ │
 │ │/cancel <number>      stop an invite link from /invites                   │ │
+│ │/servers              see your servers and whether each is connected      │ │
+│ │/forget <number>      delete a server and its rooms from this computer    │ │
 │ │/mute                 hide this room's new-message count                  │ │
 │ │/unmute               show this room's new-message count again            │ │
-└─│/details              see this room's admins, size and age                │─┘
-┌─│/clear                delete this room's messages from this computer      │─┐
-│ │/quit                 close socketchat                                    │s│
-└─└──────────────────────────────────────────────────────────────────────────┘─┘
-Up/Down scroll · Esc close
+│ │/details              see this room's admins, size and age                │ │
+│ │/clear                delete this room's messages from this computer      │ │
+│ │/theme [name]         see or change the colors: phosphor or classic       │ │
+│ │/mouse [on|off]       turn mouse clicks and scrolling on or off           │ │
+│ │/about                see the version and what Socketchat is              │ │
+│ │/quit                 close Socketchat                                    │ │
+└─│                                                                          │─┘
+┌─│To select text while the mouse is on, hold Shift as you drag (Option or Fn│─┐
+│ │on a Mac), or type /mouse off.                                            │s│
+└─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
+Up/Down scroll · Esc close                                      socketchat 0.5.1

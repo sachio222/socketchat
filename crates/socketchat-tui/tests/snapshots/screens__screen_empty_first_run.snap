@@ -2,7 +2,7 @@
 source: crates/socketchat-tui/tests/screens.rs
 expression: "render(&App::new(), &vm, 80, 24)"
 ---
-┌ Chats ───────────┐┌ socketchat ──────────────────────────┐┌ People ──────────┐
+┌ Chats ───────────┐┌ Socketchat ──────────────────────────┐┌ People ──────────┐
 │                  ││Welcome, Ada.                         ││                  │
 │                  ││                                      ││                  │
 │                  ││No chats yet.                         ││                  │

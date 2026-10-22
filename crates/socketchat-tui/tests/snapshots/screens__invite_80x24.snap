@@ -8,7 +8,6 @@ expression: small
 │# Climbing Sat… 12││09:15:12 Bo: Me. Sending it now.      ││  Cy              │
 │                  ││09:15:40 · Bo sent books.pdf (84 KB)  ││                  │
 │                  ││09:16:58 Cy: Got it, thanks. Saturday ││                  │
-│                  ││         still works for me, and I can││                  │
 │ ┌ Invite link ─────────────────────────────────────────────────────────────┐ │
 │ │Send this link to one person. It works once and expires in 2 hours. Anyone│ │
 │ │who has it can ask to join.                                               │ │
@@ -16,13 +15,14 @@ expression: small
 │ │socketchat://chat.example.com:7444/j/AAECAwQFBgcICQoLDA0ODw#3q2-7wABAgMEBQ│ │
 │ │YHCAkKCwwNDg8QERITFBUWFxgZGhs.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.│ │
 │ │ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8                               │ │
+│ │Copied. Press C to copy again.                                            │ │
 │ │                                                                          │ │
 │ │Make the window larger to show a QR code.                                 │ │
-│ └──────────────────────────────────────────────────────────────────────────┘ │
+│ └────────────────────────────────────────────────────────────────[ Close ]─┘ │
 │                  ││                                      ││                  │
 │                  ││                                      ││                  │
 └──────────────────┘└──────────────────────────────────────┘└──────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  What's on your mind, Book club?                               / for commands│
+│  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-C copy the link · Esc close
+C copy an invite message · Esc close                            socketchat 0.5.1
