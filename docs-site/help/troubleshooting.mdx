@@ -1,0 +1,107 @@
+---
+title: "Troubleshooting"
+description: "Fixes for connection problems, certificate warnings, a lost passphrase and Windows quirks."
+keywords: ["troubleshooting", "can't connect", "could not reach the server", "certificate", "Windows", "firewall"]
+---
+
+## Can't connect
+
+An app that cannot reach the server says "could not reach the server" or "the server took too long to answer". Work through these checks.
+
+<Steps>
+  <Step title="Is the server running?">
+    On the server machine, `socketchat server run` should print "Socketchat server listening on" and the port. With systemd, check `sudo systemctl status socketchat` and `journalctl -u socketchat`.
+  </Step>
+  <Step title="Does the link's address reach the server?">
+    The address in the link is the `--host` from `socketchat server init`. From the friend's computer, `ping <address>` should get answers. A link with `localhost` only works on the server machine itself; set up the server with a real address. See [Host a server](/hosting/overview).
+  </Step>
+  <Step title="Is port 7444 open?">
+    From another computer, test the port. On macOS or Linux:
+
+    ```bash
+    nc -vz chat.example.com 7444
+    ```
+
+    On Windows PowerShell:
+
+    ```powershell
+    Test-NetConnection chat.example.com -Port 7444
+    ```
+
+    A refused or timed-out connection means a firewall or router is in the way. Use the checks for your way of hosting below.
+  </Step>
+</Steps>
+
+### Checks for each way of hosting
+
+<AccordionGroup>
+  <Accordion title="Tailscale">
+    - Tailscale is running and signed in on both the server and your friend's computer.
+    - The link uses the full MagicDNS name, such as `pi.tail1234.ts.net`. A shared machine does not answer to its short name.
+    - Your friend accepted the share, or joined your tailnet.
+    - If your tailnet has access rules, they allow TCP 7444 to the server.
+    - A firewall on the server machine allows 7444.
+  </Accordion>
+  <Accordion title="Same Wi-Fi">
+    - Your friend is on the same network, not a guest network. Many routers keep guest Wi-Fi apart from the main network.
+    - The server's local IP has not changed since `init`. If it has, reserve an address in the router; see [Keep the address from changing](/hosting/local-network#keep-the-address-from-changing).
+    - You allowed `socketchat` through the macOS or Windows firewall prompt.
+  </Accordion>
+  <Accordion title="Port forwarding">
+    - The router forwards TCP 7444 to the server's current local IP.
+    - Your public IP still matches the link's address, or the link uses a dynamic DNS name that is up to date.
+    - You are not behind CGNAT; see [If port forwarding does not work](/hosting/port-forwarding#if-port-forwarding-does-not-work-cgnat).
+    - Test from outside your home, such as from a phone hotspot. Many routers cannot reach their own public address from inside.
+  </Accordion>
+  <Accordion title="Cloud server">
+    - The DNS A record points at the VPS's current IP: `ping chat.example.com`.
+    - Both firewalls allow TCP 7444: `ufw` on the VPS and the provider's cloud firewall.
+    - The service is running: `sudo systemctl status socketchat`.
+  </Accordion>
+</AccordionGroup>
+
+### The server says it is full
+
+"this server is full right now; try again in a few minutes" means the server reached its connection limit. Apps reconnect on their own. If it keeps happening, the operator can raise `max_connections`; see [Server settings](/hosting/server-settings#the-config-file).
+
+## A friend is stuck on "Waiting"
+
+"Waiting for (name) to let you in." means the join request reached the server and waits for an app in the room to let your friend in. Open the chat screen on the inviter's computer, or any admin's, and keep it open for a moment.
+
+"Waiting for (name) to confirm this invite." appears after your friend is in. The inviter's app confirms by itself the next time it connects.
+
+## A certificate-change warning
+
+Each app remembers the certificate fingerprint of every server it uses. If a link names a different certificate for a server your app already knows, Socketchat changes nothing and shows both fingerprints. In the chat screen, a box titled **New server certificate** asks what to do; from the terminal, `socketchat join` prints the two fingerprints and stops.
+
+This happens for one of two reasons:
+
+- **The operator set the server up again**, for example after losing its data folder. This is safe to accept once the operator tells you so.
+- **Someone sent you a fake link.** Do not accept it.
+
+Ask the operator before you accept. To accept:
+
+- in the chat screen, press Y in the box;
+- from a terminal, run `socketchat join --new-certificate "<link>"`.
+
+Nothing changes unless a connection with the new certificate works. Operators can avoid this by backing up the data folder; see [Back up](/hosting/server-settings#back-up).
+
+## A lost passphrase
+
+The passphrase cannot be recovered. Socketchat says "That passphrase does not open this profile. Nothing was changed." when it is wrong. If you have forgotten it, start a fresh profile; see [If you forget it](/security/passphrase#if-you-forget-it).
+
+## "Socketchat is already open on this profile."
+
+Only one copy of Socketchat can open a profile at a time. Close the other chat screen, or wait for a script using the same profile to finish. An agent should use its own profile; see [Agents](/use/agents).
+
+## The invite did not copy
+
+The line under the link in the invite box says whether the copy worked. On Linux, install `wl-copy` (Wayland), or `xclip` or `xsel` (X11), so Socketchat can use your clipboard. Over SSH, Socketchat asks your terminal to copy, which some terminals do not allow. You can always select the link in the box and copy it by hand; with the mouse on, hold Shift as you drag (Option or Fn on a Mac).
+
+## Windows notes
+
+- Run the installer in PowerShell, then open a new PowerShell or Windows Terminal window so `socketchat` is on your PATH.
+- Keep the double quotes around invite links: `socketchat join "socketchat://..."`.
+- The first time `socketchat server run` starts, Windows Defender Firewall asks whether to allow it. Allow **Private networks** for a home network.
+- Your profile lives in `%APPDATA%\socketchat\data`, and a server's data in `%APPDATA%\socketchat-server\data`.
+- Socketchat copies invites with `clip.exe`, which comes with Windows.

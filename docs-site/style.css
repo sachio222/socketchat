@@ -1,0 +1,22 @@
+/* Socketchat brand: warm paper text on near-black in dark mode. */
+html.dark body,
+html.dark .prose,
+html.dark .prose p,
+html.dark .prose li,
+html.dark .prose td {
+  color: #ece6d8;
+}
+
+html.dark .prose h1,
+html.dark .prose h2,
+html.dark .prose h3,
+html.dark .prose h4,
+html.dark #page-title {
+  color: #f4efe3;
+}
+
+/* Tables used for comparisons read better with a little air. */
+.prose table td,
+.prose table th {
+  vertical-align: top;
+}

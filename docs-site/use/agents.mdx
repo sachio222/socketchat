@@ -1,0 +1,64 @@
+---
+title: "Agents and scripts"
+sidebarTitle: "Agents"
+description: "A script or an AI agent joins a room with an invite link and reads and sends messages through the socketchat command."
+keywords: ["AI agent", "bot", "script", "automation", "CLI", "MCP"]
+---
+
+A script or an AI agent uses Socketchat the same way a person does: it gets an invite link, joins, and then reads and sends messages with the `socketchat` command. Its messages are end-to-end encrypted like everyone else's, and it shows in the room under its own name.
+
+## Give the agent its own profile
+
+An agent needs its own identity, separate from yours. Point `SOCKETCHAT_HOME` at a folder of its own, and pass its display name and passphrase through the environment so no command stops to ask:
+
+```bash
+export SOCKETCHAT_HOME="$HOME/.socketchat-agent"
+export SOCKETCHAT_NAME="Helper"
+export SOCKETCHAT_PASSPHRASE="a long passphrase for the agent"
+```
+
+Only one app can open a profile at a time, so the agent must not share your profile while your chat screen is open. Keep the passphrase out of shell profiles on shared machines; a secrets manager or the agent's own environment is a better place.
+
+## Join a room
+
+In the room, type `/invite` and give the agent the `socketchat://` link. Then, as the agent:
+
+```bash
+socketchat join "socketchat://host:7444/j/..."
+```
+
+When it does not run in an interactive terminal, `join` sets up the profile, joins and exits without opening the chat screen. It prints "Waiting for (name) to let you in." while the request waits; keep your chat screen open so your app lets the agent in. A later `socketchat sync` finishes the join if it was still waiting.
+
+## Read and send
+
+```bash
+socketchat send --group "Book club" "The build passed."
+socketchat log --group "Book club" --limit 20
+socketchat sync
+```
+
+- `send` posts a message to the room named by `--group`.
+- `log` prints the room's recent messages as `Name: text`, and marks them read. When more are unread than `--limit`, it prints the oldest unread ones first. With nothing unread it prints the most recent ones again, so use it to catch up on context.
+- `sync` fetches everything new from every room and prints only what happened since the last sync, such as `[Book club] Ada: hello`, joins and removals.
+
+In 0.5.1, the second and later lines of a message print indented by four spaces. A line that starts at the left edge always begins a new message and names its sender, so one person's text can never pass for another's message.
+
+## A simple loop
+
+```bash
+socketchat log --group "Book club" --limit 50
+while true; do
+  socketchat sync
+  sleep 10
+done
+```
+
+`log` gives the agent the recent conversation once. Each `sync` then prints only new messages. Feed that output to your agent, and call `socketchat send` with its replies.
+
+<Note>
+`send`, `log`, `invite` and `invites` also fetch new messages before they act, but print only their own output. A message fetched that way does not show in the next `sync`. After the agent sends, read the room with `log` to catch anything that arrived in between.
+</Note>
+
+## On the roadmap
+
+An MCP server is planned. MCP (Model Context Protocol) is the standard way AI assistants connect to tools, and it would let an assistant use Socketchat without a shell. Until it ships, the command line above is the way in. See [Contributing](/help/contributing) if you want to help.

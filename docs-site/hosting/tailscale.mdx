@@ -1,0 +1,79 @@
+---
+title: "Host on Tailscale"
+sidebarTitle: "Tailscale"
+description: "Run the server on any machine in your tailnet. No port forwarding and no public IP."
+keywords: ["Tailscale", "tailnet", "MagicDNS", "share machine", "private network"]
+---
+
+[Tailscale](https://tailscale.com) connects your devices into one private network over the internet, called a tailnet. Every device on a tailnet gets an address that starts with `100.` and can reach the others as if they sat on the same Wi-Fi. Nothing opens to the public internet, so you need no port forwarding and no public IP. Tailscale also works when your internet provider blocks incoming connections.
+
+Your friends reach the server in one of two ways: they join your tailnet, or you share only the server machine with their own Tailscale account.
+
+## Set up the server
+
+<Steps>
+  <Step title="Install Tailscale on the server machine">
+    Install Tailscale from [tailscale.com/download](https://tailscale.com/download) on the machine that will run the server, and sign in. It can be any machine: a Mac, a Linux box, a Raspberry Pi or a Windows PC.
+  </Step>
+  <Step title="Find the machine's Tailscale name">
+    MagicDNS is Tailscale's feature that gives each machine a name, so you can use the name instead of the `100.x` address. It is on by default for tailnets made since October 2022. Each machine has a short name, such as `pi`, and a full name, such as `pi.tail1234.ts.net`.
+
+    Find the full name on the machine's page in the [Machines page of the admin console](https://login.tailscale.com/admin/machines), or with the Tailscale command line:
+
+    ```bash
+    tailscale status
+    tailscale ip -4
+    ```
+
+    `tailscale ip -4` prints the machine's `100.x` address. Tailscale's [MagicDNS guide](https://tailscale.com/kb/1081/magicdns) explains names in more detail.
+  </Step>
+  <Step title="Install Socketchat and set up the server with that name">
+    [Install Socketchat](/install) on the machine, then use the full MagicDNS name for `--host`:
+
+    ```bash
+    socketchat server init --host pi.tail1234.ts.net
+    socketchat server run
+    ```
+
+    Use the full name, not the short one. People you share the machine with can only reach it by its full name. You can use the `100.x` address instead, but a shared machine can show up at a different `100.x` address in someone else's tailnet, so the name is the safer choice.
+  </Step>
+  <Step title="Make your own invite and join">
+    ```bash
+    socketchat server invite
+    ```
+
+    On your computer, which must also be on the tailnet, run `socketchat join` with the link it prints. See the [Quick start](/quickstart) for the rest.
+  </Step>
+</Steps>
+
+## Let your friends in
+
+Pick one:
+
+<Tabs>
+  <Tab title="Share the server machine">
+    Sharing gives someone with their own Tailscale account access to one machine and nothing else on your tailnet. It works on every Tailscale plan.
+
+    1. Open the [Machines page](https://login.tailscale.com/admin/machines) and choose **Share** on the server machine.
+    2. Share it by email, or copy an invite link and send it yourself.
+    3. Your friend accepts with their own Tailscale account and keeps the Tailscale app running.
+
+    Your friend can now reach `pi.tail1234.ts.net:7444`. Tailscale's [sharing guide](https://tailscale.com/kb/1084/sharing) covers the details, such as reusable links.
+  </Tab>
+  <Tab title="Invite them to your tailnet">
+    Add your friend as a user of your tailnet from the [Users page](https://login.tailscale.com/admin/users) of the admin console. They install Tailscale, sign in, and can then reach every machine your access rules allow, not only the server. Share the server machine instead if you want them to reach only Socketchat.
+  </Tab>
+</Tabs>
+
+Then send each friend a Socketchat invite as usual, with `/invite` in a room. See [Rooms and invites](/use/rooms-and-invites).
+
+<Note>
+If your tailnet uses access rules (the tailnet policy file), make sure they allow TCP port 7444 to the server machine for the people who need it, including people you shared it with.
+</Note>
+
+## Good to know
+
+- Your friends need Tailscale running whenever they use Socketchat on this server.
+- The server machine needs Tailscale running too, and must stay on.
+- A firewall on the server machine itself can still block port 7444. Tailscale traffic arrives on its own network interface; allow 7444 there if your firewall asks.
+- To keep the server running after you log out, run it as a service. On Linux, see the [systemd unit](/hosting/cloud-server#run-it-as-a-service).

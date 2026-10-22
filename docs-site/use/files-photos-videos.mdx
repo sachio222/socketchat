@@ -1,0 +1,61 @@
+---
+title: "Files, photos and videos"
+description: "Send any file to a room. Photos lose their hidden location and device data before they leave."
+keywords: ["send file", "photos", "videos", "EXIF", "location data", "/save", "/send"]
+---
+
+Socketchat sends any file to a room, and only the people in that room can open it. Your app locks each file with a new key made for that file alone, uploads it to the server in small locked pieces, and tells the room the key inside an encrypted message. The server holds only the locked pieces.
+
+## Send a file
+
+```text
+/send ~/Pictures/beach.jpg
+```
+
+`/send` takes a path to a file, photo or video and sends it to the open room.
+
+## Save a file
+
+```text
+/save beach.jpg
+/save beach.jpg ~/Desktop
+```
+
+`/save` uses the name shown in the chat. Files go to your Downloads folder unless you name another folder. The status line says whose file you saved and where it went, such as "Saved Ana's beach.jpg to ~/Downloads/beach.jpg".
+
+**When two files share a name**, `/save` saves nothing and lists the newest few instead, each with a number, the person who sent it and when. Add the number after a colon to pick one:
+
+```text
+/save beach.jpg:2
+/save "beach day.jpg":2
+```
+
+Put a name with spaces in quotes.
+
+Saving never replaces a file you already have: if `beach.jpg` exists, the new one becomes `beach (1).jpg`. On macOS and Linux, a saved file can be read only by your account. A saved name never starts with a dot and never uses a name Windows keeps for a device, such as `CON`.
+
+## What gets cleaned
+
+Phone photos usually hold hidden details, called EXIF data: the place the photo was taken and the phone that took it. Before a photo leaves, Socketchat writes a new copy that keeps only what a viewer needs to draw the picture, without changing its pixels.
+
+| Kind of file | What happens |
+|---|---|
+| JPEG, PNG, WebP, GIF | Cleaned. Location and device data go, including from thumbnails and the second images some phones add. A JPEG keeps the way the phone was turned, so a sideways photo still shows the right way up. A GIF keeps its frames, timing and loop count. Color profiles go too. |
+| Motion photos | Arrive as still photos. |
+| HEIC, TIFF, camera raw, JPEG XL, JPEG 2000, Photoshop | Cannot be cleaned. Socketchat asks before sending. |
+| Photos over 100 MB, or ones it cannot read | Cannot be cleaned. Socketchat asks before sending. |
+| Videos | Keep their location and device data. Socketchat asks before sending. |
+| Other files, such as PDFs | Sent exactly as they are. Some hold details of their own, such as the author's name. |
+
+When Socketchat asks, it names the file and what it may hold:
+
+> beach.mp4 may still hold the place it was filmed and the phone that made it. Socketchat removes this from photos but cannot remove it from videos. Send it anyway?
+
+Press Y to send it or N to cancel. iPhones often save photos as HEIC; to send a cleaned copy, export it as JPEG first.
+
+## Good to know
+
+- **Receivers keep what you send.** Once a file arrives, people in the room can save it, copy it or forward it. Send only what you are happy for everyone in the room to keep.
+- **No take-backs.** Once a file is sent, you cannot unsend it.
+- **Size limit.** Each server sets a largest file size, 100 MB by default. The server refuses a file that is too big before any of it is uploaded.
+- **Files expire.** The server deletes a file once everyone in the room has saved it, or after its retention period, 30 days by default. After that the sender has to send it again.

@@ -1,0 +1,47 @@
+---
+title: "FAQ"
+description: "Short answers to common questions about Socketchat."
+keywords: ["FAQ", "questions", "phone number", "anonymous", "Raspberry Pi", "Discord alternative"]
+---
+
+<AccordionGroup>
+  <Accordion title="Can the server read my messages?">
+    No. Messages are end-to-end encrypted with MLS (RFC 9420), so the server only passes them along. It can see room rosters, when messages are sent, their sizes and users' IP addresses. Socketchat does not make you anonymous. See [What the server sees](/security/what-the-server-sees).
+  </Accordion>
+  <Accordion title="Do I need a phone number, email or ID?">
+    No. You pick a display name, and a passphrase locks Socketchat's data on your computer. People join with an invite link.
+  </Accordion>
+  <Accordion title="Do I have to run a server?">
+    Someone in your group does. One server can hold many rooms and many people, so friends can share one. A ready-made server you can buy from socketchat.org is planned; see [Hosted by Socketchat](/hosting/hosted-by-socketchat).
+  </Accordion>
+  <Accordion title="What machine can run a server?">
+    A cloud server, a computer at home that stays on, or a small device such as a Raspberry Pi 4 or Zero 2 W on 64-bit Raspberry Pi OS. The server is one program with its data in one folder. A release build used 10 MB of memory while idle on a Mac.
+  </Accordion>
+  <Accordion title="Which systems does the app run on?">
+    macOS (Apple silicon and Intel), Linux (x86_64 and 64-bit ARM, with glibc 2.35 or newer) and 64-bit Windows. It runs in a terminal, including over SSH. See [Install](/install).
+  </Accordion>
+  <Accordion title="Is there a phone app?">
+    Not yet. A phone app is on the roadmap. Today Socketchat is a terminal app.
+  </Accordion>
+  <Accordion title="Can I use one identity on two computers?">
+    Not yet. Each profile lives on one computer. On a second computer, join with a new invite as a separate person.
+  </Accordion>
+  <Accordion title="Can people on different servers chat together?">
+    No. Everyone in a room uses the same server. You can be on several servers at once, each with its own rooms.
+  </Accordion>
+  <Accordion title="Can AI agents use Socketchat?">
+    Yes. A script or an AI agent can join a room with an invite link, read new messages and send messages through the `socketchat` command. An MCP server is planned but not shipped. See [Agents](/use/agents).
+  </Accordion>
+  <Accordion title="How long does an invite link last?">
+    It works once and expires after 24 hours, unless the server's operator sets another time.
+  </Accordion>
+  <Accordion title="Can I delete a message I sent?">
+    No. Once sent, a message or file is in the other members' hands. `/clear` deletes a room's history from your own computer only.
+  </Accordion>
+  <Accordion title="What happens to a room's history when I leave?">
+    Socketchat deletes the room's keys from your computer at once, and its messages once you have read them. Other members keep their own copies.
+  </Accordion>
+  <Accordion title="Is Socketchat open source?">
+    Yes, under your choice of the MIT or Apache-2.0 license. The code is on [GitHub](https://github.com/sachio222/socketchat_v4).
+  </Accordion>
+</AccordionGroup>

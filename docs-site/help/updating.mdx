@@ -1,0 +1,38 @@
+---
+title: "Updating"
+description: "Get the newest Socketchat by running the installer again."
+keywords: ["update", "upgrade", "new version"]
+---
+
+Run the installer again. It downloads the newest release and replaces the program; your profile and rooms stay as they are.
+
+<Tabs>
+  <Tab title="macOS and Linux">
+    ```bash
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+    ```
+  </Tab>
+  <Tab title="Windows">
+    ```powershell
+    powershell -ExecutionPolicy Bypass -c "irm https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.ps1 | iex"
+    ```
+  </Tab>
+</Tabs>
+
+Close the chat screen first, then check the new version:
+
+```bash
+socketchat --version
+```
+
+If you built from source, run the same `cargo install --locked --git ...` command again.
+
+## Updating a server
+
+A server that runs as a service needs one more step: copy the new program into place and restart it. See [Update the server](/hosting/cloud-server#update-the-server). Back up the data folder first.
+
+## Mixing versions
+
+Apps and servers from different releases work together. A newer server serves older apps, and a newer app talks to an older server, so you can update the server before or after your members. When a feature needs a newer server, the app says so and the rest keeps working.
+
+[CHANGELOG.md](https://github.com/sachio222/socketchat_v4/blob/main/CHANGELOG.md) lists what changed in each release.

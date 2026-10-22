@@ -1,0 +1,96 @@
+---
+title: "Commands"
+description: "Every slash command in the chat screen and every socketchat terminal command, with its flags."
+keywords: ["commands", "slash commands", "CLI", "reference", "socketchat join", "socketchat send"]
+---
+
+## Slash commands
+
+Type these in the chat screen's message box. Tab completes a command as you type it.
+
+### Rooms and people
+
+| Command | What it does |
+|---|---|
+| `/new <name>` | Start a new group chat. |
+| `/invite` | Make a one-time link that brings someone into this chat, and copy an invite message. |
+| `/invite --dm` | Make a link that opens a new two-person chat. |
+| `/join <link>` | Use an invite link someone sent you. |
+| `/dm <name>` | Start a two-person chat with someone in this chat. |
+| `/switch [room]` | Open another room. Tab completes the name; with no name, opens the switcher. |
+| `/verify <name>` | Compare safety numbers with someone. |
+| `/name <new>` | Change the name others see for you. |
+| `/rename <name> <new>` | Rename someone on your screen only. |
+| `/invites` | See your open invite links. |
+| `/cancel <number>` | Stop an invite link from the `/invites` list. |
+| `/details` | See this room's admins, size and age. |
+| `/mute` | Hide this room's new-message count. |
+| `/unmute` | Show this room's new-message count again. |
+| `/leave` | Leave this chat and delete its history here. |
+| `/clear` | Delete this room's messages from this computer. |
+
+### Admins
+
+| Command | What it does |
+|---|---|
+| `/kick <name>` | Remove someone. |
+| `/admin <name>` | Make someone an admin. |
+| `/title <name>` | Rename this room for everyone. |
+| `/close` | Close this room for everyone, once the admins agree. |
+| `/keep` | Say no to closing this room. |
+
+### Files
+
+| Command | What it does |
+|---|---|
+| `/send <path>` | Send a file, photo or video. |
+| `/save <file> [folder]` | Save a file someone sent. Use `<file>:<number>` when several files share a name. |
+
+### The app
+
+| Command | What it does |
+|---|---|
+| `/theme [name]` | See or change the colors: `phosphor` or `classic`. |
+| `/mouse [on\|off]` | Turn mouse clicks and scrolling on or off. |
+| `/help` | List every command. |
+| `/about` | See the version and what Socketchat is. |
+| `/quit` | Close Socketchat. |
+
+A name with spaces goes in quotes, as in `/save "beach day.jpg"`.
+
+## Terminal commands
+
+Run these in a terminal. `socketchat --help` and `socketchat <command> --help` print the same list.
+
+| Command | What it does |
+|---|---|
+| `socketchat` | Open the chat screen. With no profile yet, print how to start. |
+| `socketchat join <link> [--new-certificate]` | Use an invite link. The first time, this also sets up your profile. Opens the chat screen when run in a terminal. |
+| `socketchat new <name>` | Start a new group chat. |
+| `socketchat invite --group <name>` | Print an invite link to a room, on one line. |
+| `socketchat invite --dm` | Print a link that opens a new two-person chat. |
+| `socketchat invites [--cancel <number>]` | List your open invite links, or cancel one. |
+| `socketchat send --group <name> <text>...` | Send a message to a room. |
+| `socketchat log --group <name> [--limit <n>]` | Print a room's recent messages, 50 by default, and mark them read. When more are unread than the limit, prints the oldest unread first. |
+| `socketchat sync` | Fetch everything new and print what happened. |
+| `socketchat server init [--host <address>] [--listen <ip:port>] [--data-dir <folder>]` | Set up a server. See [Server settings](/hosting/server-settings). |
+| `socketchat server run [--data-dir <folder>] [--config <file>]` | Run the server until Ctrl-C. |
+| `socketchat server invite [--data-dir <folder>]` | Print a one-time link that registers a new person on this server. |
+| `socketchat --version` | Print the version. |
+
+`--new-certificate` trusts the server certificate in the link in place of the one Socketchat already trusts for that server, after its operator set it up again. See [A certificate-change warning](/help/troubleshooting#a-certificate-change-warning).
+
+`--group` takes a room's name, ignoring upper and lower case. If you are in two rooms with the same name, the command says so.
+
+## Environment variables
+
+| Variable | What it does |
+|---|---|
+| `SOCKETCHAT_HOME` | Use a different profile folder. Useful to run a second identity, such as an agent, on one computer. |
+| `SOCKETCHAT_PASSPHRASE` | The passphrase, so commands do not ask for it. For scripts; never put it in a shell profile on a shared machine. |
+| `SOCKETCHAT_NAME` | The display name to use when `socketchat join` sets up a new profile. |
+| `SOCKETCHAT_THEME` | `phosphor` or `classic` for this run only. |
+
+## Exit codes
+
+Commands exit with 0 on success, 2 when the passphrase does not open the profile, and 1 for any other error. Errors print to standard error.

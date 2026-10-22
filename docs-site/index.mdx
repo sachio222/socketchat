@@ -1,0 +1,53 @@
+---
+title: "Socketchat"
+sidebarTitle: "Introduction"
+description: "End-to-end encrypted group chat for the terminal, on a server you run yourself."
+keywords: ["socketchat", "encrypted chat", "self-hosted chat", "terminal chat", "MLS"]
+---
+
+Socketchat is a group chat that runs in your terminal on macOS, Linux and Windows. You run a small server, invite friends with a link, and talk in rooms that only the people inside can read. No phone number, email or ID is needed. These docs cover Socketchat 0.5.1.
+
+## How it works
+
+Every message is locked on your computer before it leaves, and only the people in the room hold the keys to open it. This is called end-to-end encryption. The server sits in the middle and passes sealed messages along. It stores them until each friend's app collects them, and it never holds a key that can open them.
+
+```mermaid
+flowchart LR
+    A["Your computer<br/>locks the message"] -- "sealed message" --> S["Socketchat server<br/>stores and forwards it,<br/>cannot open it"]
+    S -- "sealed message" --> B["Friend's computer<br/>opens it"]
+    S -- "sealed message" --> C["Another friend<br/>opens it"]
+```
+
+One program, `socketchat`, does both jobs. On your own computer it opens the chat screen. On the machine you pick as the server, `socketchat server` runs the server, with all its data in one folder.
+
+## Who it is for
+
+- **Friends and small groups** who want a private room without handing their messages to a company.
+- **People who like the terminal**, including over SSH. The chat screen fits an 80 by 24 window.
+- **Scripts and AI agents**, which join rooms and send messages through the same command. See [Agents](/use/agents).
+
+## What you get
+
+- Rooms (group chats) and direct messages.
+- Invite links, shown as text and as a QR code, that work once.
+- Safety numbers, so you and a friend can check that nobody sits between you.
+- Files, photos and videos. Photos lose their location and device data before they leave.
+- Admins who can remove people and rename a room. A room closes for everyone once its admins agree.
+- Protection against a future quantum computer, on by default.
+
+## Where to start
+
+<Columns cols={2}>
+  <Card title="Install" icon="download" href="/install">
+    One command on macOS, Linux or Windows.
+  </Card>
+  <Card title="Quick start" icon="rocket" href="/quickstart">
+    From nothing to a room with a friend.
+  </Card>
+  <Card title="Host a server" icon="server" href="/hosting/overview">
+    Pick how your friends will reach you.
+  </Card>
+  <Card title="What the server sees" icon="shield" href="/security/what-the-server-sees">
+    What stays private, in plain words.
+  </Card>
+</Columns>

@@ -1,0 +1,70 @@
+---
+title: "Uninstalling"
+description: "Remove the Socketchat program, your profile and any server data."
+keywords: ["uninstall", "remove", "delete profile"]
+---
+
+Socketchat has no uninstall command. Remove its files by hand, using the lists below.
+
+<Warning>
+Deleting your profile deletes your identity, your room keys and your message history on this computer. It cannot be undone. Leave your rooms first with `/leave` if you want the other members to see you go.
+</Warning>
+
+## The program
+
+<Tabs>
+  <Tab title="macOS and Linux">
+    ```bash
+    rm ~/.local/bin/socketchat
+    ```
+
+    If you built from source, the program is `~/.cargo/bin/socketchat` instead; `cargo uninstall socketchat` removes it. A server set up as a service also has a copy at `/usr/local/bin/socketchat`.
+  </Tab>
+  <Tab title="Windows">
+    In PowerShell:
+
+    ```powershell
+    Remove-Item "$HOME\.local\bin\socketchat.exe"
+    ```
+  </Tab>
+</Tabs>
+
+The installer also added `~/.local/bin` to your PATH. Other tools often install there too, so leave that in place unless you know nothing else uses it. On macOS and Linux, the installer wrote `~/.local/bin/env` and `~/.local/bin/env.fish` and a line that loads them in your shell's startup files, such as `~/.profile`, `~/.bashrc` or `~/.zshrc`. On Windows, it added the folder to your user PATH.
+
+## Your profile
+
+Your profile holds your keys, rooms and messages:
+
+| System | Profile folder |
+|---|---|
+| macOS | `~/Library/Application Support/socketchat` |
+| Linux | `~/.local/share/socketchat` |
+| Windows | `%APPDATA%\socketchat\data` |
+
+Delete that folder to remove them. If you set `SOCKETCHAT_HOME`, the profile is in that folder instead.
+
+## Server data
+
+If you ran a server, its data folder holds its database, certificate and files:
+
+| System | Default server folder |
+|---|---|
+| macOS | `~/Library/Application Support/socketchat-server` |
+| Linux | `~/.local/share/socketchat-server` |
+| Windows | `%APPDATA%\socketchat-server\data` |
+
+A server set up as in [Cloud server](/hosting/cloud-server) keeps its data in `/var/lib/socketchat` instead. Remove that setup with:
+
+```bash
+sudo systemctl disable --now socketchat
+sudo rm /etc/systemd/system/socketchat.service
+sudo systemctl daemon-reload
+sudo rm /usr/local/bin/socketchat
+sudo userdel socketchat
+```
+
+Then delete `/var/lib/socketchat` once you are sure you no longer need a backup. Once the server's data is gone, every room on it is gone for every member.
+
+## Files you saved
+
+Files you saved with `/save` stay where you saved them, usually your Downloads folder.

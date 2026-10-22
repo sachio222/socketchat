@@ -1,0 +1,90 @@
+---
+title: "Install Socketchat"
+sidebarTitle: "Install"
+description: "One command installs Socketchat on macOS, Linux or Windows."
+keywords: ["install", "installer", "macOS", "Linux", "Windows", "Raspberry Pi"]
+---
+
+The installer downloads a ready-made `socketchat` program for your computer and puts it in a folder on your PATH, the list of folders your terminal searches for commands. You do not need Rust or any other library: the encryption code is built into the program.
+
+## Run the installer
+
+<Tabs>
+  <Tab title="macOS">
+    Open Terminal and run:
+
+    ```bash
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+    ```
+
+    The program goes to `~/.local/bin/socketchat`. Works on Apple silicon and Intel Macs.
+  </Tab>
+  <Tab title="Linux">
+    Open a terminal and run:
+
+    ```bash
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+    ```
+
+    The program goes to `~/.local/bin/socketchat`. Ready-made programs cover Intel or AMD (x86_64) and 64-bit ARM (aarch64), which includes a Raspberry Pi 4 or Zero 2 W on 64-bit Raspberry Pi OS. They need glibc 2.35 or newer, which Ubuntu 22.04, Debian 12 and Raspberry Pi OS 12 (Bookworm) have.
+  </Tab>
+  <Tab title="Windows">
+    Open PowerShell and run:
+
+    ```powershell
+    powershell -ExecutionPolicy Bypass -c "irm https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.ps1 | iex"
+    ```
+
+    The program goes to `.local\bin\socketchat.exe` in your user folder, and the installer adds that folder to your PATH. Works on 64-bit Windows on Intel or AMD.
+  </Tab>
+</Tabs>
+
+## Open a new terminal
+
+When it finishes, the installer prints what to do next:
+
+```text
+Socketchat is installed. Open a new terminal, then:
+  socketchat server init                    set up a local server
+  socketchat server run                     start a local server
+  socketchat join '<invite link>'           join a server you were invited to
+  socketchat                                open the chat screen
+For a server friends on other computers can reach, add --host <address> to server init.
+```
+
+The installer adds the folder to your PATH if it was missing, so open a new terminal window for the change to take effect. Then check that the command works:
+
+```bash
+socketchat --version
+```
+
+`socketchat server init` with no `--host` sets up a server only this computer can reach, at `localhost`. For friends on other computers, pick an address first; [Host a server](/hosting/overview) shows how.
+
+Run `socketchat` on its own before you have a profile, and it lists the same commands. A profile is the encrypted folder where Socketchat keeps your keys, rooms and messages on this computer. `socketchat join` makes it the first time you use an invite link.
+
+## Build from source
+
+Build from source on a system the ready-made programs do not cover. Install the Rust toolchain from [rustup.rs](https://rustup.rs). On Linux, also install the OpenSSL headers, which the encrypted local database needs:
+
+```bash
+sudo apt install build-essential pkg-config libssl-dev
+```
+
+Then build and install Socketchat:
+
+```bash
+cargo install --locked --git https://github.com/sachio222/socketchat_v4 socketchat
+```
+
+On Windows, add `--features vendored-openssl` to that command. It builds OpenSSL from source, which needs the Visual Studio C++ build tools and [Strawberry Perl](https://strawberryperl.com). The first build takes several minutes on a fast machine and much longer on a Raspberry Pi. `cargo` puts the program in `~/.cargo/bin/socketchat`.
+
+## Next
+
+<Columns cols={2}>
+  <Card title="Quick start" icon="rocket" href="/quickstart">
+    Set up a server and invite a friend.
+  </Card>
+  <Card title="Got an invite?" icon="link" href="/use/rooms-and-invites#join-with-a-link">
+    Join a room someone invited you to.
+  </Card>
+</Columns>

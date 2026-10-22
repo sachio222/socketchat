@@ -1,0 +1,132 @@
+---
+title: "Rooms and invites"
+description: "Make a room, invite people with a one-time link, verify them, and run the room as an admin."
+keywords: ["rooms", "invite", "invite link", "QR code", "join", "direct message", "verify", "safety number", "admin"]
+---
+
+A room is a group chat. Everyone in it holds the keys to read it, and nobody else does, the server included. People come in only through invite links.
+
+## Make a room
+
+In the chat screen:
+
+```text
+/new Book club
+```
+
+You are the room's first admin. From a terminal, `socketchat new "Book club"` does the same.
+
+## Invite someone
+
+<Steps>
+  <Step title="Make an invite link">
+    Open the room and type:
+
+    ```text
+    /invite
+    ```
+
+    A box shows the link and, when the window is large enough, a QR code. Socketchat also copies an invite message to your clipboard as the box opens:
+
+    ```text
+    Join me on Socketchat, an encrypted chat.
+    1. Install it from https://socketchat.org
+    2. Then run: socketchat join "socketchat://host:7444/j/..."
+    ```
+
+    A line under the link says whether the copy worked. Press C to copy it again.
+  </Step>
+  <Step title="Send it to one person">
+    Paste the message into any channel you trust: a text, an email, a note handed over in person. Each link works once and expires after 24 hours, unless the server's operator set another time. Anyone who has the link can ask to join, so send it to one person only.
+  </Step>
+  <Step title="Your friend joins">
+    Your friend installs Socketchat from [socketchat.org](https://socketchat.org) and runs the line from the message:
+
+    ```bash
+    socketchat join "socketchat://host:7444/j/..."
+    ```
+
+    The first time, it asks for a display name and a passphrase. The quotes keep the link whole in every shell.
+  </Step>
+  <Step title="Your app lets them in">
+    The join request waits on the server until an app in the room lets them in. That is your app, or any admin's, while it is running: the chat screen open, or a `socketchat sync` from a script. Your friend sees "Waiting for (your name) to let you in." until then.
+
+    Once they are in, your friend's app checks that the link came from you and marks you verified. Your app does the same for them.
+  </Step>
+</Steps>
+
+<Tip>
+The copied message works best in a chat app or email. Socketchat copies with your computer's own clipboard program (pbcopy, wl-copy, xclip, xsel or clip.exe). Without one, it asks your terminal to copy, which works in many terminals and over SSH; if pasting finds nothing, select the link in the box and copy it.
+</Tip>
+
+## Join with a link
+
+To join a room or a server someone invited you to, use their link:
+
+```bash
+socketchat join "socketchat://host:7444/j/..."
+```
+
+`socketchat join` also accepts the web form of a link, `https://socketchat.org/join#socketchat://...`. Inside the chat screen, `/join <link>` does the same.
+
+There are two kinds of link:
+
+- **A server invite**, from `socketchat server invite` on the server. It gives you an account on that server, so you can start rooms. Your app says "You are on (server). Start a group with: socketchat new (name)".
+- **A room invite**, from `/invite`. It brings you into one room. It usually gives you an account on the server too, so you can start rooms and direct messages of your own.
+
+Right after you join, the room may say "Waiting for (name) to confirm this invite." The person who invited you confirms it from inside the room, and their app does this by itself the next time it connects. Until then your name stays hidden from the room, and you cannot make invite links or start direct messages from it.
+
+## Direct messages
+
+A direct message is a room for two people.
+
+- `/dm <name>` starts one with someone in the open room.
+- `/invite --dm` makes a link that opens a new two-person chat with whoever uses it.
+
+## Verify someone
+
+The verified mark (`✓`) means your app checked who that person is. It comes from an invite link, or from comparing safety numbers. A safety number is a 60-digit number built from two people's keys: if both screens show the same number, nobody sits between you.
+
+```text
+/verify Ada
+```
+
+Socketchat shows the number and a QR code. Compare them with Ada in person or on a call, and press Y if they match. A matching display name proves nothing on its own; check the number.
+
+<img src="/images/verify.png" alt="Two chat screens side by side, each showing the same 60-digit safety number and QR code." />
+
+## Your invite links
+
+- `/invites` lists the invite links you made that still work.
+- `/cancel <number>` stops the link at that number in the list.
+
+From a terminal: `socketchat invites` and `socketchat invites --cancel <number>`.
+
+## Admins
+
+Admins look after a room. The person who made it is the first.
+
+| Command | What it does |
+|---|---|
+| `/kick <name>` | Remove someone from the room. |
+| `/admin <name>` | Make someone an admin. |
+| `/title <name>` | Rename the room for everyone. The room shows who renamed it. |
+| `/close` | Ask to close the room for everyone. |
+| `/keep` | Say no to closing the room. |
+
+A room closes once its admins agree: every admin when it has up to three, more than half when it has more. A room with one admin closes at once. A request to close stays open for seven days.
+
+## Names
+
+- `/name <new>` changes the name others see for you.
+- `/rename <name> <new>` renames someone on your own screen only.
+
+## Leave a room
+
+`/leave` takes you out of the room and deletes its history from this computer. If you have unread messages, Socketchat shows them first and asks you to type `/leave` again. Other members keep their own copies.
+
+Other room commands:
+
+- `/details` shows the room's admins, how many people are in it and when it was made.
+- `/mute` hides the room's new-message count on your computer, and `/unmute` shows it again. Nobody else sees that you muted it.
+- `/clear` deletes the room's messages and files list from this computer while you stay in it.

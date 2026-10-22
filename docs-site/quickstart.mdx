@@ -1,0 +1,93 @@
+---
+title: "Quick start"
+description: "From nothing to an encrypted room with a friend in a few minutes."
+keywords: ["quick start", "server init", "invite", "join", "first room"]
+---
+
+This page sets up a server, puts you on it, and brings in a friend. You need Socketchat installed on the machine that will be the server and on your own computer. They can be the same computer. See [Install](/install).
+
+<Steps>
+  <Step title="Pick the address your friends will dial">
+    Your friends' apps connect to the server by a name or IP address. Which one depends on how you host:
+
+    | How you host | Address to use |
+    |---|---|
+    | [Tailscale](/hosting/tailscale) | The machine's MagicDNS name, such as `pi.tail1234.ts.net` |
+    | [Same Wi-Fi](/hosting/local-network) | The machine's local IP, such as `192.168.1.20` |
+    | [Port forwarding](/hosting/port-forwarding) | Your public IP or a dynamic DNS name |
+    | [Cloud server](/hosting/cloud-server) | A domain name, such as `chat.example.com` |
+
+    Not sure? Read [Host a server](/hosting/overview) first. It compares the four ways in one table.
+  </Step>
+  <Step title="Set up the server">
+    On the server machine, run `init` with that address:
+
+    ```bash
+    socketchat server init --host chat.example.com
+    ```
+
+    `init` prints the acceptable-use statement, writes a config file, and makes a TLS certificate. TLS is the standard that encrypts the connection to the server, and the certificate lets apps check that they reached your server and no other. Invite links carry the certificate's fingerprint, a short code that identifies it, so nobody copies certificate files between machines.
+  </Step>
+  <Step title="Start the server">
+    ```bash
+    socketchat server run
+    ```
+
+    It prints the address it listens on and the certificate fingerprint. People reach it on TCP port 7444. Leave this terminal open; Ctrl-C stops the server.
+  </Step>
+  <Step title="Make an invite for yourself">
+    In a second terminal on the server machine:
+
+    ```bash
+    socketchat server invite
+    ```
+
+    It prints a one-time `socketchat://` link that registers one person on the server. It expires after 24 hours unless you changed that setting.
+  </Step>
+  <Step title="Join from your computer">
+    On your own computer, use the link. Keep the quotes, so your shell passes the link whole:
+
+    ```bash
+    socketchat join "socketchat://chat.example.com:7444/j/..."
+    ```
+
+    The first time, Socketchat asks for a display name and a passphrase. The passphrase encrypts everything Socketchat keeps on this computer, and nobody can recover it for you. Then the chat screen opens.
+  </Step>
+  <Step title="Start a room and invite a friend">
+    In the chat screen, type:
+
+    ```text
+    /new Friends
+    /invite
+    ```
+
+    `/invite` shows a link and a QR code, and copies an invite message to your clipboard:
+
+    ```text
+    Join me on Socketchat, an encrypted chat.
+    1. Install it from https://socketchat.org
+    2. Then run: socketchat join "socketchat://host:7444/j/..."
+    ```
+
+    Paste it to your friend. Press C to copy it again.
+  </Step>
+  <Step title="Keep your app open while they join">
+    Your friend installs Socketchat and runs the `socketchat join` line from the message. Their request waits on the server until your app lets them in, so keep the chat screen open. Their app checks that the link came from you and marks you verified.
+  </Step>
+</Steps>
+
+From then on, either of you opens the chat screen with:
+
+```bash
+socketchat
+```
+
+<Tip>
+For a server that keeps running after you close the terminal and starts again after a reboot, see [Cloud server](/hosting/cloud-server#run-it-as-a-service).
+</Tip>
+
+## Next
+
+- [The chat screen](/use/chat-screen): panels, keys, the mouse and colors.
+- [Rooms and invites](/use/rooms-and-invites): direct messages, admins, verifying a friend.
+- [Commands](/use/commands): every slash command and terminal command.

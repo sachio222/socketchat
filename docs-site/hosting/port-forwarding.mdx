@@ -1,0 +1,75 @@
+---
+title: "Host at home with port forwarding"
+sidebarTitle: "Port forwarding"
+description: "Run the server on a home computer and let friends anywhere reach it through your router."
+keywords: ["port forwarding", "router", "public IP", "DDNS", "dynamic DNS", "CGNAT", "DuckDNS"]
+---
+
+Your router shares one public IP address, the address the internet sees, among every device in your home. Port forwarding is a router setting that sends incoming connections on one port to one device inside. Forward TCP port 7444 to the computer running Socketchat, and friends anywhere can reach it.
+
+Start with [Same Wi-Fi](/hosting/local-network) to get the server running and give it a fixed local address. Then follow these steps.
+
+## Forward the port
+
+<Steps>
+  <Step title="Give the server a fixed local address">
+    Reserve the server's local IP in your router, as described in [Keep the address from changing](/hosting/local-network#keep-the-address-from-changing). Port forwarding points at that address.
+  </Step>
+  <Step title="Add a port forwarding rule">
+    Routers differ, but the steps look like this:
+
+    1. Open your router's admin page, often at `192.168.1.1` or `192.168.0.1`, or the router maker's phone app.
+    2. Find **Port forwarding**. It may sit under **NAT**, **Firewall**, **Advanced** or **Virtual servers**.
+    3. Add a rule: protocol **TCP**, external port **7444**, internal port **7444**, internal IP the server's local address.
+    4. Save it.
+
+    Use the same port number outside and inside, because invite links carry the port the server listens on.
+  </Step>
+  <Step title="Find your public IP address">
+    Your public IP is shown on your router's status page. You can also ask a website from any device at home:
+
+    ```bash
+    curl https://api.ipify.org
+    ```
+  </Step>
+  <Step title="Set up the server with your public address">
+    Use your public IP, or better, a dynamic DNS name (below):
+
+    ```bash
+    socketchat server init --host myhome.duckdns.org
+    socketchat server run
+    ```
+
+    Allow the firewall prompt on macOS or Windows, as on the [Same Wi-Fi](/hosting/local-network#set-it-up) page.
+  </Step>
+  <Step title="Test from outside">
+    Ask a friend to join with a `socketchat server invite` link, or try from a phone hotspot with Wi-Fi off. Many routers cannot reach their own public address from inside the home, so a test from inside can fail even when everything works.
+  </Step>
+</Steps>
+
+## If your public IP changes
+
+Most home internet plans give you a dynamic IP: the provider can change your public address at any time, often when the router restarts. Members' apps would then dial an address that no longer reaches you.
+
+Dynamic DNS (DDNS) fixes this. A DDNS service gives you a name, such as `myhome.duckdns.org`, and a small program on your router or server tells the service your new address whenever it changes. Use that name for `--host`, and invite links keep working.
+
+- [DuckDNS](https://www.duckdns.org) is free and gives a name under `duckdns.org`.
+- If you own a domain on [Cloudflare](https://www.cloudflare.com), point a name such as `chat.example.com` at your home and keep it updated with a DDNS client that uses the Cloudflare API.
+- Many routers have a built-in DDNS client under **Dynamic DNS**.
+
+Set up the name before you run `socketchat server init`, because invite links carry it.
+
+## If port forwarding does not work: CGNAT
+
+Some internet providers put many homes behind one shared public address. This is called CGNAT (carrier-grade NAT). Behind CGNAT, a port forwarding rule on your router does nothing, because the connection never reaches your router.
+
+To tell whether you are behind it, compare the WAN or internet address on your router's status page with the address `curl https://api.ipify.org` prints:
+
+- **They match:** you have your own public address, and port forwarding can work.
+- **They differ**, or the router's address starts with `100.64.` to `100.127.`: you are probably behind CGNAT.
+
+Behind CGNAT, use [Tailscale](/hosting/tailscale) or a [cloud server](/hosting/cloud-server) instead. Some providers also give you a public address if you ask.
+
+## What this exposes
+
+Port forwarding opens port 7444 on your home address to the whole internet. Everyone who connects to your server, members and anyone else, sees your home's public IP address. The server can also see each member's IP address. If you would rather keep your home address private, use a [cloud server](/hosting/cloud-server) or [Tailscale](/hosting/tailscale).

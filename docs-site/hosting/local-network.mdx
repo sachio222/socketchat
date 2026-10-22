@@ -1,0 +1,78 @@
+---
+title: "Host on your local network"
+sidebarTitle: "Same Wi-Fi"
+description: "Run the server on a computer at home or in the office, for people on the same network."
+keywords: ["local network", "LAN", "Wi-Fi", "local IP", "DHCP reservation", "firewall"]
+---
+
+The quickest way to try Socketchat is on your own network: a computer at home or in the office runs the server, and people on the same Wi-Fi or wired network join it. It costs nothing and needs no router changes.
+
+<Warning>
+This only reaches people on the same network. A friend at their own home cannot connect. For that, use [Tailscale](/hosting/tailscale), [port forwarding](/hosting/port-forwarding) or a [cloud server](/hosting/cloud-server).
+</Warning>
+
+## Set it up
+
+<Steps>
+  <Step title="Find the server's local IP address">
+    Your router gives each device on the network a local IP address, usually starting with `192.168.`, `10.` or `172.16.` to `172.31.`. Find the one for the machine that will run the server:
+
+    <Tabs>
+      <Tab title="macOS">
+        ```bash
+        ipconfig getifaddr en0
+        ```
+
+        `en0` is usually Wi-Fi on a Mac laptop. If it prints nothing, try `en1`, or look in System Settings, Network, then your connection's Details.
+      </Tab>
+      <Tab title="Linux">
+        ```bash
+        ip -4 addr
+        ```
+
+        Look for the `inet` line under your Wi-Fi or Ethernet interface, such as `wlan0` or `eth0`, and skip `127.0.0.1`.
+      </Tab>
+      <Tab title="Windows">
+        ```powershell
+        ipconfig
+        ```
+
+        Look for **IPv4 Address** under your Wi-Fi or Ethernet adapter.
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Set up the server with that address">
+    ```bash
+    socketchat server init --host 192.168.1.20
+    socketchat server run
+    ```
+
+    Replace `192.168.1.20` with the address you found.
+  </Step>
+  <Step title="Allow the connection through the firewall">
+    The first time `socketchat server run` starts, your computer may ask whether to let it accept incoming connections.
+
+    - **macOS:** choose **Allow** when asked whether `socketchat` may accept incoming network connections. If you chose Deny, change it in System Settings, Network, Firewall, Options.
+    - **Windows:** Windows Defender Firewall asks whether to allow `socketchat.exe`. Tick **Private networks** and choose **Allow access**.
+    - **Linux:** most desktop systems have no firewall on by default. If yours uses `ufw`, run `sudo ufw allow 7444/tcp`.
+  </Step>
+  <Step title="Invite people">
+    ```bash
+    socketchat server invite
+    ```
+
+    Join with that link from your own computer, then use `/invite` in a room for each friend. See the [Quick start](/quickstart).
+  </Step>
+</Steps>
+
+## Keep the address from changing
+
+Your router hands out local addresses with DHCP, the protocol that gives devices an address when they connect, and it can give the server a different one next week. Invite links and members' apps keep the old address, so they would stop reaching the server.
+
+A DHCP reservation tells the router to always give the server the same address. Routers differ, but the steps look like this:
+
+1. Open your router's admin page, often at `192.168.1.1` or `192.168.0.1`, or in the router maker's phone app.
+2. Find the list of connected devices or the DHCP settings. It may be called **DHCP reservation**, **Address reservation** or **Static lease**.
+3. Pick the server machine and reserve its current address.
+
+Do this before you invite anyone.

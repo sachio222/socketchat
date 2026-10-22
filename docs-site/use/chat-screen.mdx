@@ -1,0 +1,81 @@
+---
+title: "The chat screen"
+description: "Panels, keys, the mouse, Tab completion and colors."
+keywords: ["chat screen", "TUI", "keyboard shortcuts", "mouse", "theme", "phosphor", "Tab completion"]
+---
+
+Run `socketchat` to open the chat screen. It asks for your passphrase, then shows your rooms. It works in any terminal window of 80 by 24 characters or larger, and over SSH.
+
+<img src="/images/chat.png" alt="The chat screen with three panels: Chats on the left, the open room's messages in the middle, and People on the right, above the message box." />
+
+<Note>This picture shows the classic colors. Socketchat 0.5.1 opens in the phosphor colors by default; see [Colors](#colors).</Note>
+
+## Panels
+
+| Panel | What it shows |
+|---|---|
+| **Chats** | Your rooms, marked `#`, and direct messages, marked `@`. A number shows new messages. |
+| **Messages** | The open room, with times and names. The panel title is the room's name. |
+| **People** | Everyone in the room. `✓` marks someone you verified, and `*` marks an admin. |
+| **Message box** | Where you type messages and commands. The empty box reads "What's on your mind?" with the open room's name. |
+
+The bottom line shows the keys that work right now, and the Socketchat version when the window is wide enough.
+
+## Keys
+
+| Key | What it does |
+|---|---|
+| Enter | Send the message, or run the command. |
+| Tab, Shift-Tab | Move between panels. While you type a command, complete it instead. |
+| Ctrl-K | Open the room switcher. Type to filter, Enter to open. |
+| Up, Down | Pick a room in Chats or a person in People, or scroll the messages. |
+| PgUp, PgDn | Scroll the messages. |
+| Esc | Close a box. |
+| Y, N | Answer a question, such as whether to send a video. Only Y as the first key pressed means yes. |
+| Ctrl-C | Quit. `/quit` does the same. |
+
+## Commands and Tab completion
+
+Type `/` to start a command, and `/help` to see them all. Tab completes a command as you type it, and Tab or Shift-Tab steps through the matches when there are several. Matching commands show on the bottom line, and a grey suggestion after the cursor shows what Tab would add; Right arrow accepts it. `/switch` and Tab complete a room's name, and `/theme` and Tab cycle the color names.
+
+See [Commands](/use/commands) for the full list.
+
+## Pasting
+
+A paste goes into the message box as text, with line breaks shown as `↵`. Nothing is sent or run until you press Enter, so a pasted command never runs by itself. This needs a terminal that marks pastes (bracketed paste), which most do.
+
+## Mouse
+
+The mouse is on by default:
+
+- Click a room in Chats to open it, and click a panel to move to it.
+- Scroll the messages, `/help`, `/invites` and `/details` with the wheel.
+- Boxes have buttons along their bottom edge, such as Yes and No. A click answers only once the box is on screen.
+
+While the mouse is on, hold Shift as you drag to select text (Option or Fn on a Mac). To hand the mouse back to your terminal, type:
+
+```text
+/mouse off
+```
+
+`/mouse on` turns it back on, and `/mouse` says which it is. Socketchat keeps the choice in your profile.
+
+## Colors
+
+Socketchat has two color themes:
+
+- **phosphor**, the default: green on a near-black screen.
+- **classic**: your terminal's own background and colors.
+
+```text
+/theme classic
+/theme phosphor
+```
+
+`/theme` on its own shows the colors in use. Socketchat saves the choice on your computer. To pick a theme for one run only, set `SOCKETCHAT_THEME`:
+
+```bash
+SOCKETCHAT_THEME=classic socketchat
+```
+
+Phosphor uses exact colors when your terminal reports full color support (`COLORTERM` set to `truecolor` or `24bit`), and close 256-color matches otherwise.

@@ -1,0 +1,51 @@
+---
+title: "Your passphrase"
+description: "What the passphrase locks, where your profile lives, and why nobody can recover it."
+keywords: ["passphrase", "password", "profile", "recover", "lost passphrase"]
+---
+
+The first time you run `socketchat join`, Socketchat asks for a passphrase. It locks your profile: the one encrypted folder where Socketchat keeps everything on this computer.
+
+## What it locks
+
+- Your identity key, which proves who you are to the people you chat with.
+- The keys to every room you are in.
+- Your messages, room list, files list and contacts.
+
+Socketchat asks for the passphrase each time it opens your profile. Only one copy of Socketchat can open a profile at a time; a second one says "Socketchat is already open on this profile."
+
+## Nobody can recover it
+
+Your passphrase never leaves your computer, and the server never sees it. There is no reset link and no recovery code. If you forget it, the profile stays locked for good, for you and for everyone else.
+
+Pick something long that you will remember, such as four or five unrelated words, and keep it in a password manager.
+
+## If you forget it
+
+You start again with a fresh profile:
+
+<Steps>
+  <Step title="Move the old profile aside">
+    Rename or move the profile folder, so Socketchat makes a new one:
+
+    | System | Profile folder |
+    |---|---|
+    | macOS | `~/Library/Application Support/socketchat` |
+    | Linux | `~/.local/share/socketchat` |
+    | Windows | `%APPDATA%\socketchat\data` |
+
+    If you set `SOCKETCHAT_HOME`, the profile is in that folder instead.
+  </Step>
+  <Step title="Ask for new invites">
+    Ask a friend in each room for a new `/invite`, and run `socketchat join` with it. Socketchat asks for a display name and a new passphrase.
+  </Step>
+  <Step title="Tidy up the rooms">
+    Ask an admin to remove your old self from each room with `/kick`. Your friends see you as a new person, so compare safety numbers again with `/verify`.
+  </Step>
+</Steps>
+
+Messages from before stay in the locked profile. Your friends still have their own copies.
+
+## Scripts and the passphrase
+
+`SOCKETCHAT_PASSPHRASE` lets a script open a profile without asking. Anyone who can read that variable can open the profile, so never put it in a shell profile on a shared machine. See [Agents](/use/agents).

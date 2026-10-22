@@ -1,0 +1,89 @@
+---
+title: "Server settings and backups"
+sidebarTitle: "Settings and backups"
+description: "The server's config file, where its data lives, how it cleans up old data, and how to back it up."
+keywords: ["socketchat-server.toml", "config", "retention", "backup", "data directory", "limits"]
+---
+
+## Where the server keeps its data
+
+Everything sits in one data folder. `--data-dir` picks it; without it, the server uses a folder under your user's home:
+
+| System | Default data folder |
+|---|---|
+| Linux | `~/.local/share/socketchat-server` |
+| macOS | `~/Library/Application Support/socketchat-server` |
+| Windows | `%APPDATA%\socketchat-server\data` |
+
+The folder holds the database (`server.db` with its `-wal` and `-shm` files), the certificate (`cert.der`) and its private key (`key.der`), the config file `socketchat-server.toml`, and a `files` folder of encrypted file pieces. The server keeps the folder readable by its own account only.
+
+## Server commands
+
+| Command | What it does |
+|---|---|
+| `socketchat server init [--host <address>] [--listen <ip:port>] [--data-dir <folder>]` | Writes the config file and certificate, and prints the acceptable-use statement and the certificate fingerprint. Refuses to run in a folder that already has a certificate. |
+| `socketchat server run [--data-dir <folder>] [--config <file>]` | Runs the server until Ctrl-C. `--config` uses a config file from somewhere else. |
+| `socketchat server invite [--data-dir <folder>]` | Prints a one-time link that registers one new person. Works while the server runs. |
+
+`--host` defaults to `localhost`, which only works on the same machine. `--listen` defaults to `0.0.0.0:7444`, every IPv4 address on port 7444; use `--listen [::]:7444` to listen on IPv6.
+
+## The config file
+
+`socketchat-server.toml` in the data folder holds these settings. The server reads it at start, so restart it after an edit.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `listen` | `0.0.0.0:7444` | Address and port to listen on. |
+| `public_host` | value of `--host` | Name or address in new `socketchat server invite` links. |
+| `data_dir` | the folder from `init` | Where the database, certificate and file pieces live, as a full path. |
+| `retention_days` | `30` | Days the server keeps messages and files nobody has fetched. |
+| `max_file_mb` | `100` | Largest file anyone can send, in megabytes. |
+| `invite_ttl_hours` | `24` | Hours an invite link stays usable. |
+| `members_can_invite` | `true` | Whether members, not only admins, can make room invite links. When `false`, only admins make room links and only you make server invites. |
+| `require_standard_suite` | `false` | When `true`, new rooms must use the standard MLS encryption suite, which has no post-quantum protection. |
+| `max_connections` | `1000` | Most connections served at once. |
+| `max_per_ip` | `256` | Most connections from one address at once. High by default, because a whole office or school can share one address. |
+| `max_accounts_from_room_links` | `100` | New accounts one account's room links may register every two days. People past it still join the room, but need a server invite to start rooms of their own. |
+| `max_room_messages_mb` | `200` | Messages one room may hold while members have not fetched them. |
+| `max_room_files_mb` | `4000` | Files one room may hold. |
+| `max_member_files_mb` | `4000` | Files one member of a room may hold there. |
+| `max_room_welcomes` | `100` | People one room may have waiting to join. |
+| `max_stored_mb` | `8000` | Messages, files and invitations the whole server may hold. Files may use nine tenths of it. Raise it to fit a larger disk. |
+| `max_frame_before_sign_in` | `8192` | Largest request, in bytes, a connection may send before it signs in. |
+| `max_buffered_before_sign_in_mb` | `8` | Memory all connections that have not signed in may use together. Raise it with `max_connections`. |
+
+Megabytes here are 1,000,000 bytes. At a storage limit the server refuses new messages or files with a reason the app shows, until members fetch older ones or they expire.
+
+## What the server cleans up
+
+The server deletes a message once every member's app has it, and a file once every member has saved it. When the last member leaves a room, the server deletes everything it holds for that room at once.
+
+Every hour it also deletes:
+
+- messages and files older than `retention_days`;
+- invite links past their expiry;
+- join requests nobody acted on within 7 days;
+- rooms with no members;
+- uploads that did not finish within 6 hours.
+
+## Back up
+
+<Steps>
+  <Step title="Stop the server">
+    With systemd: `sudo systemctl stop socketchat`. Otherwise press Ctrl-C where it runs.
+  </Step>
+  <Step title="Copy the whole data folder somewhere safe">
+    `key.der` is the certificate's private key, so store the copy where only you can read it.
+  </Step>
+  <Step title="Start the server again">
+    With systemd: `sudo systemctl start socketchat`.
+  </Step>
+</Steps>
+
+Keep `cert.der` and `key.der` above all. Every invite link and every member's app remembers this certificate's fingerprint. If you lose them and set the server up again, each person's app shows the old and new fingerprints and changes nothing until that person accepts the new certificate. Tell everyone to expect it. See [A certificate-change warning](/help/troubleshooting#a-certificate-change-warning).
+
+If you restore to a different folder, change `data_dir` in `socketchat-server.toml` to match.
+
+## Acceptable use
+
+As the operator you answer for what happens on your server. `init` prints the project's [acceptable-use statement](https://github.com/sachio222/socketchat_v4/blob/main/ACCEPTABLE_USE.md); read it before you invite people.

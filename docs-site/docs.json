@@ -1,0 +1,120 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Socketchat",
+  "description": "End-to-end encrypted group chat for the terminal, on a server you run yourself.",
+  "colors": {
+    "primary": "#d6322b",
+    "light": "#e5554e",
+    "dark": "#d6322b"
+  },
+  "background": {
+    "color": {
+      "light": "#f7f4ec",
+      "dark": "#0b0b0d"
+    }
+  },
+  "appearance": {
+    "default": "dark",
+    "strict": false
+  },
+  "fonts": {
+    "heading": {
+      "family": "Bodoni Moda",
+      "weight": 700
+    },
+    "body": {
+      "family": "Jost",
+      "weight": 400
+    }
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "https://socketchat.org"
+  },
+  "favicon": "/favicon.svg",
+  "icons": {
+    "library": "lucide"
+  },
+  "styling": {
+    "codeblocks": "dark"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "socketchat.org",
+        "href": "https://socketchat.org"
+      },
+      {
+        "type": "github",
+        "href": "https://github.com/sachio222/socketchat_v4"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Install",
+      "href": "/install"
+    }
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": ["index", "install", "quickstart"]
+      },
+      {
+        "group": "Host a server",
+        "pages": [
+          "hosting/overview",
+          "hosting/tailscale",
+          "hosting/local-network",
+          "hosting/port-forwarding",
+          "hosting/cloud-server",
+          "hosting/hosted-by-socketchat",
+          "hosting/server-settings"
+        ]
+      },
+      {
+        "group": "Use Socketchat",
+        "pages": [
+          "use/chat-screen",
+          "use/rooms-and-invites",
+          "use/files-photos-videos",
+          "use/commands",
+          "use/agents"
+        ]
+      },
+      {
+        "group": "Security",
+        "pages": [
+          "security/what-the-server-sees",
+          "security/encryption",
+          "security/passphrase",
+          "security/reporting"
+        ]
+      },
+      {
+        "group": "Help",
+        "pages": [
+          "help/troubleshooting",
+          "help/updating",
+          "help/uninstalling",
+          "help/faq",
+          "help/contributing"
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/sachio222/socketchat_v4",
+      "website": "https://socketchat.org"
+    }
+  },
+  "seo": {
+    "metatags": {
+      "og:site_name": "Socketchat docs"
+    }
+  }
+}

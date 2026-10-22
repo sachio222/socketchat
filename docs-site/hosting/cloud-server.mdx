@@ -1,0 +1,125 @@
+---
+title: "Host on a cloud server"
+sidebarTitle: "Cloud server (VPS)"
+description: "Run an always-on Socketchat server on a small Linux VPS with your own domain name."
+keywords: ["VPS", "cloud server", "Hetzner", "DigitalOcean", "systemd", "ufw", "DNS A record"]
+---
+
+A VPS (virtual private server) is a small Linux machine you rent from a cloud provider by the month. It stays on, has its own public IP address, and keeps your home address out of the picture. The smallest plan most providers offer is enough to start.
+
+You need:
+
+- a Linux VPS from any provider, such as [Hetzner](https://www.hetzner.com/cloud) or [DigitalOcean](https://www.digitalocean.com). Pick Ubuntu 22.04 or newer, or Debian 12 or newer;
+- a domain name you control, such as `example.com`;
+- SSH access to the VPS.
+
+## Set it up
+
+<Steps>
+  <Step title="Point a name at the server">
+    In your domain's DNS settings, add an **A record**: a DNS entry that points a name at an IPv4 address.
+
+    | Type | Name | Value |
+    |---|---|---|
+    | A | `chat` | your VPS's public IPv4 address |
+
+    That makes `chat.example.com` reach the VPS. Changes can take a few minutes to spread. Check with `ping chat.example.com` from your own computer.
+  </Step>
+  <Step title="Open port 7444">
+    Allow incoming TCP on port 7444 in two places:
+
+    - **On the VPS**, if it runs `ufw`:
+
+      ```bash
+      sudo ufw allow 7444/tcp
+      ```
+
+      If you turn `ufw` on for the first time, allow SSH first with `sudo ufw allow OpenSSH`, or you lock yourself out.
+    - **In the provider's firewall**, often called a cloud firewall or security group, if your VPS has one. Add an inbound rule for TCP port 7444.
+  </Step>
+  <Step title="Install Socketchat">
+    On the VPS:
+
+    ```bash
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+    ```
+
+    The installer puts the program in `~/.local/bin/socketchat`.
+  </Step>
+  <Step title="Make a user and a data folder for the server">
+    Run the server as its own user, with its data in `/var/lib/socketchat`:
+
+    ```bash
+    sudo useradd --system --home-dir /var/lib/socketchat --shell /usr/sbin/nologin socketchat
+    sudo install -d -o socketchat -g socketchat -m 700 /var/lib/socketchat
+    sudo install -m 755 ~/.local/bin/socketchat /usr/local/bin/socketchat
+    ```
+  </Step>
+  <Step title="Set up the server with your domain name">
+    ```bash
+    sudo -u socketchat socketchat server init --data-dir /var/lib/socketchat --host chat.example.com
+    ```
+
+    `init` writes `socketchat-server.toml`, makes the certificate and prints its fingerprint.
+  </Step>
+</Steps>
+
+## Run it as a service
+
+systemd is the program that starts and watches services on most Linux systems. This unit comes from the project's server guide. Save it as `/etc/systemd/system/socketchat.service`:
+
+```ini /etc/systemd/system/socketchat.service
+[Unit]
+Description=socketchat server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=socketchat
+Group=socketchat
+ExecStart=/usr/local/bin/socketchat server run --data-dir /var/lib/socketchat
+Restart=on-failure
+KillSignal=SIGINT
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/socketchat
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`KillSignal=SIGINT` sends the same signal as Ctrl-C, which the server handles by closing connections and stopping cleanly. Start it, then make your own invite:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now socketchat
+sudo -u socketchat socketchat server invite --data-dir /var/lib/socketchat
+```
+
+Join with that link from your own computer, as in the [Quick start](/quickstart). `journalctl -u socketchat` shows the address and certificate fingerprint the server printed at start.
+
+## Update the server
+
+<Steps>
+  <Step title="Get the new release">
+    Run the installer again on the VPS. It replaces `~/.local/bin/socketchat` with the newest release.
+  </Step>
+  <Step title="Back up the data folder">
+    See [Back up](/hosting/server-settings#back-up).
+  </Step>
+  <Step title="Swap the program and restart">
+    ```bash
+    sudo systemctl stop socketchat
+    sudo install -m 755 ~/.local/bin/socketchat /usr/local/bin/socketchat
+    sudo systemctl start socketchat
+    ```
+  </Step>
+</Steps>
+
+Servers and apps from different releases work together, so you can update the server before or after your members. A feature that needs a newer server says so in the app and leaves the rest working.
+
+## Next
+
+[Server settings and backups](/hosting/server-settings) covers the config file, limits, cleanup of old data and backups.

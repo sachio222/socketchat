@@ -1,0 +1,37 @@
+---
+title: "What the server sees"
+description: "The server passes sealed messages along. What it can and cannot see, in plain words."
+keywords: ["privacy", "metadata", "server", "end-to-end encryption", "what the server sees"]
+---
+
+The server can never read your messages, but it can see room rosters, when a message is sent, and can read IP addresses of users. It cannot see what was written or sent. It keeps all messages private, but does not make you anonymous.
+
+This holds whoever runs the server: you, a friend, or a company you rent it from.
+
+## What the server never sees
+
+- Message text and file contents.
+- Display names and room names.
+- Any key that can open messages or files.
+- The secret part of an invite link. It sits after the `#` in the link, and apps never send it to the server.
+
+## What the server does see
+
+- **Room rosters.** For each room, a list of random keys, one per member, so it knows where to deliver each sealed message. A person gets a fresh random key in every room, so the server's records do not tie one person's rooms together.
+- **Timing and size.** When each sealed message or file moves, and how big it is.
+- **IP addresses** of the apps that connect.
+- **Changes to who is in a room**, such as someone joining or an admin removing someone, so it can check that only admins make admin changes.
+
+## What stays on your computer
+
+Your messages, keys and room list live in one profile on your computer, encrypted with your passphrase. See [Your passphrase](/security/passphrase).
+
+When you leave a room, Socketchat deletes the room's keys from your computer at once, and its messages once you have read them. When a room closes or you are removed, the same happens as soon as your app learns of it. After 30 days, Socketchat deletes a finished room's messages even if they were never read. Deletion happens in each person's own app, so other members keep their own copies.
+
+## What encryption cannot do
+
+- **People in the room keep what you send.** They can save, copy, screenshot or forward it.
+- **It does not make you anonymous.** Whoever runs the server can see the IP addresses and timing above. If that matters to you, run the server yourself, or reach it through a network you trust.
+- **An unlocked computer is open.** Someone who uses your computer while Socketchat is open, or who learns your passphrase, can read what you can.
+
+For the full technical description, see [SECURITY.md](https://github.com/sachio222/socketchat_v4/blob/main/SECURITY.md) in the repository.
