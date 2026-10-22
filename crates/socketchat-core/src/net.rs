@@ -153,7 +153,7 @@ async fn open(
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port)))
         .await
         .map_err(|_| NetError::Timeout)?
-        .map_err(|e| NetError::Io(e.to_string()))?;
+        .map_err(|e| NetError::Io(io_reason(&e)))?;
     let _ = tcp.set_nodelay(true);
     let seen = Arc::new(Mutex::new(None));
     let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -189,7 +189,7 @@ async fn open(
         .map_err(|e| NetError::Unexpected(e.to_string()))?;
     write_frame(&mut wr, &hello)
         .await
-        .map_err(|e| NetError::Io(e.to_string()))?;
+        .map_err(|e| NetError::Io(io_reason(&e)))?;
     let mut dec = FrameDecoder::default();
     let mut buf = vec![0u8; 16 * 1024];
     let first = loop {
@@ -202,7 +202,7 @@ async fn open(
         let n = tokio::time::timeout(CONNECT_TIMEOUT, rd.read(&mut buf))
             .await
             .map_err(|_| NetError::Timeout)?
-            .map_err(|e| NetError::Io(e.to_string()))?;
+            .map_err(|e| NetError::Io(io_reason(&e)))?;
         if n == 0 {
             return Err(NetError::Disconnected);
         }
@@ -537,5 +537,64 @@ mod tests {
             .expect("the Hello stayed in the writer's buffer")
             .unwrap();
         assert_eq!(got, hello);
+    }
+}
+
+/// Why a connection failed, in the same plain words on every system: a
+/// refused connection reads "connection refused" on Windows too. Other
+/// reasons keep the system's text without its error number or full stop.
+pub(crate) fn io_reason(e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    let plain = match e.kind() {
+        ErrorKind::ConnectionRefused => Some("connection refused"),
+        ErrorKind::ConnectionReset => Some("the connection was reset"),
+        ErrorKind::ConnectionAborted => Some("the connection was closed"),
+        ErrorKind::TimedOut => Some("it took too long to answer"),
+        ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => {
+            Some("that address can't be reached from this network")
+        }
+        _ => None,
+    };
+    if let Some(p) = plain {
+        return p.to_string();
+    }
+    let text = e.to_string();
+    let mut s = match text.rfind(" (os error ") {
+        Some(i) if text.ends_with(')') => &text[..i],
+        _ => text.as_str(),
+    };
+    s = s.trim_end().trim_end_matches('.');
+    let mut c = s.chars();
+    match c.next() {
+        Some(first) => first.to_lowercase().chain(c).collect(),
+        None => "no reason given".into(),
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::io_reason;
+    use std::io::{Error, ErrorKind};
+
+    /// Each system words a refused connection its own way; people see the
+    /// same plain reason everywhere.
+    #[test]
+    fn a_refused_connection_reads_the_same_on_every_system() {
+        for text in [
+            "Connection refused (os error 61)",
+            "Connection refused (os error 111)",
+            "No connection could be made because the target machine actively refused it. (os error 10061)",
+        ] {
+            let e = Error::new(ErrorKind::ConnectionRefused, text);
+            assert_eq!(io_reason(&e), "connection refused", "{text}");
+        }
+    }
+
+    /// A reason with no plain wording keeps the system's text, without the
+    /// error number or a closing full stop.
+    #[test]
+    fn other_reasons_lose_the_error_number_and_full_stop() {
+        let e = Error::other("Something odd happened. (os error 99)");
+        assert_eq!(io_reason(&e), "something odd happened");
     }
 }
