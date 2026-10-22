@@ -201,8 +201,9 @@ async fn forgetting_the_newest_server_moves_new_rooms_back() {
 }
 
 /// The profile's own files, each with its contents and, on Unix, its
-/// mode. SQLite's database and log files change with every write, so only
-/// their names count.
+/// mode. SQLite's database and log files change with every write, and the
+/// open profile holds the lock file locked (Windows refuses to read it), so
+/// only their names count.
 fn profile_files(c: &TestClient) -> Vec<(String, Option<Vec<u8>>, u32)> {
     let mut out: Vec<_> = std::fs::read_dir(c.dir.path())
         .unwrap()
@@ -214,7 +215,8 @@ fn profile_files(c: &TestClient) -> Vec<(String, Option<Vec<u8>>, u32)> {
                 std::os::unix::fs::PermissionsExt::mode(&e.metadata().unwrap().permissions());
             #[cfg(not(unix))]
             let mode = 0;
-            let body = (!name.contains(".db")).then(|| std::fs::read(e.path()).unwrap());
+            let body =
+                (!name.contains(".db") && name != "lock").then(|| std::fs::read(e.path()).unwrap());
             (name, body, mode)
         })
         .filter(|(name, _, _)| !name.ends_with("-wal") && !name.ends_with("-shm"))
