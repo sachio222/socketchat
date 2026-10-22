@@ -2,6 +2,12 @@
 
 Each release of socketchat has a section here. Version numbers follow [Semantic Versioning](https://semver.org): the first number changes when something stops working the old way, the second for new features, the third for fixes.
 
+## Unreleased
+
+### Fixed
+
+- **Server errors on Windows**: a server that refuses the connection now reads "connection refused" on Windows too, the same as on macOS and Linux, and the message no longer ends in two full stops.
+
 ## 0.5.1
 
 This release adds a list of the servers you use, mouse support, Tab completion for commands and a new color theme. It also fixes security problems that a review of Socketchat's code found. Apps and servers on 0.4.0 and 0.5.0 still work with 0.5.1; "Upgrading" at the end lists what changes for them.
