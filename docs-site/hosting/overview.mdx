@@ -34,7 +34,7 @@ A ready-made server you can buy from socketchat.org is planned. See [Hosted by S
 socketchat server init --host <address>
 ```
 
-The address must be a host name or an IP address. A host name uses letters, digits, hyphens and dots. Write a name in another alphabet in its `xn--` form (punycode), as DNS stores it.
+The address must be a host name or an IP address. A host name uses letters, digits, hyphens, underscores and dots. Write a name in another alphabet in its `xn--` form (punycode), as DNS stores it.
 
 <Warning>
 `init` makes the server's certificate, and every invite link and every member's app remembers its fingerprint. Back up the data folder once the server works. If you lose the certificate and run `init` again, everyone has to accept a new one. See [Server settings and backups](/hosting/server-settings#back-up).
