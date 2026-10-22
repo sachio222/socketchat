@@ -1,0 +1,76 @@
+---
+title: "How Socketchat works"
+sidebarTitle: "How it works"
+description: "Every Socketchat message goes through a server. One person runs it, and everyone else only needs the app and an invite link."
+keywords: ["how it works", "server", "app", "do I need a server", "IP address", "localhost", "invite link", "peer to peer"]
+---
+
+Two Socketchat apps never connect to each other. Each one connects to a server that one person in your group runs, so you cannot reach a friend by typing their computer's IP address. This page shows the two pieces, who sets up which, and the mistakes that most often stop people on day one.
+
+## The two pieces
+
+Socketchat has two pieces, and both come in one program, `socketchat`.
+
+- The **server** is a program that stays running on one computer and passes sealed messages between people. Commands that start with `socketchat server` set it up and run it.
+- The **app** is the chat screen you type in. Plain `socketchat` opens it, and it connects to a server.
+
+## Why there has to be a server
+
+Every message goes from your app to the server, and from the server to each friend's app:
+
+```text Every message goes through the server
+ Your app            Friend's app
+    |                     ^
+    | sealed              | sealed
+    | message             | message
+    v                     |
+ +---------------------------+
+ |     Socketchat server     |
+ |  passes it on, and can't  |
+ |  open it                  |
+ +---------------------------+
+```
+
+The server also holds messages for anyone whose app is closed, and hands them over when that app connects again. Apps have no way to dial each other. An IP address is the number that identifies a computer on a network, such as `192.168.1.20`, and Socketchat has nowhere to type one in to reach a friend. Both of you connect to the same server instead.
+
+## Who runs the server
+
+One person in the group runs the server, on a computer that stays on and that everyone can reach. That can be a computer at home, a small device such as a Raspberry Pi, or a cloud server rented by the month. Everyone else only needs the app. The person who runs the server usually chats too, often on the same computer.
+
+Apps find the server by its **host**: the name or IP address they dial, such as `chat.example.com` or `192.168.1.20`. They connect on **port** 7444. A port is a numbered door on a computer that one program listens on. [Host a server](/hosting/overview) compares the ways to make the host reachable from your friends' computers.
+
+## How people get in
+
+People join with an **invite link**: a one-time `socketchat://` link that tells an app which server to dial and proves the person was invited.
+
+1. The person who runs the server makes a link with `socketchat server invite`, and joins with it from their own app.
+2. In the app, they start a room with `/new` and make a link for each friend with `/invite`.
+3. Each friend runs `socketchat join "<link>"` with the link they got.
+
+After that, rooms and `/invite` handle the rest. Anyone in a room can invite more people, unless the server's owner allows only admins to.
+
+## What the server cannot see
+
+Each message is sealed on the sender's computer, so the server passes it along without being able to open it; [What the server sees](/security/what-the-server-sees) lists what it does see.
+
+## Which part do I set up?
+
+<Columns cols={2}>
+  <Card title="I'm starting a group" icon="server" href="/quickstart#on-the-server-computer">
+    Install Socketchat, run a server, then join it from the app and invite your friends.
+  </Card>
+  <Card title="A friend invited me" icon="mail" href="/quickstart#on-each-person’s-computer-the-app">
+    Install Socketchat, then run `socketchat join` with their link. You do not need a server.
+  </Card>
+</Columns>
+
+## Common mistakes
+
+| Mistake | What to do |
+|---|---|
+| Typing each other's IP addresses | Apps only talk to a server. One of you runs a server, and both of you join it with invite links. |
+| Both people running their own server | Two servers are two separate places, and rooms on one never reach the other. Keep one server; the other person only joins it. |
+| The server computer goes to sleep | A sleeping computer runs no server, so messages stop for everyone. Turn off sleep on that computer, or use a [cloud server](/hosting/cloud-server). |
+| `localhost` as the host when friends are on other computers | `localhost` means "this same computer", so a link with it works only on the server computer. Set up the server with `socketchat server init --host <address>`, using an address your friends can reach. |
+
+If you already set up a server with `localhost`, change `public_host` in its config file, restart it and make new invite links. See [Server settings](/hosting/server-settings#the-config-file).

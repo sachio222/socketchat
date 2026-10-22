@@ -1,51 +1,74 @@
 ---
 title: "Quick start"
-description: "From nothing to an encrypted room with a friend in a few minutes."
-keywords: ["quick start", "server init", "invite", "join", "first room"]
+description: "Set up a server on one computer, join it with the app on each person's computer, and start a room."
+keywords: ["quick start", "server init", "server run", "invite", "join", "first room", "same computer"]
 ---
 
-This page sets up a server, puts you on it, and brings in a friend. You need Socketchat installed on the machine that will be the server and on your own computer. They can be the same computer. See [Install](/install).
+Socketchat has two pieces: a server that passes messages along, and the app you chat in. One person runs the server; everyone, that person included, uses the app. If this is new to you, read [How Socketchat works](/how-it-works) first.
+
+- **Starting a group?** Do [On the server computer](#on-the-server-computer), then [On each person's computer](#on-each-person’s-computer-the-app).
+- **A friend invited you?** Skip to [On each person's computer](#on-each-person’s-computer-the-app). You do not need a server.
+
+## On the server computer
+
+Do this once, on the computer that will stay on and run the server.
 
 <Steps>
+  <Step title="Install Socketchat">
+    The same program runs the server and the app. See [Install](/install).
+  </Step>
   <Step title="Pick the address your friends will dial">
-    Your friends' apps connect to the server by a name or IP address. Which one depends on how you host:
+    Your friends' apps reach the server by its host: a name or IP address. Which one depends on how you host:
 
-    | How you host | Address to use |
+    | How you host | Host to use |
     |---|---|
-    | [Tailscale](/hosting/tailscale) | The machine's MagicDNS name, such as `pi.tail1234.ts.net` |
-    | [Same Wi-Fi](/hosting/local-network) | The machine's local IP, such as `192.168.1.20` |
+    | [Same Wi-Fi](/hosting/local-network) | The computer's local IP, such as `192.168.1.20` |
     | [Port forwarding](/hosting/port-forwarding) | Your public IP or a dynamic DNS name |
     | [Cloud server](/hosting/cloud-server) | A domain name, such as `chat.example.com` |
+    | [Tailscale](/hosting/vpn/tailscale) | The computer's MagicDNS name, such as `pi.tail1234.ts.net` |
+    | [WireGuard](/hosting/vpn/wireguard) | The server's WireGuard address, such as `10.8.0.1` |
 
-    Not sure? Read [Host a server](/hosting/overview) first. It compares the four ways in one table.
+    Not sure? [Host a server](/hosting/overview) compares the ways in one table.
   </Step>
   <Step title="Set up the server">
-    On the server machine, run `init` with that address:
+    `init` writes the server's settings and makes its certificate. Run it with your host:
 
     ```bash
     socketchat server init --host chat.example.com
     ```
 
-    `init` prints the acceptable-use statement, writes a config file, and makes a TLS certificate. TLS is the standard that encrypts the connection to the server, and the certificate lets apps check that they reached your server and no other. Invite links carry the certificate's fingerprint, a short code that identifies it, so nobody copies certificate files between machines.
+    It prints the acceptable-use statement and the certificate fingerprint. The certificate lets apps check that they reached your server and no other, and invite links carry its fingerprint, a short code that identifies it. Without `--host`, the host is `localhost`, which only works on this same computer.
   </Step>
   <Step title="Start the server">
+    `run` keeps the server going so apps can connect:
+
     ```bash
     socketchat server run
     ```
 
-    It prints the address it listens on and the certificate fingerprint. People reach it on TCP port 7444. Leave this terminal open; Ctrl-C stops the server.
+    It prints "Socketchat server listening on" with the address and port, then the certificate fingerprint. Apps connect on TCP port 7444. Leave this terminal open; Ctrl-C stops the server.
   </Step>
-  <Step title="Make an invite for yourself">
-    In a second terminal on the server machine:
+  <Step title="Make your own invite link">
+    You need a link to join your own server. In a second terminal on this computer:
 
     ```bash
     socketchat server invite
     ```
 
-    It prints a one-time `socketchat://` link that registers one person on the server. It expires after 24 hours unless you changed that setting.
+    It prints a one-time `socketchat://` link that registers one person. It expires after 24 hours unless you changed that setting. Use it in the next part, on whichever computer you chat from.
   </Step>
-  <Step title="Join from your computer">
-    On your own computer, use the link. Keep the quotes, so your shell passes the link whole:
+</Steps>
+
+## On each person's computer (the app)
+
+Everyone does this, including the person who runs the server.
+
+<Steps>
+  <Step title="Install Socketchat">
+    See [Install](/install). The app is the same program.
+  </Step>
+  <Step title="Join with your invite link">
+    The link tells your app which server to dial and proves you were invited. Keep the quotes, so your shell passes the link whole:
 
     ```bash
     socketchat join "socketchat://chat.example.com:7444/j/..."
@@ -53,15 +76,27 @@ This page sets up a server, puts you on it, and brings in a friend. You need Soc
 
     The first time, Socketchat asks for a display name and a passphrase. The passphrase encrypts everything Socketchat keeps on this computer, and nobody can recover it for you. Then the chat screen opens.
   </Step>
-  <Step title="Start a room and invite a friend">
-    In the chat screen, type:
+  <Step title="Open the chat screen any time after">
+    ```bash
+    socketchat
+    ```
 
+    It asks for your passphrase and shows your rooms.
+  </Step>
+</Steps>
+
+## Start a room and invite friends
+
+The person who started the group does this in the chat screen.
+
+<Steps>
+  <Step title="Start a room and make a link">
     ```text
     /new Friends
     /invite
     ```
 
-    `/invite` shows a link and a QR code, and copies an invite message to your clipboard:
+    `/new` starts a room, and `/invite` makes a one-time link into it. The invite box shows the link and a QR code, and copies an invite message to your clipboard:
 
     ```text
     Join me on Socketchat, an encrypted chat.
@@ -69,22 +104,25 @@ This page sets up a server, puts you on it, and brings in a friend. You need Soc
     2. Then run: socketchat join "socketchat://host:7444/j/..."
     ```
 
-    Paste it to your friend. Press C to copy it again.
+    Paste it to one friend. Press C to copy it again, and run `/invite` again for each friend.
   </Step>
   <Step title="Keep your app open while they join">
-    Your friend installs Socketchat and runs the `socketchat join` line from the message. Their request waits on the server until your app lets them in, so keep the chat screen open. Their app checks that the link came from you and marks you verified.
+    Your friend follows [On each person's computer](#on-each-person’s-computer-the-app) with that link. Their request waits on the server until your app lets them in, so keep the chat screen open. Their app checks that the link came from you and marks you verified.
   </Step>
 </Steps>
 
-From then on, either of you opens the chat screen with:
+## Server and app on one computer
 
-```bash
-socketchat
-```
+The person who starts a group often chats on the computer that runs the server. That works with two terminal windows open side by side:
 
-<Tip>
-For a server that keeps running after you close the terminal and starts again after a reboot, see [Cloud server](/hosting/cloud-server#run-it-as-a-service).
-</Tip>
+| Terminal | Command | Why |
+|---|---|---|
+| First | `socketchat server run` | Keeps the server running. Leave it open. |
+| Second | `socketchat server invite` | Makes your own link. |
+| Second | `socketchat join "<link>"` | Joins your server with the app and opens the chat screen. |
+| Second, later | `socketchat` | Opens the chat screen again. |
+
+Closing the first terminal stops the server for everyone. To keep it running after you close the terminal and start it again after a reboot, run it as a service; see [Cloud server](/hosting/cloud-server#run-it-as-a-service).
 
 ## Next
 

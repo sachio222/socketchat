@@ -1,5 +1,5 @@
 ---
-title: "Socketchat"
+title: "Introduction"
 sidebarTitle: "Introduction"
 description: "End-to-end encrypted group chat for the terminal, on a server you run yourself."
 keywords: ["socketchat", "encrypted chat", "self-hosted chat", "terminal chat", "MLS"]
@@ -18,7 +18,7 @@ flowchart LR
     S -- "sealed message" --> C["Another friend<br/>opens it"]
 ```
 
-One program, `socketchat`, does both jobs. On your own computer it opens the chat screen. On the machine you pick as the server, `socketchat server` runs the server, with all its data in one folder.
+One program, `socketchat`, does both jobs. On your own computer it opens the chat screen. On the machine you pick as the server, `socketchat server` runs the server, with all its data in one folder. Apps never connect to each other directly, so every group needs one server. [How Socketchat works](/how-it-works) explains who runs it and who only needs the app.
 
 ## Who it is for
 

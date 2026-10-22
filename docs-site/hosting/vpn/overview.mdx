@@ -1,0 +1,34 @@
+---
+title: "Tailscale or WireGuard?"
+sidebarTitle: "Tailscale or WireGuard?"
+mode: "wide"
+description: "Both put your server and your friends on a private network, so nothing opens to the internet. How they differ, and which to pick."
+keywords: ["VPN", "private network", "Tailscale", "WireGuard", "tailnet", "CGNAT", "compare"]
+---
+
+<Info>New to this? Read [How Socketchat works](/how-it-works) first.</Info>
+
+A private network, often called a VPN, links a few computers over the internet so they reach each other as if they shared one Wi-Fi network, and nobody else can reach them. Run the Socketchat server inside one, and your friends' apps reach it there, so port 7444 never opens to the internet. [WireGuard](https://www.wireguard.com) is free, open-source software that makes encrypted links between computers. [Tailscale](https://tailscale.com/kb/1151/what-is-tailscale) is a service built on WireGuard that does the setup for you: you sign in, and it hands out the keys and addresses. Its private network is called a tailnet.
+
+Two terms help with the table below. UDP is a simple way of sending data over the internet, which WireGuard uses. CGNAT (carrier-grade NAT) is when an internet provider puts many homes behind one shared public address, so nothing from outside can connect in to your home.
+
+## How they compare
+
+| | [Tailscale](/hosting/vpn/tailscale) | [WireGuard](/hosting/vpn/wireguard) |
+|---|---|---|
+| **Setup effort** | Low: install an app on each computer and sign in. | Medium: make keys and write a config file for the server and for each friend. |
+| **Accounts needed** | A Tailscale account for you and for each friend, signed in through an existing account such as Google, Microsoft or GitHub. | None. |
+| **Who runs the coordination** | Tailscale's coordination server hands out keys and addresses. When two computers cannot connect directly, Tailscale's [relay servers](https://tailscale.com/kb/1232/derp-servers) carry the encrypted traffic. | You do. You write every config and hand it out yourself. |
+| **What needs a reachable port** | None. | One UDP port on the server, 51820 by default. |
+| **Adding or removing a friend** | Share the server computer from Tailscale's admin console, or remove the share. | Add or delete the friend's entry in the server's config, then reload it. Adding one also means sending them a config file. |
+| **Cost** | The [Personal plan](https://tailscale.com/pricing) is free for non-commercial use, for up to 6 users. | Free. A cloud server to run it on costs a small monthly fee. |
+| **Works behind CGNAT** | Yes, on both ends. | Friends behind CGNAT are fine. The server must not be behind it, so put it on a cloud server. |
+| **What friends install** | The Tailscale app, signed in. | The [WireGuard app](https://www.wireguard.com/install/) and the config file you send them. |
+| **Best for** | Groups who want it working in minutes, or already use Tailscale. | People who want no outside company and no accounts, and are at ease editing config files. |
+
+Pick Tailscale for the quickest setup; pick WireGuard when you want nothing between your friends and your server but software you run.
+
+## Next
+
+- [Host on Tailscale](/hosting/vpn/tailscale)
+- [Host on WireGuard](/hosting/vpn/wireguard)

@@ -5,6 +5,8 @@ description: "Run the server on a home computer and let friends anywhere reach i
 keywords: ["port forwarding", "router", "public IP", "DDNS", "dynamic DNS", "CGNAT", "DuckDNS"]
 ---
 
+<Info>New to this? Read [How Socketchat works](/how-it-works) first.</Info>
+
 Your router shares one public IP address, the address the internet sees, among every device in your home. Port forwarding is a router setting that sends incoming connections on one port to one device inside. Forward TCP port 7444 to the computer running Socketchat, and friends anywhere can reach it.
 
 Start with [Same Wi-Fi](/hosting/local-network) to get the server running and give it a fixed local address. Then follow these steps.
@@ -68,8 +70,8 @@ To tell whether you are behind it, compare the WAN or internet address on your r
 - **They match:** you have your own public address, and port forwarding can work.
 - **They differ**, or the router's address starts with `100.64.` to `100.127.`: you are probably behind CGNAT.
 
-Behind CGNAT, use [Tailscale](/hosting/tailscale) or a [cloud server](/hosting/cloud-server) instead. Some providers also give you a public address if you ask.
+Behind CGNAT, use [Tailscale](/hosting/vpn/tailscale) or a [cloud server](/hosting/cloud-server) instead. Some providers also give you a public address if you ask.
 
 ## What this exposes
 
-Port forwarding opens port 7444 on your home address to the whole internet. Everyone who connects to your server, members and anyone else, sees your home's public IP address. The server can also see each member's IP address. If you would rather keep your home address private, use a [cloud server](/hosting/cloud-server) or [Tailscale](/hosting/tailscale).
+Port forwarding opens port 7444 on your home address to the whole internet. Everyone who connects to your server, members and anyone else, sees your home's public IP address. The server can also see each member's IP address. If you would rather keep your home address private, use a [cloud server](/hosting/cloud-server) or a [private network](/hosting/vpn/overview).

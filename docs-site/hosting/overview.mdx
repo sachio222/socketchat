@@ -2,9 +2,11 @@
 title: "Host a server"
 sidebarTitle: "Overview"
 mode: "wide"
-description: "Four ways to run a Socketchat server, and how to pick one."
-keywords: ["host", "self-host", "server", "Tailscale", "port forwarding", "VPS", "LAN"]
+description: "The ways to run a Socketchat server, and how to pick one."
+keywords: ["host", "self-host", "server", "Tailscale", "WireGuard", "VPN", "port forwarding", "VPS", "LAN"]
 ---
+
+<Info>New to this? Read [How Socketchat works](/how-it-works) first.</Info>
 
 A Socketchat server is one program, `socketchat server`, with its data in one folder. It runs on a cloud server, a computer at home that stays on, or a small device such as a Raspberry Pi 4. The hard part is reachability: your friends' apps must be able to connect to it on TCP port 7444.
 
@@ -12,17 +14,18 @@ A Socketchat server is one program, `socketchat server`, with its data in one fo
 
 | Way | Who can reach you | Cost | Effort | What your friends need |
 |---|---|---|---|---|
-| [Tailscale](/hosting/tailscale) | People on your tailnet, or people you share the machine with | Free for personal use | Low | A Tailscale account and app |
 | [Same Wi-Fi](/hosting/local-network) | People on your home or office network | Free | Lowest | To be on the same network |
 | [Port forwarding](/hosting/port-forwarding) | Anyone on the internet | Free | Medium: router settings | Nothing extra |
 | [Cloud server](/hosting/cloud-server) | Anyone on the internet | A small monthly fee | Medium: a Linux machine and a domain | Nothing extra |
+| [Private network (VPN): Tailscale or WireGuard](/hosting/vpn/overview) | Only people you add to the private network | Tailscale: free for personal use. WireGuard: free, plus a cloud server if you use one | Tailscale: low. WireGuard: medium, config files | The Tailscale or WireGuard app |
 
 Some quick guidance:
 
 - **Trying it out with a friend nearby?** Use [Same Wi-Fi](/hosting/local-network).
-- **A private group that already uses Tailscale, or will?** Use [Tailscale](/hosting/tailscale). Nothing on your network opens to the internet.
 - **Friends anywhere, and a computer at home that stays on?** Use [Port forwarding](/hosting/port-forwarding), if your internet provider allows it.
 - **Friends anywhere, and you want it always on?** Use a [Cloud server](/hosting/cloud-server).
+- **Friends anywhere, and nothing open to the internet?** Use a [private network](/hosting/vpn/overview): Tailscale for the quickest setup, WireGuard for no accounts and no outside service.
+- **Your internet provider shares one public address among many homes (CGNAT)?** Port forwarding cannot work there. Use [Tailscale](/hosting/vpn/tailscale) or a cloud server.
 
 A ready-made server you can buy from socketchat.org is planned. See [Hosted by Socketchat](/hosting/hosted-by-socketchat).
 

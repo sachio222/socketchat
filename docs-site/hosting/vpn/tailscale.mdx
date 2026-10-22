@@ -2,12 +2,20 @@
 title: "Host on Tailscale"
 sidebarTitle: "Tailscale"
 description: "Run the server on any machine in your tailnet. No port forwarding and no public IP."
-keywords: ["Tailscale", "tailnet", "MagicDNS", "share machine", "private network"]
+keywords: ["Tailscale", "tailnet", "MagicDNS", "share machine", "private network", "VPN"]
 ---
 
-[Tailscale](https://tailscale.com) connects your devices into one private network over the internet, called a tailnet. Every device on a tailnet gets an address that starts with `100.` and can reach the others as if they sat on the same Wi-Fi. Nothing opens to the public internet, so you need no port forwarding and no public IP. Tailscale also works when your internet provider blocks incoming connections.
+<Info>New to this? Read [How Socketchat works](/how-it-works) first.</Info>
 
-Your friends reach the server in one of two ways: they join your tailnet, or you share only the server machine with their own Tailscale account.
+[Tailscale](https://tailscale.com) connects your devices into one private network over the internet, called a tailnet. Every device on a tailnet gets an address that starts with `100.` and can reach the others as if they sat on the same Wi-Fi. Nothing opens to the public internet, so you need no port forwarding and no public IP. Tailscale also works when your internet provider blocks incoming connections, as with CGNAT.
+
+Tailscale is built on WireGuard and does its setup for you. [Tailscale or WireGuard?](/hosting/vpn/overview) compares the two.
+
+## When to use it
+
+- You want friends anywhere to reach your server, with nothing open to the internet.
+- You want it working in minutes, or your group already uses Tailscale.
+- Your friends are fine with making a Tailscale account and keeping the app running.
 
 ## Set up the server
 
@@ -71,9 +79,32 @@ Then send each friend a Socketchat invite as usual, with `/invite` in a room. Se
 If your tailnet uses access rules (the tailnet policy file), make sure they allow TCP port 7444 to the server machine for the people who need it, including people you shared it with.
 </Note>
 
-## Good to know
+## Remove a friend
 
-- Your friends need Tailscale running whenever they use Socketchat on this server.
-- The server machine needs Tailscale running too, and must stay on.
-- A firewall on the server machine itself can still block port 7444. Tailscale traffic arrives on its own network interface; allow 7444 there if your firewall asks.
-- To keep the server running after you log out, run it as a service. On Linux, see the [systemd unit](/hosting/cloud-server#run-it-as-a-service).
+<Steps>
+  <Step title="Take away their Tailscale access">
+    If you shared the server machine, open the [Machines page](https://login.tailscale.com/admin/machines), choose **Share** on the server machine, and choose **Revoke invite** from the menu next to your friend's invite. If they are a user of your tailnet, remove them from the [Users page](https://login.tailscale.com/admin/users). Their app can no longer reach the server.
+  </Step>
+  <Step title="Remove them from your rooms">
+    An admin types `/kick <name>` in each room they were in. Until then they stay on each room's member list. See [Rooms and invites](/use/rooms-and-invites).
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="A friend cannot reach the server">
+    - Tailscale is running and signed in on both the server and your friend's computer.
+    - Your friend accepted the share, or joined your tailnet.
+    - The link uses the full MagicDNS name, such as `pi.tail1234.ts.net`. A shared machine does not answer to its short name.
+    - From your friend's computer, `tailscale ping pi.tail1234.ts.net` gets answers.
+  </Accordion>
+  <Accordion title="Tailscale works, Socketchat does not">
+    - If your tailnet has access rules, they allow TCP 7444 to the server.
+    - A firewall on the server machine can still block port 7444. Tailscale traffic arrives on its own network interface; allow 7444 there if your firewall asks.
+    - `socketchat server run` is running and printed "Socketchat server listening on".
+  </Accordion>
+  <Accordion title="It stops working when a computer sleeps">
+    Your friends need Tailscale running whenever they use Socketchat on this server. The server machine needs Tailscale running too, and must stay on. To keep the server running after you log out, run it as a service; on Linux, see the [systemd unit](/hosting/cloud-server#run-it-as-a-service).
+  </Accordion>
+</AccordionGroup>

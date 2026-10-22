@@ -1,0 +1,257 @@
+---
+title: "Host on WireGuard"
+sidebarTitle: "WireGuard"
+description: "Run your own private network with WireGuard, and reach the Socketchat server on it. No accounts and no outside service."
+keywords: ["WireGuard", "wg-quick", "wg0", "VPN", "private network", "peer", "51820", "PersistentKeepalive"]
+---
+
+<Info>New to this? Read [How Socketchat works](/how-it-works) first.</Info>
+
+[WireGuard](https://www.wireguard.com) is free software that links computers into a small private network with encrypted connections. You run it on the Socketchat server and on each friend's computer. Their apps then reach the server at a private address, such as `10.8.0.1`, and port 7444 never opens to the internet. Nobody needs an account, and no outside company sits in the middle.
+
+[Tailscale or WireGuard?](/hosting/vpn/overview) compares this with Tailscale, which does the same job with less setup.
+
+## Words on this page
+
+- A **peer** is any computer on a WireGuard network: the server, and each friend's computer.
+- Each peer has a **private key**, a secret code that proves it is that peer, and a **public key** made from it that the other peers use to recognize it. Keep private keys secret. Public keys are safe to share.
+- **UDP** is a simple way to send data over the internet. WireGuard uses UDP port 51820 on the server.
+- **NAT** is how a home router shares one public address among every device at home. **CGNAT** (carrier-grade NAT) is when an internet provider shares one public address among many homes, so nothing from outside can connect in.
+
+## When to use it
+
+- You want a private group with no accounts and no outside service.
+- You have a cloud server, or a home computer whose router can forward a port.
+- You are at ease editing a few config files.
+
+These steps set up WireGuard on a Linux server, such as Ubuntu, Debian or Raspberry Pi OS. Friends can use macOS, Windows or Linux.
+
+## Set up the server
+
+<Steps>
+  <Step title="Pick the computer that runs WireGuard">
+    WireGuard and Socketchat run on the same computer. It needs one UDP port that friends can reach from the internet.
+
+    <Tabs>
+      <Tab title="Cloud server">
+        A small Linux server rented by the month already has a public address. Follow [Cloud server](/hosting/cloud-server) up to and including **Install Socketchat**, but skip opening port 7444. You open UDP 51820 below instead.
+      </Tab>
+      <Tab title="Home computer">
+        Forward **UDP** port 51820 on your router to this computer, as on [Port forwarding](/hosting/port-forwarding#forward-the-port), with protocol UDP instead of TCP. Use a dynamic DNS name if your public address changes.
+
+        This does not work behind CGNAT, because the router never sees the incoming traffic. See [If port forwarding does not work](/hosting/port-forwarding#if-port-forwarding-does-not-work-cgnat), and use a cloud server or [Tailscale](/hosting/vpn/tailscale) instead.
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Install WireGuard and make the server's keys">
+    On Ubuntu or Debian:
+
+    ```bash
+    sudo apt install wireguard
+    ```
+
+    For other systems, see [wireguard.com/install](https://www.wireguard.com/install/). Then make the server's key pair in `/etc/wireguard`, a folder only the administrator can read:
+
+    ```bash
+    sudo -i
+    cd /etc/wireguard
+    umask 077
+    wg genkey | tee server.key | wg pubkey > server.pub
+    exit
+    ```
+
+    `umask 077` makes the new files readable by the administrator only. `server.key` is the server's private key; never send it to anyone. `server.pub` is its public key, which every friend's config needs.
+  </Step>
+  <Step title="Write the server's config">
+    Save this as `/etc/wireguard/wg0.conf`, with the contents of `server.key` after `PrivateKey`:
+
+    ```ini /etc/wireguard/wg0.conf
+    [Interface]
+    Address = 10.8.0.1/24
+    ListenPort = 51820
+    PrivateKey = <contents of server.key>
+    ```
+
+    `wg0` is the name of the private network on this computer. `Address` gives the server the private address `10.8.0.1`, and `ListenPort` is the UDP port friends connect to. You add one `[Peer]` section for each friend in [Add each friend](#add-each-friend).
+  </Step>
+  <Step title="Open UDP 51820 and start WireGuard">
+    Allow UDP 51820 in the server's firewall, if it runs `ufw`:
+
+    ```bash
+    sudo ufw allow 51820/udp
+    ```
+
+    On a cloud server, also add an inbound rule for UDP port 51820 in the provider's cloud firewall.
+
+    Start WireGuard once to check the config:
+
+    ```bash
+    sudo wg-quick up wg0
+    sudo wg show
+    ```
+
+    `wg show` prints the interface and its listening port. To start it at every boot, hand it to systemd, the program that starts services on most Linux systems:
+
+    ```bash
+    sudo wg-quick down wg0
+    sudo systemctl enable --now wg-quick@wg0
+    ```
+  </Step>
+</Steps>
+
+## Add each friend
+
+Give each friend their own address on the private network: `10.8.0.2`, `10.8.0.3` and so on. Do the same for yourself if you chat from a computer other than the server.
+
+Socketchat runs in a terminal, so each friend needs WireGuard on the computer they chat from: the [WireGuard app](https://www.wireguard.com/install/) on macOS or Windows, or `sudo apt install wireguard` on Linux.
+
+<Steps>
+  <Step title="Get the friend's public key">
+    <Tabs>
+      <Tab title="Friend makes the key">
+        This way, no private key ever travels. In the WireGuard app, your friend chooses **Add Empty Tunnel**. The app makes a new private key and shows the matching public key. They send you the public key.
+
+        On Linux, your friend runs `wg genkey | tee friend.key | wg pubkey` with `umask 077` set, and sends you the line it prints.
+      </Tab>
+      <Tab title="You make the file">
+        On the server, make a key pair for the friend:
+
+        ```bash
+        sudo -i
+        cd /etc/wireguard
+        umask 077
+        wg genkey | tee ana.key | wg pubkey > ana.pub
+        exit
+        ```
+
+        You will put `ana.key` in their config file, so that file holds a secret. Once they have it, delete `ana.key` from the server.
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Add the friend to the server">
+    Add a `[Peer]` section to `/etc/wireguard/wg0.conf` with their public key and address:
+
+    ```ini /etc/wireguard/wg0.conf
+    # Ana
+    [Peer]
+    PublicKey = <Ana's public key>
+    AllowedIPs = 10.8.0.2/32
+    ```
+
+    `AllowedIPs` ties that one address to that one key, so nobody else can use it. Load the change without dropping anyone already connected:
+
+    ```bash
+    sudo bash -c 'wg syncconf wg0 <(wg-quick strip wg0)'
+    ```
+  </Step>
+  <Step title="Send the friend their config">
+    The friend's config names their own address, the server's public key and where to find the server:
+
+    ```ini ana.conf
+    [Interface]
+    PrivateKey = <Ana's private key>
+    Address = 10.8.0.2/32
+
+    [Peer]
+    PublicKey = <contents of server.pub>
+    Endpoint = chat.example.com:51820
+    AllowedIPs = 10.8.0.0/24
+    PersistentKeepalive = 25
+    ```
+
+    - `Endpoint` is the server's public name or IP address and its UDP port.
+    - `AllowedIPs = 10.8.0.0/24` sends only private-network traffic through WireGuard. The rest of the friend's internet use stays as it was.
+    - `PersistentKeepalive = 25` sends a tiny packet every 25 seconds so the friend's router keeps the path open, and the server can reach their app while it sits idle. Almost every home is behind NAT, so keep it in.
+
+    If your friend made their own key, they paste everything except `PrivateKey` into the empty tunnel the app made, which already holds their private key. Otherwise, send them the whole file. It holds their private key, so send it through a private channel you already trust, such as in person or an end-to-end encrypted messenger, never in plain email. Socketchat cannot carry it yet, because your friend cannot reach the server until WireGuard works.
+  </Step>
+  <Step title="The friend turns the tunnel on">
+    - **macOS or Windows:** in the WireGuard app, choose **Import tunnel(s) from file** for a file you sent, then **Activate**.
+    - **Linux:** save the file as `/etc/wireguard/wg0.conf` and run `sudo wg-quick up wg0`.
+
+    To test it, your friend runs `ping 10.8.0.1`. Answers mean the private network works.
+  </Step>
+</Steps>
+
+## Run Socketchat on the WireGuard address
+
+Socketchat's port 7444 only needs to answer on the private network. `--listen` sets the address the server listens on, so give it the WireGuard address:
+
+```bash
+socketchat server init --host 10.8.0.1 --listen 10.8.0.1:7444
+socketchat server run
+```
+
+`--host 10.8.0.1` puts the private address in invite links, and `--listen 10.8.0.1:7444` makes the server answer only there. Nothing on the internet can reach port 7444, even without a firewall rule.
+
+If the server runs `ufw`, it also blocks port 7444 on the private network until you allow it there. This rule allows 7444 on `wg0` only:
+
+```bash
+sudo ufw allow in on wg0 to any port 7444 proto tcp
+```
+
+On a cloud server set up as a service, add `--data-dir /var/lib/socketchat` and run `init` as the `socketchat` user, as on [Cloud server](/hosting/cloud-server#set-it-up).
+
+If you already set up the server, change these two lines in `socketchat-server.toml` and restart it:
+
+```toml socketchat-server.toml
+listen = "10.8.0.1:7444"
+public_host = "10.8.0.1"
+```
+
+WireGuard must be up before Socketchat starts, or the server cannot listen on `10.8.0.1` and stops with an error such as "Cannot assign requested address". With the [systemd unit](/hosting/cloud-server#run-it-as-a-service), add these lines under `[Unit]`, so Socketchat waits for WireGuard:
+
+```ini /etc/systemd/system/socketchat.service
+After=wg-quick@wg0.service
+Requires=wg-quick@wg0.service
+```
+
+Then make your own invite with `socketchat server invite`, join, and invite friends with `/invite` as usual. See the [Quick start](/quickstart). Each friend's tunnel must be on whenever they use Socketchat on this server.
+
+## Remove a friend
+
+<Steps>
+  <Step title="Delete their peer">
+    Delete the friend's `[Peer]` section from `/etc/wireguard/wg0.conf` and load the change:
+
+    ```bash
+    sudo bash -c 'wg syncconf wg0 <(wg-quick strip wg0)'
+    ```
+
+    `sudo systemctl restart wg-quick@wg0` works too, but it drops everyone for a moment. Their key no longer opens the private network, so their app cannot reach the server.
+  </Step>
+  <Step title="Remove them from your rooms">
+    An admin types `/kick <name>` in each room they were in. Until then they stay on each room's member list, and they could read new messages there if they ever reached the server another way. See [Rooms and invites](/use/rooms-and-invites).
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No handshake">
+    On the server, `sudo wg show` lists each peer. A **latest handshake** line means that friend's computer and the server have connected. If the line is missing:
+
+    - The friend's tunnel is on, and their config holds the server's public key, from `server.pub`.
+    - The server's `[Peer]` section holds the friend's public key, not their private key.
+    - Each friend has their own address. Two peers with the same `AllowedIPs` clash.
+  </Accordion>
+  <Accordion title="Firewall">
+    - `sudo ufw status` on the server lists `51820/udp`.
+    - The cloud firewall allows inbound UDP 51820. The rule must say UDP, not TCP.
+    - On a home computer, the router forwards UDP 51820 to the server's current local address.
+  </Accordion>
+  <Accordion title="Endpoint">
+    - `Endpoint` in the friend's config matches the server's current public IP or DNS name, with `:51820`.
+    - A home server behind CGNAT cannot take incoming connections. Use a cloud server or Tailscale.
+  </Accordion>
+  <Accordion title="It works, then stops after a while">
+    The friend's router forgot the path while the connection sat idle. Add `PersistentKeepalive = 25` to the `[Peer]` section of the friend's config, then turn the tunnel off and on again.
+  </Accordion>
+  <Accordion title="WireGuard works, Socketchat does not">
+    - `socketchat server run` prints "Socketchat server listening on 10.8.0.1:7444". If it stops with "Cannot assign requested address", start WireGuard first.
+    - From the friend's computer, `nc -vz 10.8.0.1 7444` connects. If it times out, allow 7444 on `wg0` in `ufw`, as shown above.
+    - The invite link names `10.8.0.1`. A link made before you changed `public_host` still names the old address; make a new one.
+  </Accordion>
+</AccordionGroup>
+
+WireGuard's own [Quick Start](https://www.wireguard.com/quickstart/) explains keys and `wg` commands in more depth.
