@@ -15,11 +15,17 @@ Run `socketchat` to open the chat screen. It asks for your passphrase, then show
 | Panel | What it shows |
 |---|---|
 | **Chats** | Your rooms, marked `#`, and direct messages, marked `@`. A number shows new messages. |
-| **Messages** | The open room, with times and names. The panel title is the room's name. |
+| **Messages** | The open room, with times and names. The panel title is the room's name and its server, as in `Book club · chat.example.com`. |
 | **People** | Everyone in the room. `✓` marks someone you verified, and `*` marks an admin. |
 | **Message box** | Where you type messages and commands. The empty box reads "What's on your mind?" with the open room's name. |
 
 The bottom line shows the keys that work right now, and the Socketchat version when the window is wide enough.
+
+## The room's server
+
+Each room lives on one server, and the Messages panel title names it after the room's name. The server shows as its host, with the port added when it is not 7444. In a narrow window the title drops the server and keeps the room's name. When the app has lost its connection, the title ends in "offline".
+
+New rooms from `/new` go on the open room's server, or on the newest server you joined when no room is open. `/servers` lists every server you use and whether each is connected, and `/details` names the open room's server. See [Servers](/use/commands#servers).
 
 ## Keys
 

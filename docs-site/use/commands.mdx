@@ -12,7 +12,7 @@ Type these in the chat screen's message box. Tab completes a command as you type
 
 | Command | What it does |
 |---|---|
-| `/new <name>` | Start a new group chat. |
+| `/new <name>` | Start a new group chat on the open room's server, and say which server. |
 | `/invite` | Make a one-time link that brings someone into this chat, and copy an invite message. |
 | `/invite --dm` | Make a link that opens a new two-person chat. |
 | `/join <link>` | Use an invite link someone sent you. |
@@ -23,7 +23,7 @@ Type these in the chat screen's message box. Tab completes a command as you type
 | `/rename <name> <new>` | Rename someone on your screen only. |
 | `/invites` | See your open invite links. |
 | `/cancel <number>` | Stop an invite link from the `/invites` list. |
-| `/details` | See this room's admins, size and age. |
+| `/details` | See this room's admins, size, age and server. |
 | `/mute` | Hide this room's new-message count. |
 | `/unmute` | Show this room's new-message count again. |
 | `/leave` | Leave this chat and delete its history here. |
@@ -46,6 +46,17 @@ Type these in the chat screen's message box. Tab completes a command as you type
 | `/send <path>` | Send a file, photo or video. |
 | `/save <file> [folder]` | Save a file someone sent. Use `<file>:<number>` when several files share a name. |
 
+### Servers
+
+| Command | What it does |
+|---|---|
+| `/servers` | List every server your profile knows, numbered, with how many of your rooms are on each and whether it is connected, could not be reached and why, or not connected yet. |
+| `/forget <number>` | Delete a server from the `/servers` list, with its rooms, from this computer. Asks first. |
+
+`/forget` deletes that server's rooms, their messages and keys, the joins waiting there, the invite links you made there, its certificate and your account key, all from this computer only. The server is not told, so others there still see you in its rooms until an admin removes you. If the server still works, `/leave` its rooms first. Run `/servers` before `/forget`, because `/forget` takes a number from the last list it showed.
+
+New rooms go on the open room's server. With no room open, they go on the newest server you joined. `/new` says which one, as in "Made Book club on chat.example.com.", and `/servers` marks that server "(new rooms go here)".
+
 ### The app
 
 | Command | What it does |
@@ -66,7 +77,8 @@ Run these in a terminal. `socketchat --help` and `socketchat <command> --help` p
 |---|---|
 | `socketchat` | Open the chat screen. With no profile yet, print how to start. |
 | `socketchat join <link> [--new-certificate]` | Use an invite link. The first time, this also sets up your profile. Opens the chat screen when run in a terminal. |
-| `socketchat new <name>` | Start a new group chat. |
+| `socketchat new <name> [--server <number>]` | Start a new group chat on the newest server you joined, or on the server at that number in `socketchat servers`. |
+| `socketchat servers [--forget <number>] [--yes]` | List your servers and whether each can be reached, or forget one. `--yes` forgets without asking first. |
 | `socketchat invite --group <name>` | Print an invite link to a room, on one line. |
 | `socketchat invite --dm` | Print a link that opens a new two-person chat. |
 | `socketchat invites [--cancel <number>]` | List your open invite links, or cancel one. |
@@ -79,6 +91,8 @@ Run these in a terminal. `socketchat --help` and `socketchat <command> --help` p
 | `socketchat --version` | Print the version. |
 
 `--new-certificate` trusts the server certificate in the link in place of the one Socketchat already trusts for that server, after its operator set it up again. See [A certificate-change warning](/help/troubleshooting#a-certificate-change-warning).
+
+`socketchat servers --forget` deletes the same things as `/forget`. Away from a terminal it cannot ask, so it stops and says to add `--yes`.
 
 `--group` takes a room's name, ignoring upper and lower case. If you are in two rooms with the same name, the command says so.
 

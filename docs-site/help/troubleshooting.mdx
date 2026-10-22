@@ -42,6 +42,13 @@ An app that cannot reach the server says "could not reach the server" or "the se
     - If your tailnet has access rules, they allow TCP 7444 to the server.
     - A firewall on the server machine allows 7444.
   </Accordion>
+  <Accordion title="WireGuard">
+    - `sudo wg show` on the server shows a **latest handshake** for your friend's computer.
+    - The server's firewall and the cloud firewall allow UDP 51820.
+    - Your friend's tunnel is on, and `ping 10.8.0.1` from their computer gets answers.
+    - If the server runs `ufw`, it allows TCP 7444 on `wg0`.
+    - See [WireGuard troubleshooting](/hosting/vpn/wireguard#troubleshooting).
+  </Accordion>
   <Accordion title="Same Wi-Fi">
     - Your friend is on the same network, not a guest network. Many routers keep guest Wi-Fi apart from the main network.
     - The server's local IP has not changed since `init`. If it has, reserve an address in the router; see [Keep the address from changing](/hosting/local-network#keep-the-address-from-changing).
@@ -59,6 +66,17 @@ An app that cannot reach the server says "could not reach the server" or "the se
     - The service is running: `sudo systemctl status socketchat`.
   </Accordion>
 </AccordionGroup>
+
+### A server that shut down for good
+
+Socketchat keeps every server you joined. One that is gone for good shows in `/servers` as "could not reach", and errors name it, as in "Could not reach chat.example.com: connection refused." To remove it from your computer:
+
+```text
+/servers
+/forget 2
+```
+
+`/servers` lists your servers with a number each, and `/forget` takes a number from that list. Socketchat asks first, then deletes that server's rooms, their messages and keys, and your account key from this computer. The server is not told, so if it still works, `/leave` its rooms first. From a terminal, `socketchat servers --forget 2` does the same. See [Servers](/use/commands#servers).
 
 ### The server says it is full
 
