@@ -2075,8 +2075,11 @@ mod tests {
     }
 
     /// The chat screen's mouse setting turns capture on and off, and
-    /// giving the terminal back always turns it off.
+    /// giving the terminal back always turns it off. On Windows the console
+    /// is switched through its own calls, with nothing written, so the
+    /// escape codes are checked on the other systems.
     #[test]
+    #[cfg(not(windows))]
     fn mouse_capture_follows_the_setting_and_ends_on_exit() {
         let written = |f: &dyn Fn(&mut Vec<u8>)| {
             let mut out = Vec::new();
