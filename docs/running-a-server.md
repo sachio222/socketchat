@@ -15,7 +15,7 @@ A Socketchat server stores and forwards encrypted messages and files. It never h
 On the server, run the installer:
 
 ```
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat/releases/latest/download/socketchat-installer.sh | sh
 ```
 
 It downloads a prebuilt `socketchat` program and puts it in `~/.local/bin/socketchat`. The program has its encryption libraries built in, so the server needs no Rust, no OpenSSL and no other package.
@@ -30,7 +30,7 @@ On the machine itself, install Rust from [rustup.rs](https://rustup.rs) and the 
 
 ```
 sudo apt install build-essential pkg-config libssl-dev
-cargo install --locked --git https://github.com/sachio222/socketchat_v4 socketchat
+cargo install --locked --git https://github.com/sachio222/socketchat socketchat
 ```
 
 `--locked` builds with the exact dependency versions the project tested. cargo puts the binary in `~/.cargo/bin/socketchat`.
@@ -38,7 +38,7 @@ cargo install --locked --git https://github.com/sachio222/socketchat_v4 socketch
 If you cannot install `libssl-dev`, build OpenSSL from source instead. This needs a C compiler, `make` and `perl`:
 
 ```
-cargo install --locked --git https://github.com/sachio222/socketchat_v4 socketchat --features vendored-openssl
+cargo install --locked --git https://github.com/sachio222/socketchat socketchat --features vendored-openssl
 ```
 
 **For a Raspberry Pi, build somewhere faster.** Build on a faster 64-bit ARM Linux machine running the same OS release as the Pi, or cross-compile for `aarch64-unknown-linux-gnu`, then copy the `socketchat` binary to the Pi. Building with `--features vendored-openssl` avoids depending on the Pi's OpenSSL version.

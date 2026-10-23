@@ -17,7 +17,7 @@ LOCK=Cargo.lock
 ALLOW=scripts/crate-age-allow.txt
 SINCE=""
 DAYS=30
-UA="socketchat crate-age-check (https://github.com/sachio222/socketchat_v4)"
+UA="socketchat crate-age-check (https://github.com/sachio222/socketchat)"
 
 usage() {
     echo "Usage: sh scripts/crate-age-check.sh [--lock FILE] [--allow FILE] [--since OLD_LOCK] [--days N]" >&2
