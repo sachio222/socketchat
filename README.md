@@ -33,13 +33,13 @@ Socketchat's server is one program with its data in one folder. A release build 
 Install Socketchat with one command. On macOS or Linux, run this in a terminal:
 
 ```
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat/releases/latest/download/socketchat-installer.sh | sh
 ```
 
 On Windows, run this in PowerShell:
 
 ```
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/sachio222/socketchat/releases/latest/download/socketchat-installer.ps1 | iex"
 ```
 
 The installer downloads a prebuilt `socketchat` program for your computer, puts it in `~/.local/bin`, and adds that folder to your PATH if it is missing. Open a new terminal afterwards so the PATH change takes effect. You do not need Rust or any other library, because the encryption code is built into the program. When it finishes, the installer lists the next steps: `socketchat server init` and `socketchat server run` set up and start your own server, `socketchat join '<invite link>'` joins a server you were invited to, and `socketchat` opens the chat screen. For a server friends on other computers can reach, add `--host <address>` to `server init`. Running `socketchat` before you join a server prints the same steps.
@@ -50,7 +50,7 @@ Prebuilt programs cover:
 - Linux on Intel or AMD (x86_64), which covers most cloud servers and desktop computers, and on 64-bit ARM (aarch64), which includes a Raspberry Pi 4 or Zero 2 W running 64-bit Raspberry Pi OS. They need glibc 2.35 or newer, which Ubuntu 22.04, Debian 12 and Raspberry Pi OS 12 (Bookworm) have.
 - 64-bit Windows on Intel or AMD.
 
-From 0.5.1 on, every file in a release has a GitHub build attestation: a signed record of the commit and the release workflow that built it. To check a file you downloaded from the release page, install the GitHub CLI and run `gh attestation verify <file> --repo sachio222/socketchat_v4 --signer-workflow sachio222/socketchat_v4/.github/workflows/release.yml`.
+From 0.5.1 on, every file in a release has a GitHub build attestation: a signed record of the commit and the release workflow that built it. To check a file you downloaded from the release page, install the GitHub CLI and run `gh attestation verify <file> --owner sachio222 --cert-identity-regex '^https://github\.com/sachio222/socketchat(_v4)?/\.github/workflows/release\.yml@refs/tags/v'`. Release 0.5.1 was built while the repository was named socketchat_v4, so the check accepts both names.
 
 **Or build from source**, for a system the prebuilt programs do not cover. You need the Rust toolchain from [rustup.rs](https://rustup.rs). On Linux, also install the OpenSSL headers, which the encrypted local database needs:
 
@@ -61,7 +61,7 @@ sudo apt install build-essential pkg-config libssl-dev
 Then install Socketchat:
 
 ```
-cargo install --locked --git https://github.com/sachio222/socketchat_v4 socketchat
+cargo install --locked --git https://github.com/sachio222/socketchat socketchat
 ```
 
 On Windows, add `--features vendored-openssl` to that command. It builds OpenSSL from source, which needs the Visual Studio C++ build tools and [Strawberry Perl](https://strawberryperl.com).

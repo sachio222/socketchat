@@ -59,7 +59,7 @@ Socketchat is for people who want private conversations they control. It is not 
 ### Running a server
 
 ```
-cargo install --git https://github.com/sachio222/socketchat_v4
+cargo install --git https://github.com/sachio222/socketchat
 socketchat server init        # writes config, makes a TLS certificate, prints the acceptable-use statement
 socketchat server run
 socketchat server invite      # prints a one-time link for the first person

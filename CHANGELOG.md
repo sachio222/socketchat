@@ -4,6 +4,10 @@ Each release of socketchat has a section here. Version numbers follow [Semantic 
 
 ## Unreleased
 
+### Changed
+
+- **New repository name**: the code now lives at https://github.com/sachio222/socketchat. Links to the old name still redirect.
+
 ### Fixed
 
 - **Server errors on Windows**: a server that refuses the connection now reads "connection refused" on Windows too, the same as on macOS and Linux, and the message no longer ends in two full stops.
@@ -21,7 +25,7 @@ This release adds a list of the servers you use, mouse support, Tab completion f
 - **Invite message**: `/invite` copies an invite message as the invite box opens, and C copies it again. The message says to install Socketchat from https://socketchat.org and then run `socketchat join "socketchat://..."`, ready to paste into a terminal; the quotes keep the link whole in every shell. A line under the link says "Copying…" while the clipboard program runs, then whether the copy worked, and the screen keeps taking keys meanwhile. Socketchat copies with the computer's clipboard program (pbcopy, wl-copy, xclip, xsel or clip.exe) and asks the terminal to copy when there is none. The box still shows the bare link and its QR code. `socketchat join` and `/join` accept web links of the form `https://socketchat.org/join#socketchat://...` as well as the `socketchat://` link, and `socketchat invite` still prints only the `socketchat://` link.
 - **Getting started**: the installer ends with the commands that start a server, join one and open the chat screen. `socketchat` on a computer with no profile prints the same steps and exits without an error.
 - **Version and about**: the chat screen shows `socketchat` and its version at the right end of the bottom line, and drops it when the window is too narrow to keep the help text whole. `/about` shows the version, what Socketchat is, the project link and the license.
-- **Checking a download**: every file in a release now has a GitHub build attestation, a signed record of the commit and the release workflow that built it. `gh attestation verify <file> --repo sachio222/socketchat_v4 --signer-workflow sachio222/socketchat_v4/.github/workflows/release.yml` checks one, as the README shows.
+- **Checking a download**: every file in a release now has a GitHub build attestation, a signed record of the commit and the release workflow that built it. `gh attestation verify <file> --owner sachio222 --cert-identity-regex '^https://github\.com/sachio222/socketchat(_v4)?/\.github/workflows/release\.yml@refs/tags/v'` checks one, as the README shows.
 - **IPv6 in invite links**: an IPv6 address may be written in brackets, as in `socketchat://[2001:db8::7]:7444/j/...`.
 
 ### Changed

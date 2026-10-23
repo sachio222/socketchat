@@ -89,7 +89,7 @@ Text from other people, and from links they send, reaches your terminal. Socketc
 
 ## Checking a release
 
-- **Build attestations.** From 0.5.1 on, every file in a release has a GitHub build attestation: a signed record of the commit and the release workflow that built it. `gh attestation verify <file> --repo sachio222/socketchat_v4 --signer-workflow sachio222/socketchat_v4/.github/workflows/release.yml` checks a file you downloaded.
+- **Build attestations.** From 0.5.1 on, every file in a release has a GitHub build attestation: a signed record of the commit and the release workflow that built it. `gh attestation verify <file> --owner sachio222 --cert-identity-regex '^https://github\.com/sachio222/socketchat(_v4)?/\.github/workflows/release\.yml@refs/tags/v'` checks a file you downloaded.
 - **No test-only code.** The `socketchat` program in a release is built from its own package alone, so the code that only the tests use stays out, and the release workflow checks each program for the marker that code carries before it publishes anything.
 - **Pinned builds.** Release builds use the exact library versions in `Cargo.lock` and the Rust version named in `rust-toolchain.toml`. The workflows pin each GitHub Action to an exact commit. Only the final hosting job, which attests and publishes the release, can write to the repository; the build jobs get a read-only token.
 
@@ -122,4 +122,4 @@ The project checks dependencies with `cargo deny check` on every change. Its `de
 
 ## Reporting a vulnerability
 
-Report security problems privately through GitHub's private vulnerability reporting on https://github.com/sachio222/socketchat_v4: open the Security tab and choose "Report a vulnerability". Do not open a public issue for a security problem. Say what you found, how to reproduce it, and which version or commit you tested.
+Report security problems privately through GitHub's private vulnerability reporting on https://github.com/sachio222/socketchat: open the Security tab and choose "Report a vulnerability". Do not open a public issue for a security problem. Say what you found, how to reproduce it, and which version or commit you tested.
