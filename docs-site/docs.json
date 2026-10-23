@@ -48,7 +48,7 @@
       },
       {
         "type": "github",
-        "href": "https://github.com/sachio222/socketchat_v4"
+        "href": "https://github.com/sachio222/socketchat"
       }
     ],
     "primary": {
@@ -126,7 +126,7 @@
   ],
   "footer": {
     "socials": {
-      "github": "https://github.com/sachio222/socketchat_v4",
+      "github": "https://github.com/sachio222/socketchat",
       "website": "https://socketchat.org"
     }
   },

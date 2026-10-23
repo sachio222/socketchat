@@ -8,7 +8,7 @@ Socketchat is open source under your choice of the MIT or Apache-2.0 license, an
 
 ## Ways to help
 
-- **Report a bug or ask a question** in [GitHub issues](https://github.com/sachio222/socketchat_v4/issues). For security problems, use [private reporting](/security/reporting) instead.
+- **Report a bug or ask a question** in [GitHub issues](https://github.com/sachio222/socketchat/issues). For security problems, use [private reporting](/security/reporting) instead.
 - **Measure it on your hardware.** `scripts/idle-memory.sh` measures the server's idle memory on any machine; share your results in an issue, especially from a Raspberry Pi.
 - **Pick up roadmap work.** Open an issue first so you and the maintainers can agree on the approach.
 
@@ -20,7 +20,7 @@ Socketchat is open source under your choice of the MIT or Apache-2.0 license, an
 - **Room membership hidden from the server**, once a reviewed standard for it exists.
 - **The final post-quantum MLS suite**, once the IETF publishes it.
 
-[ROADMAP.md](https://github.com/sachio222/socketchat_v4/blob/main/ROADMAP.md) explains each item and how to help.
+[ROADMAP.md](https://github.com/sachio222/socketchat/blob/main/ROADMAP.md) explains each item and how to help.
 
 ## Build and test
 
@@ -33,7 +33,7 @@ sudo apt install build-essential pkg-config libssl-dev
 Then clone the repository and run every test:
 
 ```bash
-git clone https://github.com/sachio222/socketchat_v4
+git clone https://github.com/sachio222/socketchat
 cd socketchat_v4
 cargo test --workspace
 ```
@@ -47,4 +47,4 @@ The tests start real servers on free ports with several apps talking to them, so
 - Use reviewed libraries and published standards for all cryptography. A change that adds home-made cryptography will be declined.
 - New dependencies must be at least 30 days old, widely used and actively maintained.
 
-[CONTRIBUTING.md](https://github.com/sachio222/socketchat_v4/blob/main/CONTRIBUTING.md) has the full guide, and everyone who takes part follows the [code of conduct](https://github.com/sachio222/socketchat_v4/blob/main/CODE_OF_CONDUCT.md).
+[CONTRIBUTING.md](https://github.com/sachio222/socketchat/blob/main/CONTRIBUTING.md) has the full guide, and everyone who takes part follows the [code of conduct](https://github.com/sachio222/socketchat/blob/main/CODE_OF_CONDUCT.md).

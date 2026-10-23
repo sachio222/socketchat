@@ -14,7 +14,7 @@ The installer downloads a ready-made `socketchat` program for your computer and 
     Open Terminal and run:
 
     ```bash
-    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat/releases/latest/download/socketchat-installer.sh | sh
     ```
 
     The program goes to `~/.local/bin/socketchat`. Works on Apple silicon and Intel Macs.
@@ -29,7 +29,7 @@ The installer downloads a ready-made `socketchat` program for your computer and 
     Open a terminal and run:
 
     ```bash
-    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.sh | sh
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat/releases/latest/download/socketchat-installer.sh | sh
     ```
 
     The program goes to `~/.local/bin/socketchat`. Ready-made programs cover Intel or AMD (x86_64) and 64-bit ARM (aarch64), which includes a Raspberry Pi 4 or Zero 2 W on 64-bit Raspberry Pi OS. They need glibc 2.35 or newer, which Ubuntu 22.04, Debian 12 and Raspberry Pi OS 12 (Bookworm) have.
@@ -38,7 +38,7 @@ The installer downloads a ready-made `socketchat` program for your computer and 
     Open PowerShell and run:
 
     ```powershell
-    powershell -ExecutionPolicy Bypass -c "irm https://github.com/sachio222/socketchat_v4/releases/latest/download/socketchat-installer.ps1 | iex"
+    powershell -ExecutionPolicy Bypass -c "irm https://github.com/sachio222/socketchat/releases/latest/download/socketchat-installer.ps1 | iex"
     ```
 
     The program goes to `.local\bin\socketchat.exe` in your user folder, and the installer adds that folder to your PATH. Works on 64-bit Windows on Intel or AMD.
@@ -79,7 +79,7 @@ sudo apt install build-essential pkg-config libssl-dev
 Then build and install Socketchat:
 
 ```bash
-cargo install --locked --git https://github.com/sachio222/socketchat_v4 socketchat
+cargo install --locked --git https://github.com/sachio222/socketchat socketchat
 ```
 
 On Windows, add `--features vendored-openssl` to that command. It builds OpenSSL from source, which needs the Visual Studio C++ build tools and [Strawberry Perl](https://strawberryperl.com). The first build takes several minutes on a fast machine and much longer on a Raspberry Pi. `cargo` puts the program in `~/.cargo/bin/socketchat`.
