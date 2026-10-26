@@ -6,7 +6,7 @@ keywords: ["FAQ", "questions", "phone number", "anonymous", "Raspberry Pi", "Dis
 
 <AccordionGroup>
   <Accordion title="Can the server read my messages?">
-    No. Messages are end-to-end encrypted with MLS (RFC 9420), so the server only passes them along. It can see room rosters, when messages are sent, their sizes and users' IP addresses. Socketchat does not make you anonymous. See [What the server sees](/security/what-the-server-sees).
+    No. Messages are end-to-end encrypted with MLS (RFC 9420), so the server only passes them along. It can see room rosters, when messages are sent, their sizes rounded up to blocks of 256 bytes, and users' IP addresses. Socketchat does not make you anonymous. See [What the server sees](/security/what-the-server-sees).
   </Accordion>
   <Accordion title="Do I need a phone number, email or ID?">
     No. You pick a display name, and a passphrase locks Socketchat's data on your computer. People join with an invite link.
@@ -27,7 +27,7 @@ keywords: ["FAQ", "questions", "phone number", "anonymous", "Raspberry Pi", "Dis
     macOS (Apple silicon and Intel), Linux (x86_64 and 64-bit ARM, with glibc 2.35 or newer) and 64-bit Windows. It runs in a terminal, including over SSH. See [Install](/install).
   </Accordion>
   <Accordion title="Is there a phone app?">
-    Not yet. A phone app is on the roadmap. Today Socketchat is a terminal app.
+    Not yet. A phone app is on the roadmap. Today Socketchat is a terminal app. A phone that scans an invite's QR code opens a page that explains how to join from a computer; see [Scan the QR code with a phone](/use/rooms-and-invites#scan-the-qr-code-with-a-phone).
   </Accordion>
   <Accordion title="Can I use one identity on two computers?">
     Not yet. Each profile lives on one computer. On a second computer, join with a new invite as a separate person.
@@ -46,6 +46,21 @@ keywords: ["FAQ", "questions", "phone number", "anonymous", "Raspberry Pi", "Dis
   </Accordion>
   <Accordion title="What happens to a room's history when I leave?">
     Socketchat deletes the room's keys from your computer at once, and its messages once you have read them. Other members keep their own copies.
+  </Accordion>
+  <Accordion title="Does Socketchat contact anything besides my servers?">
+    Only GitHub, at most once a day, to learn whether a newer release is out. The request carries nothing about you, your profile, your servers or your chats, and Socketchat never sends anything to socketchat.org. `/updates off` or `SOCKETCHAT_NO_UPDATE_CHECK=1` turns the check off, and then Socketchat makes no request at all. See [What leaves your computer besides chat](/security/what-the-server-sees#what-leaves-your-computer-besides-chat).
+  </Accordion>
+  <Accordion title="How do I update?">
+    Run `socketchat update`. It prints the command for the way you installed Socketchat, such as `brew upgrade socketchat` or the install command again, and installs nothing itself. The chat screen says when a newer release is out. See [Updating](/help/updating).
+  </Accordion>
+  <Accordion title="How do I check a release?">
+    Every file in a release from 0.5.1 on has a GitHub build attestation, a signed record of the commit and the workflow that built it. Check a downloaded file with the GitHub CLI:
+
+    ```bash
+    gh attestation verify <file> --owner sachio222 --cert-identity-regex '^https://github\.com/sachio222/socketchat(_v4)?/\.github/workflows/release\.yml@refs/tags/v'
+    ```
+
+    See [Check a release](/help/updating#check-a-release).
   </Accordion>
   <Accordion title="Is Socketchat open source?">
     Yes, under your choice of the MIT or Apache-2.0 license. The code is on [GitHub](https://github.com/sachio222/socketchat).

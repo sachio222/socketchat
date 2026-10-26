@@ -1,7 +1,7 @@
 ---
 title: "What the server sees"
 description: "The server passes sealed messages along. What it can and cannot see, in plain words."
-keywords: ["privacy", "metadata", "server", "end-to-end encryption", "what the server sees"]
+keywords: ["privacy", "metadata", "server", "end-to-end encryption", "what the server sees", "padding", "update check"]
 ---
 
 The server can never read your messages, but it can see room rosters, when a message is sent, and can read IP addresses of users. It cannot see what was written or sent. It keeps all messages private, but does not make you anonymous.
@@ -11,21 +11,36 @@ This holds whoever runs the server: you, a friend, or a company you rent it from
 ## What the server never sees
 
 - Message text and file contents.
-- Display names and room names.
+- Display names, room names and room topics.
 - Any key that can open messages or files.
 - The secret part of an invite link. It sits after the `#` in the link, and apps never send it to the server.
 
 ## What the server does see
 
 - **Room rosters.** For each room, a list of random keys, one per member, so it knows where to deliver each sealed message. A person gets a fresh random key in every room, so the server's records do not tie one person's rooms together.
-- **Timing and size.** When each sealed message or file moves, and how big it is.
+- **Message sizes, rounded up.** Before sealing a message, the app pads it with zeros to a whole number of 256-byte blocks, so the server sees each message's size rounded up instead of its length. Every text of up to about 170 characters of English has the same size, and a longer one grows a block at a time. A one-word message grows from about 150 to 318 bytes. There is no setting to turn padding off, because someone who did would stand out in a shared room by their exact lengths. Apps on 0.5.1 and older do not pad, so the server sees the exact length of their messages.
+- **Timing.** When each sealed message or file moves. Padding does not hide when a message is sent.
+- **File sizes.** How big each sealed file is.
 - **IP addresses** of the apps that connect.
 - **Changes to who is in a room**, such as someone joining or an admin removing someone, so it can check that only admins make admin changes.
+- **Room settings**: whether only admins can invite, how long slow mode holds members between messages, and whether only admins can set the topic. The server reads the settings so it can enforce the first two, and it sees the third because it travels with them. They say nothing about what anyone writes; the topic itself travels encrypted.
+- **How fast each member posts** in each room. The server counts each member's posts in memory to limit fast posting, and keeps no record of the counts on disk.
 
 ## What stays on your computer
 
 Your messages, keys and room list live in one profile on your computer, encrypted with your passphrase. See [Your passphrase](/security/passphrase).
 
 When you leave a room, Socketchat deletes the room's keys from your computer at once, and its messages once you have read them. When a room closes or you are removed, the same happens as soon as your app learns of it. After 30 days, Socketchat deletes a finished room's messages even if they were never read. Deletion happens in each person's own app, so other members keep their own copies.
+
+## What leaves your computer besides chat
+
+Apart from the servers you join, Socketchat contacts one place: GitHub, to learn whether a newer release is out. It never sends anything to socketchat.org.
+
+- **When.** At most once a day, when the chat screen opens or when a command that opens your profile runs, such as `socketchat sync`.
+- **What it sends.** One HTTPS request to api.github.com for the latest release of sachio222/socketchat, with `socketchat` as its user agent and no cookie or token. It carries nothing about you, your profile, your servers or your chats. GitHub sees your IP address and the time, as it does for any web request.
+- **What it does with the answer.** When the release is newer than yours, the chat screen's bottom line and the output of commands such as `socketchat sync` say "Socketchat 0.5.3 is out. Run socketchat update." A copy that Homebrew installed says "Run brew upgrade socketchat." instead. Nothing is downloaded or installed. A check that fails says nothing, and the next one comes a day later.
+- **Turning it off.** Type `/updates off` in the chat screen, and your profile keeps the choice, or set `SOCKETCHAT_NO_UPDATE_CHECK=1` for one run. While the check is off, Socketchat makes no request to GitHub at all. `/about` says whether the check is on and when GitHub last answered, and `/updates on` turns it back on.
+
+See [Updating](/help/updating) for what `socketchat update` prints.
 
 For the full technical description, see [SECURITY.md](https://github.com/sachio222/socketchat/blob/main/SECURITY.md) in the repository.

@@ -1,10 +1,40 @@
 ---
 title: "Updating"
-description: "Get the newest Socketchat by running the installer again."
-keywords: ["update", "upgrade", "new version"]
+description: "See when a new release is out, get it with socketchat update, the installer or Homebrew, and check a download."
+keywords: ["update", "upgrade", "new version", "socketchat update", "brew upgrade", "attestation"]
 ---
 
-Run the installer again. It downloads the newest release and replaces the program; your profile and rooms stay as they are.
+Socketchat says when a newer release is out, and `socketchat update` prints the command that installs it. Your profile and rooms stay as they are.
+
+## The update notice
+
+Once a day Socketchat asks GitHub whether a newer release is out. When one is, the chat screen's bottom line and the output of commands such as `socketchat sync` say:
+
+```text
+Socketchat 0.5.3 is out. Run socketchat update.
+```
+
+A copy that Homebrew installed says "Run brew upgrade socketchat." instead. The request carries nothing about you or your chats, and a check that fails says nothing; [What leaves your computer besides chat](/security/what-the-server-sees#what-leaves-your-computer-besides-chat) says what it sends.
+
+- `/updates off` turns the check off, and your profile keeps the choice. `/updates on` turns it back on.
+- `SOCKETCHAT_NO_UPDATE_CHECK=1` turns it off for one run.
+- `/about` says whether the check is on and when GitHub last answered.
+
+While the check is off, Socketchat makes no request to GitHub at all.
+
+## socketchat update
+
+From 0.5.2 on, `socketchat update` prints the command that installs the newest release, for the way your copy was installed:
+
+```bash
+socketchat update
+```
+
+It prints `brew upgrade socketchat` for a Homebrew install, the install command again for the installer, or all of them when it cannot tell. It installs nothing itself. On an older copy, run the install command below.
+
+## Install the new version
+
+Run the installer again. It downloads the newest release and replaces the program.
 
 <Tabs>
   <Tab title="macOS and Linux">
@@ -33,12 +63,24 @@ socketchat --version
 
 If you built from source, run the same `cargo install --locked --git ...` command again.
 
+On macOS and Linux, the install command checks the archive it downloads against a SHA-256 checksum written into the installer, which comes from the same release. On a computer without the `sha256sum` command, it skips that check and says so. The Windows install command checks no checksum. A checksum from the same release catches a damaged download but not a release someone else published. `brew upgrade socketchat` checks each archive against the SHA-256 checksum in the Homebrew formula.
+
+## Check a release
+
+From 0.5.1 on, every file in a release has a GitHub build attestation: a signed record of the commit and the release workflow that built it. The install commands never check it. To check a file you downloaded from the [release page](https://github.com/sachio222/socketchat/releases), install the [GitHub CLI](https://cli.github.com) and run:
+
+```bash
+gh attestation verify <file> --owner sachio222 --cert-identity-regex '^https://github\.com/sachio222/socketchat(_v4)?/\.github/workflows/release\.yml@refs/tags/v'
+```
+
+Release 0.5.1 was built while the repository was named socketchat_v4, so the check accepts both names.
+
 ## Updating a server
 
 A server that runs as a service needs one more step: copy the new program into place and restart it. See [Update the server](/hosting/cloud-server#update-the-server). Back up the data folder first.
 
 ## Mixing versions
 
-Apps and servers from different releases work together. A newer server serves older apps, and a newer app talks to an older server, so you can update the server before or after your members. When a feature needs a newer server, the app says so and the rest keeps working.
+Apps and servers from different releases work together. A newer server serves older apps, and a newer app talks to an older server, so you can update the server before or after your members. When a feature needs a newer server, the app says so and the rest keeps working. Room settings and the posting pace need a 0.5.2 server; see [Room settings on your server](/hosting/server-settings#room-settings-on-your-server).
 
 [CHANGELOG.md](https://github.com/sachio222/socketchat/blob/main/CHANGELOG.md) lists what changed in each release.

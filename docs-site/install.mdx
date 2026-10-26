@@ -33,6 +33,12 @@ The installer downloads a ready-made `socketchat` program for your computer and 
     ```
 
     The program goes to `~/.local/bin/socketchat`. Ready-made programs cover Intel or AMD (x86_64) and 64-bit ARM (aarch64), which includes a Raspberry Pi 4 or Zero 2 W on 64-bit Raspberry Pi OS. They need glibc 2.35 or newer, which Ubuntu 22.04, Debian 12 and Raspberry Pi OS 12 (Bookworm) have.
+
+    If you use [Homebrew](https://brew.sh) on Linux, install it with brew instead:
+
+    ```bash
+    brew install sachio222/tap/socketchat
+    ```
   </Tab>
   <Tab title="Windows">
     Open PowerShell and run:
@@ -65,6 +71,8 @@ socketchat --version
 ```
 
 `socketchat server init` with no `--host` sets up a server only this computer can reach, at `localhost`. For friends on other computers, pick an address first; [Host a server](/hosting/overview) shows how.
+
+With Homebrew, each release updates Socketchat's Homebrew formula, so `brew upgrade socketchat` finds the new version. [Updating](/help/updating) covers every way to update.
 
 Run `socketchat` on its own before you have a profile, and it lists the same commands. A profile is the encrypted folder where Socketchat keeps your keys, rooms and messages on this computer. `socketchat join` makes it the first time you use an invite link.
 

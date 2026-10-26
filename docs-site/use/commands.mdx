@@ -1,7 +1,7 @@
 ---
 title: "Commands"
 description: "Every slash command in the chat screen and every socketchat terminal command, with its flags."
-keywords: ["commands", "slash commands", "CLI", "reference", "socketchat join", "socketchat send"]
+keywords: ["commands", "slash commands", "CLI", "reference", "socketchat join", "socketchat send", "socketchat update", "socketchat topic", "/settings"]
 ---
 
 ## Slash commands
@@ -23,7 +23,9 @@ Type these in the chat screen's message box. Tab completes a command as you type
 | `/rename <name> <new>` | Rename someone on your screen only. |
 | `/invites` | See your open invite links. |
 | `/cancel <number>` | Stop an invite link from the `/invites` list. |
-| `/details` | See this room's admins, size, age and server. |
+| `/details` | See this room's admins, size, age, server, topic and settings. |
+| `/topic [text]` | See the room's topic, or set it. `/topic --clear` removes it. Admins only, unless the room lets anyone set it. |
+| `/settings` | See who can invite, whether slow mode is on and who can set the topic. |
 | `/mute` | Hide this room's new-message count. |
 | `/unmute` | Show this room's new-message count again. |
 | `/leave` | Leave this chat and delete its history here. |
@@ -36,8 +38,13 @@ Type these in the chat screen's message box. Tab completes a command as you type
 | `/kick <name>` | Remove someone. |
 | `/admin <name>` | Make someone an admin. |
 | `/title <name>` | Rename this room for everyone. |
+| `/settings invite admins\|anyone` | Choose who can bring people into this room. Rooms start with anyone. |
+| `/settings slow <seconds>\|off` | Make each member who isn't an admin wait between messages, up to 6 hours, or turn that off. |
+| `/settings topic anyone\|admins` | Choose who can set this room's topic. Rooms start with admins. |
 | `/close` | Close this room for everyone, once the admins agree. |
 | `/keep` | Say no to closing this room. |
+
+Room settings need a server on 0.5.2 or later, and everyone in the room on 0.5.2 or later. See [Room settings](/use/rooms-and-invites#room-settings).
 
 ### Files
 
@@ -63,6 +70,7 @@ New rooms go on the open room's server. With no room open, they go on the newest
 |---|---|
 | `/theme [name]` | See or change the colors: `phosphor` or `classic`. |
 | `/mouse [on\|off]` | Turn mouse clicks and scrolling on or off. |
+| `/updates [on\|off]` | Turn the daily check for a new version on or off. See [Updating](/help/updating#the-update-notice). |
 | `/help` | List every command. |
 | `/about` | See the version and what Socketchat is. |
 | `/quit` | Close Socketchat. |
@@ -82,12 +90,14 @@ Run these in a terminal. `socketchat --help` and `socketchat <command> --help` p
 | `socketchat invite --group <name>` | Print an invite link to a room, on one line. |
 | `socketchat invite --dm` | Print a link that opens a new two-person chat. |
 | `socketchat invites [--cancel <number>]` | List your open invite links, or cancel one. |
-| `socketchat send --group <name> <text>...` | Send a message to a room. |
+| `socketchat send --group <name> <text>...` | Send a message to a room. When the room limits fast posting, waits until the message goes. |
+| `socketchat topic --group <name> [<text>...] [--clear]` | Print a room's topic, set it with text, or remove it with `--clear`. |
 | `socketchat log --group <name> [--limit <n>]` | Print a room's recent messages, 50 by default, and mark them read. When more are unread than the limit, prints the oldest unread first. |
 | `socketchat sync` | Fetch everything new and print what happened. |
 | `socketchat server init [--host <address>] [--listen <ip:port>] [--data-dir <folder>]` | Set up a server. See [Server settings](/hosting/server-settings). |
 | `socketchat server run [--data-dir <folder>] [--config <file>]` | Run the server until Ctrl-C. |
 | `socketchat server invite [--data-dir <folder>]` | Print a one-time link that registers a new person on this server. |
+| `socketchat update` | Print the command that installs the newest release, for the way this copy was installed. It installs nothing. See [Updating](/help/updating). |
 | `socketchat --version` | Print the version. |
 
 `--new-certificate` trusts the server certificate in the link in place of the one Socketchat already trusts for that server, after its operator set it up again. See [A certificate-change warning](/help/troubleshooting#a-certificate-change-warning).
@@ -104,6 +114,7 @@ Run these in a terminal. `socketchat --help` and `socketchat <command> --help` p
 | `SOCKETCHAT_PASSPHRASE` | The passphrase, so commands do not ask for it. For scripts; never put it in a shell profile on a shared machine. |
 | `SOCKETCHAT_NAME` | The display name to use when `socketchat join` sets up a new profile. |
 | `SOCKETCHAT_THEME` | `phosphor` or `classic` for this run only. |
+| `SOCKETCHAT_NO_UPDATE_CHECK` | Set to `1` to skip the daily check for a new version for this run. Any value but empty or `0` works. |
 
 ## Exit codes
 

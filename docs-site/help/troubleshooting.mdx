@@ -112,6 +112,18 @@ The passphrase cannot be recovered. Socketchat says "That passphrase does not op
 
 Only one copy of Socketchat can open a profile at a time. Close the other chat screen, or wait for a script using the same profile to finish. An agent should use its own profile; see [Agents](/use/agents).
 
+## "This room limits fast posting"
+
+"This room limits fast posting; sending in 4 seconds." means the room's posting pace or slow mode is holding your message. Your app sends it by itself when the time is up, so leave it be. See [Posting pace](/use/rooms-and-invites#posting-pace).
+
+## "this room needs Socketchat 0.5.2 or later"
+
+The room's admins changed one of its settings, and only apps on 0.5.2 or later can join such a room. Update Socketchat (see [Updating](/help/updating)), then ask for a new invite link.
+
+## "That is not a Socketchat invite link"
+
+`socketchat join` takes a `socketchat://` link, or its web form `https://socketchat.org/join#socketchat://...`. Any other web address is refused. Paste the whole link from the invite message, or the address from the join page.
+
 ## The invite did not copy
 
 The line under the link in the invite box says whether the copy worked. On Linux, install `wl-copy` (Wayland), or `xclip` or `xsel` (X11), so Socketchat can use your clipboard. Over SSH, Socketchat asks your terminal to copy, which some terminals do not allow. You can always select the link in the box and copy it by hand; with the mouse on, hold Shift as you drag (Option or Fn on a Mac).

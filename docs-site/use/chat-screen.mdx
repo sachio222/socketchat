@@ -1,6 +1,6 @@
 ---
 title: "The chat screen"
-description: "Panels, keys, the mouse, Tab completion and colors."
+description: "Panels, keys, earlier lines, the mouse, Tab completion and colors."
 keywords: ["chat screen", "TUI", "keyboard shortcuts", "mouse", "theme", "phosphor", "Tab completion"]
 ---
 
@@ -8,18 +8,18 @@ Run `socketchat` to open the chat screen. It asks for your passphrase, then show
 
 <img src="/images/chat.png" alt="The chat screen with three panels: Chats on the left, the open room's messages in the middle, and People on the right, above the message box." />
 
-<Note>This picture shows the classic colors. Socketchat 0.5.1 opens in the phosphor colors by default; see [Colors](#colors).</Note>
+<Note>This picture shows the phosphor colors, the default. `/theme classic` switches to your terminal's own colors; see [Colors](#colors).</Note>
 
 ## Panels
 
 | Panel | What it shows |
 |---|---|
 | **Chats** | Your rooms, marked `#`, and direct messages, marked `@`. A number shows new messages. |
-| **Messages** | The open room, with times and names. The panel title is the room's name and its server, as in `Book club · chat.example.com`. |
+| **Messages** | The open room, with times and names. The panel title is the room's name and its server, as in `Book club · chat.example.com`. When the room has a topic, the first line under the title shows it, as in `Topic: Piranesi, chapters 1 to 5`, cut to one line; `/details` shows all of it. |
 | **People** | Everyone in the room. `✓` marks someone you verified, and `*` marks an admin. |
 | **Message box** | Where you type messages and commands. The empty box reads "What's on your mind?" with the open room's name. |
 
-The bottom line shows the keys that work right now, and the Socketchat version when the window is wide enough.
+The bottom line shows the keys that work right now, and the Socketchat version when the window is wide enough. When a newer release is out, it says so, as in "Socketchat 0.5.3 is out. Run socketchat update."; see [Updating](/help/updating#the-update-notice).
 
 ## The room's server
 
@@ -34,7 +34,7 @@ New rooms from `/new` go on the open room's server, or on the newest server you 
 | Enter | Send the message, or run the command. |
 | Tab, Shift-Tab | Move between panels. While you type a command, complete it instead. |
 | Ctrl-K | Open the room switcher. Type to filter, Enter to open. |
-| Up, Down | Pick a room in Chats or a person in People, or scroll the messages. |
+| Up, Down | In the message box, bring back your earlier lines in this room. Elsewhere, pick a room in Chats or a person in People, or scroll the messages. |
 | PgUp, PgDn | Scroll the messages. |
 | Esc | Close a box. |
 | Y, N | Answer a question, such as whether to send a video. Only Y as the first key pressed means yes. |
@@ -45,6 +45,15 @@ New rooms from `/new` go on the open room's server, or on the newest server you 
 Type `/` to start a command, and `/help` to see them all. Tab completes a command as you type it, and Tab or Shift-Tab steps through the matches when there are several. Matching commands show on the bottom line, and a grey suggestion after the cursor shows what Tab would add; Right arrow accepts it. `/switch` and Tab complete a room's name, and `/theme` and Tab cycle the color names.
 
 See [Commands](/use/commands) for the full list.
+
+## Earlier lines
+
+In the message box, Up brings back the last message you sent or command you ran in the open room, and each further Up goes one line further back. Down goes forward again and, past the newest line, gives back what you were typing. While an earlier line shows, the bottom line says what Up and Down do, and `/help` lists them.
+
+- Each room keeps its own lines, the newest 100.
+- A line repeated in a row is kept once.
+- Socketchat keeps them in memory only and never writes them to disk, so they go when Socketchat closes.
+- `/leave`, `/clear` and `/forget` drop a room's lines at once.
 
 ## Pasting
 

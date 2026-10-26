@@ -15,7 +15,9 @@ In plain words:
 - **Everyone in a room shares a set of keys** that only members hold. A sender locks a message once, and the server copies the sealed message to every member.
 - **Keys change when the room changes.** Each time someone joins or leaves, MLS moves the room to new keys. Someone who leaves cannot read what comes after, and someone who joins cannot read what came before.
 - **Keys refresh over time.** Each app also refreshes its own keys in a room when they are more than a week old, so an old key stops opening new messages.
-- **Changes are signed.** Every change to who is in a room carries the signature of the member who made it. Apps check those signatures, so the server cannot add someone on its own.
+- **Changes are signed.** Every change to who is in a room carries the signature of the member who made it. Apps check those signatures, so the server cannot add someone on its own. Room settings, such as who can invite, travel inside these signed changes, so neither the server nor a member who is not an admin can forge or flip one.
+- **Messages show under the member who wrote them.** An app takes a message as its sender's only when the key that signed it belongs to the member in that place in the room now, and ignores it otherwise.
+- **Messages are padded.** Before sealing a message, the app pads it with zeros to a whole number of 256-byte blocks, so the server sees its size rounded up instead of its length. See [What the server sees](/security/what-the-server-sees).
 
 ## Protection against future quantum computers
 

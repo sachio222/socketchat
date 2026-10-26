@@ -1,7 +1,7 @@
 ---
 title: "Rooms and invites"
-description: "Make a room, invite people with a one-time link, verify them, and run the room as an admin."
-keywords: ["rooms", "invite", "invite link", "QR code", "join", "direct message", "verify", "safety number", "admin"]
+description: "Make a room, invite people with a one-time link or a QR code, verify them, set a topic, and run the room as an admin."
+keywords: ["rooms", "invite", "invite link", "QR code", "join", "direct message", "verify", "safety number", "admin", "topic", "room settings", "slow mode"]
 ---
 
 A room is a group chat. Everyone in it holds the keys to read it, and nobody else does, the server included. People come in only through invite links.
@@ -26,11 +26,11 @@ You are the room's first admin. From a terminal, `socketchat new "Book club"` do
     /invite
     ```
 
-    A box shows the link and, when the window is large enough, a QR code. Socketchat also copies an invite message to your clipboard as the box opens:
+    A box shows the link and, when the window is large enough, a QR code that a phone can scan; see [Scan the QR code with a phone](#scan-the-qr-code-with-a-phone). Socketchat also copies an invite message to your clipboard as the box opens:
 
     ```text
     Join me on Socketchat, an encrypted chat.
-    1. Install it from https://socketchat.org
+    1. Install it on your computer from https://socketchat.org
     2. Then run: socketchat join "socketchat://host:7444/j/..."
     ```
 
@@ -59,6 +59,15 @@ You are the room's first admin. From a terminal, `socketchat new "Book club"` do
 The copied message works best in a chat app or email. Socketchat copies with your computer's own clipboard program (pbcopy, wl-copy, xclip, xsel or clip.exe). Without one, it asks your terminal to copy, which works in many terminals and over SSH; if pasting finds nothing, select the link in the box and copy it.
 </Tip>
 
+## Scan the QR code with a phone
+
+Socketchat runs on a computer, so nobody joins a room from a phone. The QR code in the invite box holds the link as a web address, `https://socketchat.org/join#socketchat://...`, so a phone camera opens a page at [socketchat.org/join](https://socketchat.org/join) instead of a link it has no app for.
+
+- **On a phone**, the page says that Socketchat runs on a computer, and offers Share, Copy link and Email to myself, so your friend can send the link to their computer.
+- **On a computer**, the page shows the install command for that system and the `socketchat join` command with the link, each with a Copy button.
+
+The invite sits after the `#`, and a browser never sends that part of a web address to a website, so it stays on the phone or computer that opened the page. The text under the QR code is still the `socketchat://` link, ready to paste into a terminal. For a long link, the QR code uses lower error correction when that makes it fit, and the box shows the whole code or a note to make the window larger.
+
 ## Join with a link
 
 To join a room or a server someone invited you to, use their link:
@@ -67,7 +76,7 @@ To join a room or a server someone invited you to, use their link:
 socketchat join "socketchat://host:7444/j/..."
 ```
 
-`socketchat join` also accepts the web form of a link, `https://socketchat.org/join#socketchat://...`. Inside the chat screen, `/join <link>` does the same.
+`socketchat join` also accepts the web form of a link: `https://socketchat.org/join#socketchat://...`, from the QR code, or `https://socketchat.org/join/#socketchat://...`, the address a browser shows after it opens the join page. Paste either one as it is. Inside the chat screen, `/join <link>` does the same. Socketchat reads these links and never opens them, so the invite after the `#` goes nowhere. Any other web address is refused with "That is not a Socketchat invite link: the only web address that carries an invite is https://socketchat.org/join."
 
 There are two kinds of link:
 
@@ -93,7 +102,7 @@ The verified mark (`✓`) means your app checked who that person is. It comes fr
 
 Socketchat shows the number and a QR code. Compare them with Ada in person or on a call, and press Y if they match. A matching display name proves nothing on its own; check the number.
 
-<img src="/images/verify.png" alt="Two chat screens side by side, each showing the same 60-digit safety number and QR code." />
+<img src="/images/verify.png" alt="The chat screen with the Check Bo box open: a 60-digit safety number and its QR code." />
 
 ## Your invite links
 
@@ -111,10 +120,78 @@ Admins look after a room. The person who made it is the first.
 | `/kick <name>` | Remove someone from the room. |
 | `/admin <name>` | Make someone an admin. |
 | `/title <name>` | Rename the room for everyone. The room shows who renamed it. |
+| `/topic <text>` | Set the room's topic. See [Room topic](#room-topic). |
+| `/settings invite admins` | Let only admins bring people in. `/settings invite anyone` goes back. |
+| `/settings slow <seconds>` | Turn on slow mode. `/settings slow off` turns it off. |
+| `/settings topic anyone` | Let anyone in the room set the topic. `/settings topic admins` goes back. |
 | `/close` | Ask to close the room for everyone. |
 | `/keep` | Say no to closing the room. |
 
 A room closes once its admins agree: every admin when it has up to three, more than half when it has more. A room with one admin closes at once. A request to close stays open for seven days.
+
+## Room topic
+
+A topic is one line about the room, such as what you are reading this month. Everyone in the room sees it under the room's name, as `/topic` works in IRC (Internet Relay Chat).
+
+```text
+/topic Piranesi, chapters 1 to 5
+```
+
+- `/topic` on its own shows the topic with who set it and when, and `/details` shows all of it.
+- `/topic --clear` removes it.
+- Each change shows in the room as a line such as "Topic: Piranesi, chapters 1 to 5 (set by Ada, verified, 2026-10-25)", and someone who joins later sees the same line.
+- A topic is at most 300 characters.
+
+Only admins set the topic, as IRC's `+t` mode does, until an admin runs `/settings topic anyone`. `/settings topic admins` goes back. A member who tries without the right hears "Only admins can set this room's topic."
+
+From a terminal, `socketchat topic --group <name>` prints a room's topic, `socketchat topic --group <name> <text>` sets it, and `socketchat topic --group <name> --clear` removes it.
+
+The topic travels encrypted, so the server never sees it; it sees only the setting for who may set it. Each topic carries the setter's signature, so the app that passes it on to a newcomer cannot change its words or name someone else as its setter. A topic always shows after `Topic:` in its own color, never in the colors of Socketchat's own notices, warnings or verified mark, and a link in it shows as its full address. Apps on 0.5.1 or older show no topic and keep working in the room as before.
+
+## Room settings
+
+A room's admins choose who can bring people in, whether slow mode holds members between messages, and who can set the topic. `/settings` shows all three:
+
+```text
+Who can invite: anyone in the room. Slow mode: off. Who can set the topic: admins only. Admins change these with /settings invite, /settings slow or /settings topic.
+```
+
+Only admins change a setting. Anyone else hears "Only admins can change this room's settings."
+
+### Who can invite
+
+Rooms start with anyone in the room able to invite. `/settings invite admins` lets only admins bring people in, and `/settings invite anyone` goes back. The room shows a line such as "Ada let only admins invite people to this room."
+
+In an admins-only room, the server refuses a member's invite link and a member's add, and every app refuses such an add too. Links that members made before the change stop working, and someone waiting on one hears that it stopped working.
+
+A server's operator can make every room on the server admins-only for invite links and adds, whatever each room's setting says; see [Server settings](/hosting/server-settings#room-settings-on-your-server). Then `/details` says "Who can invite: admins only, because this server lets only admins invite people", and an admin who runs `/settings invite anyone` hears "This server lets only admins invite people into its rooms, so this room stays admins-only."
+
+### Slow mode
+
+`/settings slow <seconds>` makes each member who isn't an admin wait that long between messages, up to 6 hours. `/settings slow off` turns it off. Admins are not held. The server enforces it, and the room shows a line such as "Ada turned on slow mode: one message every 30 seconds for each member who isn't an admin."
+
+### What settings need
+
+- **A server on 0.5.2 or later.** An older server cannot keep room settings, so the app refuses to set them there: "This server runs an older version of Socketchat, so it can't keep this setting. Ask the person who runs it to update." Setting a room back to the defaults still works. `/settings` and `/details` say "This server runs an older version of Socketchat, so it can't enforce who can invite or slow mode."
+- **Everyone in the room on 0.5.2 or later.** An admin can change a setting once everyone in the room runs 0.5.2 or later and has opened the room once since updating. Until then, the admin's app names who it waits for.
+
+While a room has settings, an app on 0.5.1 or older cannot join it, and its owner hears "this room needs Socketchat 0.5.2 or later; update Socketchat, then ask for a new invite link". Rooms on the default settings work with older apps as before.
+
+## Posting pace
+
+A server limits how fast each member posts in each room: a burst of 30 messages, then one every 5 seconds, with a byte allowance that only large messages meet. Admins get ten times that. The operator can change these numbers; see [How fast members can post](/hosting/server-settings#how-fast-members-can-post).
+
+A message over the limit, or held by slow mode, waits in your app. The app says "This room limits fast posting; sending in 4 seconds." and sends it once the server allows, after any others waiting in that room.
+
+- The app encrypts nothing for a room while the room holds it back.
+- Messages the app sends on its own, such as your name after someone joins, wait the same way without a word.
+- A waiting message goes only to the people who were in the room when you typed it. If someone joins or leaves first, the app says "Not sent, because the people in this room changed while it waited. Send it again if you still want to." and puts the text back in the message box.
+- Quitting while a message waits asks first.
+- `socketchat send` waits until its message goes.
+
+The server never removes or bans anyone for posting fast. A member can always ask to leave, and removing someone is never held up.
+
+Apps on 0.5.1 or older are held to the same pace on a 0.5.2 server. Over it, they show "this room limits fast posting; try again in 4 seconds" as an error, and the message stays in the message box to send again.
 
 ## Names
 
@@ -127,6 +204,6 @@ A room closes once its admins agree: every admin when it has up to three, more t
 
 Other room commands:
 
-- `/details` shows the room's admins, how many people are in it and when it was made.
+- `/details` shows the room's admins, how many people are in it, when it was made, its server, its topic and its settings.
 - `/mute` hides the room's new-message count on your computer, and `/unmute` shows it again. Nobody else sees that you muted it.
 - `/clear` deletes the room's messages and files list from this computer while you stay in it.

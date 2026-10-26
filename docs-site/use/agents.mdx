@@ -37,11 +37,13 @@ socketchat log --group "Book club" --limit 20
 socketchat sync
 ```
 
-- `send` posts a message to the room named by `--group`.
+- `send` posts a message to the room named by `--group`. When the room limits fast posting, it waits until the message goes; see [Posting pace](/use/rooms-and-invites#posting-pace).
 - `log` prints the room's recent messages as `Name: text`, and marks them read. When more are unread than `--limit`, it prints the oldest unread ones first. With nothing unread it prints the most recent ones again, so use it to catch up on context.
 - `sync` fetches everything new from every room and prints only what happened since the last sync, such as `[Book club] Ada: hello`, joins and removals.
 
-In 0.5.1, the second and later lines of a message print indented by four spaces. A line that starts at the left edge always begins a new message and names its sender, so one person's text can never pass for another's message.
+From 0.5.1 on, the second and later lines of a message print indented by four spaces. A line that starts at the left edge always begins a new message and names its sender, so one person's text can never pass for another's message.
+
+`socketchat topic --group "Book club"` prints the room's topic, so an agent can read what the room is about. When a newer release is out, commands print "Socketchat 0.5.3 is out. Run socketchat update." to standard error, never to standard output. Set `SOCKETCHAT_NO_UPDATE_CHECK=1` in the agent's environment to skip the check.
 
 ## A simple loop
 

@@ -1,8 +1,8 @@
 ---
 title: "Server settings and backups"
 sidebarTitle: "Settings and backups"
-description: "The server's config file, where its data lives, how it cleans up old data, and how to back it up."
-keywords: ["socketchat-server.toml", "config", "retention", "backup", "data directory", "limits"]
+description: "The server's config file, where its data lives, how fast members can post, room settings, how it cleans up old data, and how to back it up."
+keywords: ["socketchat-server.toml", "config", "retention", "backup", "data directory", "limits", "rate limit", "slow mode", "members_can_invite_to_rooms", "members_make_accounts"]
 ---
 
 <Info>New to this? Read [How Socketchat works](/how-it-works) first.</Info>
@@ -41,7 +41,8 @@ The folder holds the database (`server.db` with its `-wal` and `-shm` files), th
 | `retention_days` | `30` | Days the server keeps messages and files nobody has fetched. |
 | `max_file_mb` | `100` | Largest file anyone can send, in megabytes. |
 | `invite_ttl_hours` | `24` | Hours an invite link stays usable. |
-| `members_can_invite` | `true` | Whether members, not only admins, can make room invite links. When `false`, only admins make room links and only you make server invites. |
+| `members_make_accounts` | `true` | Whether people with an account here can bring new people onto your server. When `false`, only you make server invites, and people who join through a room link can chat in that room but cannot start their own rooms until you send them a server invite. |
+| `members_can_invite_to_rooms` | `true` | Whether members who are not admins may bring people into rooms at all. When `false`, every room on your server is admins-only for invite links and adds, whatever its own setting says, and apps say so in `/details`. When `true`, each room's admins decide with `/settings invite`. |
 | `require_standard_suite` | `false` | When `true`, new rooms must use the standard MLS encryption suite, which has no post-quantum protection. |
 | `max_connections` | `1000` | Most connections served at once. |
 | `max_per_ip` | `256` | Most connections from one address at once. High by default, because a whole office or school can share one address. |
@@ -50,11 +51,33 @@ The folder holds the database (`server.db` with its `-wal` and `-shm` files), th
 | `max_room_files_mb` | `4000` | Files one room may hold. |
 | `max_member_files_mb` | `4000` | Files one member of a room may hold there. |
 | `max_room_welcomes` | `100` | People one room may have waiting to join. |
+| `rate_burst_messages` | `30` | Messages one member can post in a room in a quick burst. After it, the member gets one message back every `rate_seconds_per_message` seconds. Admins get ten times the burst and the refill. `0` turns the whole pace limit off. |
+| `rate_seconds_per_message` | `5` | Seconds a member waits for each message once the burst is spent. `0` means no limit on the number of messages; the byte limit still applies. |
+| `rate_burst_kb` | `2000` | Kilobytes of 1,000 bytes one member can post in a room in a burst. The server never uses less than one message of the largest size, about 1,048 KB. |
+| `rate_kb_per_second` | `10` | Kilobytes a member gets back each second once the byte burst is spent. `0` means no byte limit; the message limit still applies. |
 | `max_stored_mb` | `8000` | Messages, files and invitations the whole server may hold. Files may use nine tenths of it. Raise it to fit a larger disk. |
 | `max_frame_before_sign_in` | `8192` | Largest request, in bytes, a connection may send before it signs in. |
 | `max_buffered_before_sign_in_mb` | `8` | Memory all connections that have not signed in may use together. Raise it with `max_connections`. |
 
 Megabytes here are 1,000,000 bytes. At a storage limit the server refuses new messages or files with a reason the app shows, until members fetch older ones or they expire.
+
+Config files from before 0.5.2 had one key, `members_can_invite`, in place of `members_make_accounts` and `members_can_invite_to_rooms`. The server still reads it: `false` there reads as `members_make_accounts = false` and `members_can_invite_to_rooms = false`, so members still cannot bring new accounts onto your server or people into its rooms. The old key never loosens a new key set beside it, and a config the server saves writes the two new keys.
+
+## How fast members can post
+
+The server limits how fast each member posts in each room, so one person cannot flood a room before an admin removes them. Each member starts with a burst of 30 messages, then gets one back every 5 seconds, so a flood slows to 12 messages a minute. A post over the limit is not stored: the person's app holds it, says "This room limits fast posting; sending in 4 seconds.", and sends it once the server allows. The server never removes or bans anyone for posting fast. Leaving a room, and removing someone, are never held up.
+
+The defaults start from the server for Matrix, another open chat system, which allows each sender a burst of 10 messages and then one every 5 seconds. Socketchat counts everything a member posts, and the app posts on its own when someone joins: about eight posts for each person a member brings in, such as the link's details, the inviter's name and the room's name. A burst of 30 lets a member bring in three people at once and still chat. Admins get ten times a member's burst and refill, 300 messages and then one every half second, because the app posts on their behalf for everyone they bring in.
+
+A room's admins can also turn on slow mode with `/settings slow <seconds>`, up to 6 hours, which holds each member who is not an admin to one message per period; admins are never held by it. The server enforces whichever limit is stricter. The server counts in memory only, and a restart gives everyone a full burst.
+
+## Room settings on your server
+
+Room admins choose who can bring people into their room, anyone in it or admins only, and whether slow mode is on. Both travel in the room's signed group changes, so the server reads and enforces them, and only an admin can change them. In an admins-only room the server refuses a member's invite link and a member's add, and when a room goes admins-only it deletes the links members made there. `members_can_invite_to_rooms = false` makes every room on your server admins-only whatever its setting, and `members_make_accounts` decides whether people can bring new accounts onto your server. See [Room settings](/use/rooms-and-invites#room-settings) for the commands.
+
+A room whose admins changed a setting needs Socketchat 0.5.2 or later from everyone in it. Someone with an older app who uses a link into such a room hears "this room needs Socketchat 0.5.2 or later; update Socketchat, then ask for a new invite link". Rooms on the default settings work with older apps as before.
+
+Room settings and the pace limit need a server on 0.5.2 or later, which speaks protocol 3. On an older server, apps on 0.5.2 refuse to set room settings, and `/settings` and `/details` say the server is too old. Upgrade the server first if your members want room settings. A 0.5.2 server holds apps on every version to each room's settings and the pace limit; an app on 0.5.1 or older that posts too fast hears the wait as a refusal.
 
 ## What the server cleans up
 
