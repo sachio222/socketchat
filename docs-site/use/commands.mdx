@@ -6,7 +6,7 @@ keywords: ["commands", "slash commands", "CLI", "reference", "socketchat join", 
 
 ## Slash commands
 
-Type these in the chat screen's message box. Tab completes a command as you type it. `/help`, or `/` and Enter, lists every command in alphabetical order to pick from; see [Find a command](/use/chat-screen#find-a-command).
+Type these in the chat screen's message box. Tab completes a command as you type it, and after `/switch`, `/invite` or `/join` it puts in a room or a name; Up and Down step through the same list. See [Complete rooms and names](/use/chat-screen#complete-rooms-and-names). `/help`, or `/` and Enter, lists every command in alphabetical order to pick from; see [Find a command](/use/chat-screen#find-a-command).
 
 ### Rooms and people
 
@@ -15,12 +15,12 @@ Type these in the chat screen's message box. Tab completes a command as you type
 | `/new <name>` | Start a new group chat on the open room's server, and say which server. |
 | `/invite` | Make a one-time link that brings someone into this chat, and copy an invite message. |
 | `/invite --dm` | Make a link that opens a new two-person chat. |
-| `/invite <name> [room]` | Invite someone you already share a room with to this room, or to the room you name. See [Invite someone you share a room with](/use/rooms-and-invites#invite-someone-you-share-a-room-with). |
+| `/invite <name> [room]` | Invite someone you already share a room with to this room, or to the room you name. Tab completes the name. See [Invite someone you share a room with](/use/rooms-and-invites#invite-someone-you-share-a-room-with). |
 | `/join <link>` | Use an invite link someone sent you. |
-| `/join <room>` | Join a room someone invited you to by name. `/join` alone joins when one invite waits. |
+| `/join <room>` | Join a room someone invited you to by name. Tab completes the room. `/join` alone joins when one invite waits. |
 | `/join <number>` | Join one of several invites that fit, by the number `/join` listed. |
 | `/dm <name>` | Start a two-person chat with someone in this chat. |
-| `/switch [room]` | Open another room. Tab completes the name; with no name, opens the switcher. |
+| `/switch [room]` | Open another room. Tab, or Up and Down, step through the room names; with no name, opens the switcher. |
 | `/verify <name>` | Compare safety numbers with someone. |
 | `/name <new>` | Change the name others see for you. |
 | `/rename <name> <new>` | Rename someone on your screen only. |
@@ -53,7 +53,7 @@ Room settings need a server on 0.5.2 or later, and everyone in the room on 0.5.2
 
 | Command | What it does |
 |---|---|
-| `/send <path>` | Send a file, photo or video. |
+| `/send <path>` | Send a file, photo or video. Dropping the file on the window does the same; see [Drop a file on the window](/use/files-photos-videos#drop-a-file-on-the-window). |
 | `/save <file> [folder]` | Save a file someone sent. Use `<file>:<number>` when several files share a name. |
 
 ### Servers
@@ -77,7 +77,7 @@ New rooms go on the open room's server. With no room open, they go on the newest
 | `/status` | See the open room's server and connection, you, the room and the app in one box. See [`/status`](#status). |
 | `/help` | List every command in alphabetical order, and pick one to use. |
 | `/about` | See the version, what Socketchat is and what the server still sees. |
-| `/quit` | Close Socketchat. |
+| `/quit` | Close Socketchat at once. Ctrl-C twice within 2 seconds does the same. |
 
 A name with spaces goes in quotes, as in `/save "beach day.jpg"` or `/invite Bo "Climbing Saturdays"`.
 

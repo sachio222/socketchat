@@ -1,7 +1,7 @@
 ---
 title: "The chat screen"
-description: "Panels, keys, finding a command, earlier lines, the mouse, copying text and colors."
-keywords: ["chat screen", "TUI", "keyboard shortcuts", "mouse", "copy", "select text", "help", "theme", "phosphor", "Tab completion"]
+description: "Panels, keys, finding a command, completing rooms and names, earlier lines, dropping a file, the mouse, copying text and colors."
+keywords: ["chat screen", "TUI", "keyboard shortcuts", "mouse", "copy", "select text", "help", "theme", "phosphor", "Tab completion", "drop a file", "drag and drop", "Ctrl-C", "quit"]
 ---
 
 Run `socketchat` to open the chat screen. It asks for your passphrase, then shows your rooms. It works in any terminal window of 80 by 24 characters or larger, and over SSH.
@@ -32,13 +32,13 @@ New rooms from `/new` go on the open room's server, or on the newest server you 
 | Key | What it does |
 |---|---|
 | Enter | Send the message, or run the command. When only one command starts with what you typed, run it, so `/q` quits, or put it in the box to type the rest, so `/jo` gives `/join `. A lone `/` opens the list of commands. |
-| Tab, Shift-Tab | Move between panels. While you type a command, complete it instead. |
+| Tab, Shift-Tab | Move between panels. While you type a command, complete it instead, and after `/switch`, `/invite` or `/join` put in a room or a name. |
 | Ctrl-K | Open the room switcher. Type to filter, Enter to open. |
-| Up, Down | In the message box, after `/` and a letter, step through the commands that start with those letters. Otherwise bring back your earlier lines in this room. Elsewhere, pick a room in Chats or a person in People, or scroll the messages. |
+| Up, Down | In the message box, after `/` and a letter, step through the commands that start with those letters, and after `/switch`, `/invite` or `/join` step through the rooms or names Tab would give. Otherwise bring back your earlier lines in this room. Elsewhere, pick a room in Chats or a person in People, or scroll the messages. |
 | PgUp, PgDn | Scroll the messages. |
 | Esc | Close a box, or clear a selection. |
 | Y, N | Answer a question, such as whether to send a video. Only Y as the first key pressed means yes. |
-| Ctrl-C | Quit. `/quit` does the same. |
+| Ctrl-C | Quit when pressed twice within 2 seconds. After the first press the bottom line says "Press Ctrl-C again to quit.", and any other key, or 2 seconds passing, starts over. With text selected, Ctrl-C copies it instead. `/quit` quits at once. |
 
 ## Find a command
 
@@ -51,7 +51,19 @@ Type `/` and Enter, or `/help`, to open a list of every command in alphabetical 
 
 To step through commands without the list, type `/` and a letter: Up and Down put each command that starts with those letters in the message box in turn, in alphabetical order, going round. Typing ends the run. With a lone `/`, an empty box or a message, Up and Down bring back earlier lines instead.
 
-Tab completes a command as you type it, and Tab or Shift-Tab steps through the matches, in alphabetical order, when there are several. Matching commands show on the bottom line, and a grey suggestion after the cursor shows what Tab would add; Right arrow accepts it. `/switch` and Tab complete a room's name, and `/theme` and Tab cycle the color names.
+Tab completes a command as you type it, and Tab or Shift-Tab steps through the matches, in alphabetical order, when there are several. Matching commands show on the bottom line, and a grey suggestion after the cursor shows what Tab would add; Right arrow accepts it. `/theme` and Tab cycle the color names.
+
+## Complete rooms and names
+
+After `/switch`, `/invite` or `/join` and a space, Tab puts in a room or a name, and each further Tab moves to the next, going round. Shift-Tab goes back. Letters after the space narrow the list: `/join Cl` and Tab takes only the rooms that start with "Cl".
+
+| After | Tab puts in |
+|---|---|
+| `/switch` | One of your rooms. Enter opens the room shown. |
+| `/invite` | The name of someone who shares a room with you, with people who are not in the open room first. Two people with the same name come up as `Bo#1a2b` and `Bo#9f3c`, so the command names one person, and a name with a space comes up in quotes. Someone whose name has not reached your app yet does not come up, since `/invite` cannot name them either. |
+| `/join` | The room of an invite that waits for you, newest first. With no invite waiting, the bottom line says "No invite waits for you." |
+
+Up and Down step through the same list: Down puts in the next room or name that Tab would, and Up the one before, going round. `/help` lists these keys.
 
 See [Commands](/use/commands) for the full list.
 
@@ -67,6 +79,10 @@ In the message box, Up brings back the last message you sent or command you ran 
 ## Pasting
 
 A paste goes into the message box as text, with line breaks shown as `↵`. Nothing is sent or run until you press Enter, so a pasted command never runs by itself. This needs a terminal that marks pastes (bracketed paste), which most do.
+
+## Drop a file
+
+Drag a photo, video or other file onto the window, and the message box shows `[Photo 1]`, `[Video 1]` or `[File 1]` while the bottom line names it, as in "Photo 1 is beach.jpg, 2.1 MB. Enter sends it." Enter sends each file as `/send` does, then any words you typed as a message, and Backspace removes a placeholder with its file. See [Drop a file on the window](/use/files-photos-videos#drop-a-file-on-the-window).
 
 ## Mouse
 
@@ -84,6 +100,7 @@ Drag over messages to select them, and Socketchat copies the text when you let g
 - Dragging past the top or bottom of the messages scrolls them a row at a time.
 - Text in the `/help`, `/details`, `/about`, `/status`, `/invites` and `/servers` boxes copies the same way.
 - Esc, typing, a new click or new messages clear the selection.
+- Ctrl-C while text is selected copies it, as letting go of the drag does.
 
 To select the terminal's way instead, hold Shift as you drag (Option or Fn on a Mac). To hand the mouse back to your terminal, type:
 

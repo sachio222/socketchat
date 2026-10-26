@@ -99,11 +99,17 @@ To invite them to a room that is not open, name that room too, in quotes when it
 /invite Bo "Climbing Saturdays"
 ```
 
-Bo's app writes a line into the room you share, and shows it on the status line:
+Tab after `/invite` and a space puts in names of people who share a room with you; see [Complete rooms and names](/use/chat-screen#complete-rooms-and-names).
+
+Bo's app writes a line into the room Bo has open, as IRC (Internet Relay Chat) shows an invite in the open window, and shows it on the status line:
 
 ```text
 Ada invites you to Climbing Saturdays. Type /join Climbing Saturdays to join.
 ```
+
+In the line, the command `/join Climbing Saturdays` shows upright and bold in the theme's accent color, and the rest reads as a notice, so a room name with spaces is easy to read and type. Copying the line still copies plain text. An invite that comes while Bo's chat screen is closed waits in the room you share and moves to the room the chat screen opens on, so it shows once.
+
+The room you invited Bo to keeps a line, "Invite sent to Bo.", that only you see, so you know the invite went.
 
 The line names the room's server when Bo has never used it, says when Bo has not verified you, and adds the start of your key, as `Ada#1a2b`, when someone else in that room has your name. To take the invite, Bo types:
 
@@ -112,13 +118,14 @@ The line names the room's server when Bo has never used it, says when Bo has not
 ```
 
 - `/join` alone joins when exactly one invite waits.
-- When more than one invite fits, nothing is joined and the app lists them by number, in the order they came: "More than one invite waits for Climbing Saturdays: 1. from Ada, 2. from Cy (on chat.example.org). Type /join 1 or /join 2." A number always means that invite, even next to a room called "2".
+- Tab after `/join` and a space puts in the room of an invite that waits, newest first.
+- When more than one invite fits, nothing is joined and the app lists them by number, in the order they came, with "(verified)" after each inviter Bo verified: "More than one invite waits for Climbing Saturdays: 1. from Ada (verified), 2. from Cy (on chat.example.org). Type /join 1 or /join 2." A number always means that invite, even next to a room called "2".
 - Nothing opens on its own, and no single key joins a room.
 
 There is nothing to decline. An invite nobody takes ends after 24 hours, and your room then shows "Bo didn't join Climbing Saturdays." It also ends when either of you leaves the room it travels through. A join shows "Bo accepted your invite and joined."
 
 - `/invite Ada Smith` means Ada into the room Smith. When someone called Ada Smith also shares a room with you, the app asks for quotes.
-- A name that two people share is refused with a tag for each, such as `Bo#1a2b`. Invite with the tag.
+- A name that two people share is refused with a tag for each and "(verified)" after each one you verified: "More than one person called Bo shares a room with you: Bo#1a2b (verified) in Book club and Bo#9f3c in Hikes. Type /invite Bo#1a2b or /invite Bo#9f3c." Invite with the tag.
 - Room settings apply as for any invite. In an admins-only room, a member hears "In this room only admins can invite people."
 - The invite marks nobody verified. You see Bo verified in the new room only if you verified Bo before, and Bo counts the room verified only if Bo verified you.
 - Both apps need Socketchat 0.6.0 or later. For someone on an older app, `/invite` with their name says "Bo's app is too old for this kind of invite. Send them a link with /invite." The server needs no update.

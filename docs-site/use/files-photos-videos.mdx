@@ -1,7 +1,7 @@
 ---
 title: "Files, photos and videos"
 description: "Send any file to a room. Photos lose their hidden location and device data before they leave."
-keywords: ["send file", "photos", "videos", "EXIF", "location data", "/save", "/send"]
+keywords: ["send file", "photos", "videos", "EXIF", "location data", "/save", "/send", "drop a file", "drag and drop"]
 ---
 
 Socketchat sends any file to a room, and only the people in that room can open it. Your app locks each file with a new key made for that file alone, uploads it to the server in small locked pieces, and tells the room the key inside an encrypted message. The server holds only the locked pieces.
@@ -13,6 +13,25 @@ Socketchat sends any file to a room, and only the people in that room can open i
 ```
 
 `/send` takes a path to a file, photo or video and sends it to the open room.
+
+## Drop a file on the window
+
+Drag a photo, video or other file onto the chat screen's window, and the message box shows `[Photo 1]`, `[Video 1]` or `[File 1]` in its place. This works in a terminal that pastes a file's path when you drop the file on it. The bottom line names the file and its size:
+
+```text
+Photo 1 is beach.jpg, 2.1 MB. Enter sends it.
+```
+
+- Drop more files and each gets its own placeholder, such as `[Photo 2]`.
+- Type words around the placeholders if you like. Enter sends each file as `/send` does, in order, then the words as a message.
+- Backspace at the end of a placeholder removes it with its file.
+- Photos are cleaned as with `/send`, and Socketchat asks before sending a video or a photo it cannot clean.
+
+When a file cannot go, the bottom line names it with the reason and the draft waits in the box:
+
+- A folder, or a file Socketchat cannot read, is named when you drop it.
+- A file moved or deleted since the drop is named when you press Enter.
+- A file over the server's size limit, 100 MB by default, is named when you press Enter.
 
 ## Save a file
 
@@ -57,5 +76,5 @@ Press Y to send it or N to cancel. iPhones often save photos as HEIC; to send a 
 
 - **Receivers keep what you send.** Once a file arrives, people in the room can save it, copy it or forward it. Send only what you are happy for everyone in the room to keep.
 - **No take-backs.** Once a file is sent, you cannot unsend it.
-- **Size limit.** Each server sets a largest file size, 100 MB by default. The server refuses a file that is too big before any of it is uploaded.
+- **Size limit.** Each server sets a largest file size, 100 MB by default; its operator changes it with `max_file_mb` in [Server settings](/hosting/server-settings). The server refuses a file that is too big before any of it is uploaded.
 - **Files expire.** The server deletes a file once everyone in the room has saved it, or after its retention period, 30 days by default. After that the sender has to send it again.
