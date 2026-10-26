@@ -199,10 +199,14 @@ Everything members send each other inside a group travels as one `AppMsg` value 
 | 11 | `CloseVote { close_id, yes }` | An admin's vote on closing the room. `close_id` is 16 random bytes that name one request to close: the first yes starts a request, and later votes name it. |
 | 12 | `Closed { close_id }` | Request `close_id` passed, and the sender is closing the room. |
 | 13 | `Topic(Topic)` | The room's topic, or its removal, described below. |
+| 14 | `AddAsk { to, ask, reply_key }` | Starts an invite by name to another room for the member whose group key is `to`. `ask` is 16 random bytes that name the invite, and `reply_key` is the inviter's 32-byte HPKE public key for the answer. It names no room. |
+| 15 | `AddKey { to, ask, key, offer_by }` | The member invited gives the inviter, `to`, a 32-byte HPKE public key made for invite `ask`, and says until when, in Unix seconds by its clock, it waits for the offer. |
+| 16 | `AddOffer { to, ask, sealed }` | The room to join, its server and an invite token, sealed for the member invited. |
+| 17 | `AddAnswer { to, ask, sealed }` | KeyPackages for the room, sealed for the inviter, sent when the person joins. |
 
-Variants 9 to 12 are new in Socketchat 0.5.0, and variant 13 in 0.5.2.
+Variants 9 to 12 are new in Socketchat 0.5.0, variant 13 in 0.5.2, and variants 14 to 17 in the release after 0.5.2.
 
-- **Skip rule.** An app ignores an application message it cannot decode. Socketchat 0.4.0 cannot decode variants 9 to 13, and 0.5.0 and 0.5.1 cannot decode variant 13, so they skip them and show nothing.
+- **Skip rule.** An app ignores an application message it cannot decode. Socketchat 0.4.0 cannot decode variants 9 to 17, 0.5.0 and 0.5.1 cannot decode variants 13 to 17, and 0.5.2 cannot decode variants 14 to 17, so they skip them and show nothing.
 - **Sender.** An app takes a message as its sender's only when the credential MLS checked it against, from the epoch it was written in, holds the group key of the member in that place in the group now. A message from an earlier epoch whose place someone else holds now is ignored.
 - **Append-only rule.** New variants go at the end of the enum, and an existing variant's fields never change, so an older app still decodes every variant it knows.
 - **Closing.** Apps count a `CloseVote` or a `Closed` only from an admin still in the room, and only each admin's newest vote on a request. A request passes when enough admins say yes: every admin when the room has up to 3, and `n / 2 + 1` of `n` admins above that. It ends without closing once too many say no for the rest to reach that number, or 7 days after its first vote. The admin whose yes passes the request finishes the close at once: it posts `Closed`, removes everyone else with one Commit, then sends `LastLeave`. Other apps end the room when they read that `Closed` or the Commit that removes them. Another admin whose yes is in the count finishes the close the same way only if its app finds the request passed before any `Closed` arrives, as when the first admin's app stopped part way. Racing Commits resolve through the server's epoch check.
@@ -226,3 +230,27 @@ A `Topic` carries:
 - `repost`: true when an admin's app passes the topic on after someone joins.
 
 Apps take a `Topic` only from a sender who is in the room and may set the topic at that point in the log: an admin, or any member while the room's settings let anyone set it (type 3). The signature must check out under `set_by`. A topic with `repost` false must have `set_by` equal to its sender, and replaces the room's topic unless it is the same one. A topic with `repost` true counts only in an app that holds no topic for the room, and never when its text is empty. Apps clean the text with `clean_topic` before they keep or show it. Each admin's app sends the room's topic, if it has one, with `repost` true after someone joins, beside its profile.
+
+### Inviting someone you share a room with
+
+`/invite <name>` invites a member of a room both people share, room A, to another room, room B, which the inviter is in. Everything travels in room A as application messages, so every member of room A can read them; what only the two of them should see is sealed inside.
+
+1. The inviter's app makes an invite token for room B with `CreateInvite`, so the server checks that the inviter may bring people in, then posts `AddAsk` in room A with a fresh HPKE key pair's public half.
+2. The app of the member invited, `to`, posts `AddKey` with a fresh HPKE public key of its own. It does this without asking the person, and only when the sender of `AddAsk` has posted a profile in room A, this member's own profile is not held back there, fewer than 3 asks from that sender in room A are open, fewer than 20 invites wait for this member to join, and no invite from the sender's identity ran out unjoined in the last hour.
+3. The inviter's app posts `AddOffer`, sealed to that key, while `offer_by` is more than 60 seconds away by its own clock; past that it ends the invite and sends nothing. The app of the member invited opens it and writes a line saying who invites them to which room, and how to join, into the room its chat screen has open, or into room A while no chat screen is open. Where the line goes is up to the app and sends nothing.
+4. When the person types `/join` for that invite, their app connects to room B's server, registers a new mailbox with the token (`RegisterMailbox`), makes KeyPackages for it with no join signature, and posts `AddAnswer`, sealed to the inviter's key, with the KeyPackage bundle.
+5. The inviter's app adds the KeyPackage that matches room B's suite with a Commit, under the same rules as any add, and posts the Welcome with the token and an empty `voucher`. Once the invite ends any other way, it cancels the token with `CancelInvite`.
+
+An app takes `AddKey` and `AddAnswer` only from the member its own `AddAsk` went to, and `AddOffer` only from the member who sent the `AddAsk` it answered, each for the invite `ask` names, at the step that invite has reached. An invite is open for 24 hours from the inviter's `AddAsk` and from the invited member's first sight of it, and ends early once either person is no longer in room A. The invited member's app drops an ask whose offer has not come by `offer_by`: 10 minutes after the ask arrived, plus twice room A's slow mode. Each side forgets an invite once it is answered, so an invite works once, and the token works once on the server. There is no message for declining: an invite nobody joins runs out.
+
+**Sealing.** HPKE (RFC 9180) in base mode with DHKEM(X25519, HKDF-SHA256) (0x0020), HKDF-SHA256 (0x0001) and ChaCha20Poly1305 (0x0003), single-shot. Each key pair comes from 32 random bytes through HPKE's DeriveKeyPair and serves one invite.
+
+- **Info:** `socketchat/v1/add-offer` for an offer, `socketchat/v1/add-answer` for an answer.
+- **Associated data:** room A's group ID (16) ‖ `ask` (16) ‖ the sender's group key in room A (32) ‖ the recipient's group key in room A (32).
+- **`sealed`:** `Sealed { enc, ct }`, the HPKE encapsulated key (32 bytes) and the ciphertext with its 16-byte tag. Apps open at most 16 KiB of ciphertext.
+- **Offer plaintext:** the postcard-encoded `Offer` from `crates/socketchat-core/src/add.rs`: room name, room B's group ID, the server's host, port and certificate fingerprint, the token, the inviter's group key in room B, and the expiry as Unix seconds; then zero bytes up to a whole number of 1,024-byte blocks.
+- **Answer plaintext:** the postcard-encoded `Answer { key_packages }`, a KeyPackage bundle as `RedeemInvite` carries one; then zero bytes up to a whole number of 4,096-byte blocks.
+
+The invited member's app keeps an offer only when its expiry is in the future and no more than 25 hours after it first saw the invite, its port is not 0 and its host passes the same check as an invite link's. It records the join it waits for as `add:` followed, in hex and split by `:`, by the inviter's identity key, their group key in room B and room B's group ID, and judges the Welcome the way it judges a direct message's (see "Per-group keys and mailboxes" in [architecture.md](architecture.md)), except that its profile stays out of room B unless the join checks out as verified.
+
+**Versions.** Apps send `AddAsk` only to a member whose `AppInfo` names a version after 0.5.2. No server change is needed: the steps use `CreateInvite`, `RegisterMailbox` and `Post` from protocol 1, and `CancelInvite` from protocol 2. On a protocol-1 server an unused token expires on its own.

@@ -19,7 +19,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use socketchat_core::client::{
-    server_text, Client, Event, GroupSummary, SendOutcome, UpdateCheck, Verification,
+    invite_line, server_text, Client, Event, GroupSummary, SendOutcome, UpdateCheck, Verification,
 };
 use socketchat_core::close::{close_needed, CloseOutcome};
 use socketchat_core::keys::{fingerprint_text, Key};
@@ -27,7 +27,7 @@ use socketchat_core::sanitize::same_name;
 use socketchat_core::settings::{every, WhoCanInvite, WhoCanSetTopic};
 use socketchat_core::topic;
 
-use crate::app::local_date;
+use crate::app::{local_date, local_date_time};
 use socketchat_core::update;
 use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
@@ -35,9 +35,10 @@ use socketchat_proto::InviteLink;
 use tokio::sync::mpsc;
 
 use crate::app::{
-    details_lines, ended_hint, forget_question, forgot_text, held_line, invite_message, invite_row,
-    leave_step, sent_file_status, server_row, settings_lines, update_about, Action, App, LeaveStep,
-    Modal, HELD_LEAD, OLD_SERVER_SETTINGS,
+    details_lines, encryption_text, ended_hint, forget_question, forgot_text, held_line,
+    invite_message, invite_row, invite_sent_status, join_choices, leave_step, sent_file_status,
+    server_row, settings_lines, status_lines, update_about, update_status, Action, App, AppStatus,
+    LeaveStep, Modal, HELD_LEAD, OLD_SERVER_SETTINGS,
 };
 
 /// Said when a held text was not sent because the room's members changed.
@@ -46,8 +47,15 @@ use crate::commands::{Command, Setting};
 use crate::theme::{pick_theme, Theme, ThemeName, THEMES};
 use crate::ui::{draw, fit, GroupView, LineView, MemberLine, ViewModel};
 
+/// The most stored lines the open room shows.
+const SHOWN_LINES: usize = 300;
+
 /// How often the screen checks in with the server when nothing arrives.
 const IDLE_SYNC: Duration = Duration::from_secs(5);
+
+/// How often a selection held past the top or bottom of the text scrolls
+/// one more row.
+const DRAG_SCROLL: Duration = Duration::from_millis(80);
 
 /// A request to a server that waits for the next draw, so the screen says
 /// it is asking instead of standing still.
@@ -55,7 +63,12 @@ const IDLE_SYNC: Duration = Duration::from_secs(5);
 enum Pending {
     Details(GroupId),
     Invites,
+    /// `/status`, with the room open when it was typed, if the person is
+    /// still in it.
+    Status(Option<GroupId>),
 }
+
+mod dropped;
 
 struct Screen {
     client: Client,
@@ -100,8 +113,19 @@ type Clipboard = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 struct Copied {
     text: String,
     ok: bool,
-    /// The person pressed C, so the status line says how it went.
-    asked: bool,
+    /// What the status line says about it.
+    say: Say,
+}
+
+/// What the status line says once a copy is done.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Say {
+    /// Nothing: the invite box copies as it opens and says so itself.
+    Nothing,
+    /// The person pressed C in the invite box.
+    Invite,
+    /// The person selected text with the mouse.
+    Selection,
 }
 
 /// What the status line says when an action fails because the connection
@@ -132,17 +156,6 @@ where
 {
     chrono::DateTime::from_timestamp(unix as i64, 0)
         .map(|t| t.with_timezone(tz).format("%H:%M:%S").to_string())
-        .unwrap_or_default()
-}
-
-/// The local date and time of `unix`, as "YYYY-MM-DD at HH:MM".
-fn local_date_time(unix: u64) -> String {
-    chrono::DateTime::from_timestamp(unix as i64, 0)
-        .map(|t| {
-            t.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d at %H:%M")
-                .to_string()
-        })
         .unwrap_or_default()
 }
 
@@ -280,7 +293,7 @@ fn event_group(e: &Event) -> Option<GroupId> {
         | Event::Extension { group, .. }
         | Event::CloseVote { group, .. }
         | Event::Closed { group, .. } => Some(*group),
-        Event::Warning(_) | Event::Disconnected | Event::Reconnected => None,
+        Event::Warning(_) | Event::Disconnected | Event::Reconnected | Event::Invited(_) => None,
     }
 }
 
@@ -386,9 +399,28 @@ impl Screen {
         let (lines, members) = match self.app.selected {
             Some(g) => {
                 let members = self.client.members(g);
-                let lines = self
-                    .client
-                    .messages(g, 300)
+                let chat = self.client.messages(g, SHOWN_LINES);
+                let others_verified = members.iter().any(|m| !m.me && m.verified);
+                let is_dm = self.summary(g).is_some_and(|s| s.is_dm);
+                // The room's encryption line, when it falls among the lines
+                // loaded: after every line up to its place.
+                let encryption = self.client.encryption_line(g).and_then(|e| {
+                    let whole = chat.len() < SHOWN_LINES;
+                    let at = chat.iter().take_while(|l| l.seq <= e.after_seq).count();
+                    (whole || at > 0).then(|| {
+                        let line = LineView {
+                            time: local_time(e.at_unix),
+                            sender: String::new(),
+                            text: encryption_text(&e.state, is_dm, others_verified),
+                            notice: true,
+                            mine: false,
+                            topic: false,
+                            command: None,
+                        };
+                        (at, line)
+                    })
+                });
+                let mut lines: Vec<LineView> = chat
                     .into_iter()
                     .map(|l| {
                         let mine =
@@ -417,9 +449,13 @@ impl Screen {
                             text,
                             notice: l.notice,
                             topic: l.topic,
+                            command: l.command,
                         }
                     })
                     .collect();
+                if let Some((at, line)) = encryption {
+                    lines.insert(at, line);
+                }
                 let members = members
                     .into_iter()
                     .map(|m| MemberLine {
@@ -428,6 +464,7 @@ impl Screen {
                         verified: m.verified,
                         admin: m.admin,
                         me: m.me,
+                        changed_key: m.changed_key,
                     })
                     .collect();
                 (lines, members)
@@ -446,6 +483,24 @@ impl Screen {
                 .selected
                 .and_then(|g| self.client.topic(g))
                 .map(|t| t.text),
+            // Read only while the message box holds the command they
+            // complete: one goes through every room's members.
+            invite_names: match self.app.input.starts_with("/invite") {
+                true => self.client.invite_names(self.app.selected),
+                false => vec![],
+            },
+            join_rooms: match self.app.input.starts_with("/join") {
+                true => {
+                    let waiting: Vec<(u64, String)> = self
+                        .client
+                        .room_invites()
+                        .into_iter()
+                        .map(|r| (r.number, r.room))
+                        .collect();
+                    join_choices(&waiting)
+                }
+                false => vec![],
+            },
         }
     }
 
@@ -454,6 +509,29 @@ impl Screen {
         if let Err(e) = self.client.mark_seen(g) {
             self.app.status.get_or_insert(e.to_string());
         }
+    }
+
+    /// Joins the room an invite by name names: the newest invite when
+    /// `typed` is `None`.
+    async fn join_invite(&mut self, typed: Option<&str>) -> Result<(), String> {
+        let invite = self.client.find_invite(typed).map_err(|e| {
+            let e = e.to_string();
+            if typed.is_some() && e.starts_with("No invite to ") {
+                format!("{e} An invite link starts with socketchat://.")
+            } else {
+                e
+            }
+        })?;
+        self.client
+            .accept_invite(&invite)
+            .await
+            .map_err(|e| e.to_string())?;
+        let inviter = invite.from_name.split('#').next().unwrap_or("").to_string();
+        self.say_after_events(format!(
+            "Joining {}. You are in once {inviter}'s app adds you.",
+            invite.room
+        ));
+        Ok(())
     }
 
     /// Whether the person is busy with the open room: words in the message
@@ -473,6 +551,15 @@ impl Screen {
         }
         self.app.selected = Some(g);
         self.app.scroll = 0;
+        // Invites show in the room on screen; one that came while no
+        // screen was open moves here now.
+        if let Err(e) = self.client.set_open_room(Some(g)) {
+            self.app.status.get_or_insert(e.to_string());
+        }
+        // A room made before the encryption line gets it now, once.
+        if let Err(e) = self.client.place_encryption_line(g) {
+            self.app.status.get_or_insert(e.to_string());
+        }
         self.mark_seen(g);
         self.client.purge_read(Some(g));
     }
@@ -500,6 +587,9 @@ impl Screen {
         match first {
             Some(g) => self.select(g),
             None => {
+                if let Err(e) = self.client.set_open_room(None) {
+                    self.app.status.get_or_insert(e.to_string());
+                }
                 self.client.purge_read(None);
             }
         }
@@ -632,6 +722,8 @@ impl Screen {
             Event::NameChanged { old, new, .. } => {
                 self.app.status = Some(format!("{old} is now called {new}."));
             }
+            // A line in the room it came through says so too.
+            Event::Invited(r) => self.app.status = Some(invite_line(&r)),
             // A held text that waited past a change in who is in the room:
             // the words come back to the box when it is empty.
             Event::NotSent { group, text } => {
@@ -707,11 +799,18 @@ impl Screen {
     async fn act(&mut self, a: Action) {
         // `/leave` shows new lines once; anything else in between, and the
         // next `/leave` checks again.
-        if matches!(&a, Action::Send(..) | Action::Command(_))
-            && a != Action::Command(Command::Leave)
+        if matches!(
+            &a,
+            Action::Send(..) | Action::SendDrop(_) | Action::Command(_)
+        ) && a != Action::Command(Command::Leave)
         {
             self.leave_shown = None;
         }
+        // Yes to a question about a dropped file goes on with the drop.
+        let a = match a {
+            Action::ConfirmVideo(g, path) if self.app.confirm_dropped(&path) => Action::SendDrop(g),
+            a => a,
+        };
         let r: Result<(), String> = match a {
             Action::Quit => {
                 self.quit = true;
@@ -722,24 +821,15 @@ impl Screen {
                 Ok(())
             }
             Action::Copy(text) => {
-                self.start_copy(text, true);
+                self.start_copy(text, Say::Invite);
                 Ok(())
             }
-            Action::Send(g, text) => match self.client.send_text(g, &text).await {
-                Ok(SendOutcome::Sent) => Ok(()),
-                // Kept here and sent on its own once the room allows it.
-                Ok(SendOutcome::Held { wait_secs }) => {
-                    self.app.status = Some(held_line(wait_secs));
-                    Ok(())
-                }
-                Err(e) => {
-                    // Nothing was sent: give the words back to edit or retry.
-                    if self.app.input.is_empty() {
-                        self.app.input = text;
-                    }
-                    Err(e.to_string())
-                }
-            },
+            Action::CopySelected(text) => {
+                self.start_copy(text, Say::Selection);
+                Ok(())
+            }
+            Action::Send(g, text) => self.send_text(g, text).await,
+            Action::SendDrop(g) => self.send_drop(g).await,
             // The room the question was asked in, whatever is open now.
             Action::ConfirmVideo(g, path) => self
                 .client
@@ -794,23 +884,42 @@ impl Screen {
         self.report(r);
     }
 
+    /// Sends `text` to room `g`, or gives it back to the message box.
+    async fn send_text(&mut self, g: GroupId, text: String) -> Result<(), String> {
+        match self.client.send_text(g, &text).await {
+            Ok(SendOutcome::Sent) => Ok(()),
+            // Kept here and sent on its own once the room allows it.
+            Ok(SendOutcome::Held { wait_secs }) => {
+                self.app.status = Some(held_line(wait_secs));
+                Ok(())
+            }
+            Err(e) => {
+                // Nothing was sent: give the words back to edit or retry.
+                if self.app.input.is_empty() {
+                    self.app.input = text;
+                }
+                Err(e.to_string())
+            }
+        }
+    }
+
     /// Starts putting `text` on the clipboard beside the screen, which goes
     /// on drawing and reading keys; [`Screen::copied`] takes the answer.
-    /// `asked` says the person pressed C.
-    fn start_copy(&mut self, text: String, asked: bool) {
+    /// `say` is what the status line says once it is done.
+    fn start_copy(&mut self, text: String, say: Say) {
         self.copies_running += 1;
         self.app.copying = true;
         let clipboard = self.clipboard.clone();
         let tx = self.copies.0.clone();
         tokio::task::spawn_blocking(move || {
             let ok = clipboard(&text);
-            let _ = tx.send(Copied { text, ok, asked });
+            let _ = tx.send(Copied { text, ok, say });
         });
     }
 
     /// Shows how a copy went: the invite box's line under the link, and
-    /// the status line when the person pressed C. With no clipboard
-    /// program, it asks the terminal to copy.
+    /// the status line when the person pressed C or selected text. With
+    /// no clipboard program, it asks the terminal to copy.
     fn copied(&mut self, c: Copied) {
         if !c.ok {
             (self.terminal_copy)(&c.text);
@@ -822,12 +931,15 @@ impl Screen {
                 *copied = c.ok;
             }
         }
-        if c.asked {
-            self.app.status = Some(if c.ok {
-                "Invite copied. Paste it to the person you are inviting.".into()
-            } else {
-                "Asked your terminal to copy the invite. If pasting finds nothing, select the link and copy it.".into()
-            });
+        let said = match (c.say, c.ok) {
+            (Say::Nothing, _) => None,
+            (Say::Invite, true) => Some("Invite copied. Paste it to the person you are inviting."),
+            (Say::Invite, false) => Some("Asked your terminal to copy the invite. If pasting finds nothing, select the link and copy it."),
+            (Say::Selection, true) => Some("Copied."),
+            (Say::Selection, false) => Some("Asked your terminal to copy. If nothing pastes, drag with Shift or Option held."),
+        };
+        if let Some(said) = said {
+            self.app.status = Some(said.into());
         }
     }
 
@@ -935,7 +1047,7 @@ impl Screen {
                     });
                 }
             },
-            Command::Help => self.app.modal = Some(Modal::Help { offset: 0 }),
+            Command::Help => self.app.modal = Some(Modal::Help { offset: 0, pick: 0 }),
             Command::About => self.app.modal = Some(Modal::About),
             Command::Theme(None) => {
                 self.app.status = Some(format!(
@@ -991,19 +1103,19 @@ impl Screen {
             }
             Command::Mouse(None) => {
                 self.app.status = Some(if self.app.mouse {
-                    "Mouse on. To select text, hold Shift as you drag (Option or Fn on a Mac), or type /mouse off.".into()
+                    "Mouse on. Drag over text to copy it. Type /mouse off to turn it off.".into()
                 } else {
-                    "Mouse off. Type /mouse on to click and scroll.".into()
+                    "Mouse off. Type /mouse on to click, scroll and drag to copy.".into()
                 });
             }
             Command::Mouse(Some(on)) => {
                 self.client.set_mouse(on).map_err(e)?;
                 self.app.mouse = on;
                 self.app.status = Some(if on {
-                    "Mouse on. To select text, hold Shift as you drag (Option or Fn on a Mac)."
-                        .into()
+                    "Mouse on. Drag over text to copy it.".into()
                 } else {
-                    "Mouse off. Your terminal selects text again. Type /mouse on to click and scroll.".into()
+                    "Mouse off. Your terminal selects text again. /mouse on turns it back on."
+                        .into()
                 });
             }
             // The keys open the switcher or the room before this is reached.
@@ -1026,14 +1138,60 @@ impl Screen {
                 };
                 let link = link.to_string();
                 // On the clipboard soon after the box opens, ready to paste.
-                self.start_copy(invite_message(&link), false);
+                self.start_copy(invite_message(&link), Say::Nothing);
                 self.app.modal = Some(Modal::Invite {
                     link,
                     hours: self.client.hours_until(expires_unix),
                     copied: false,
                 });
             }
-            Command::Join(link) => self.join(&link, false).await?,
+            Command::InviteMember { name, room, quoted } => {
+                // "/invite Ada Smith" reads as Ada into the room Smith. When
+                // someone called Ada Smith shares a room too, both readings
+                // fit, and the person says which with quotes.
+                if let (Some(r), false) = (&room, quoted) {
+                    let whole = format!("{name} {r}");
+                    let room_fits = self
+                        .client
+                        .groups()
+                        .iter()
+                        .any(|g| g.ended.is_none() && same_name(r, &g.name));
+                    if room_fits
+                        && self.client.someone_named(&name)
+                        && self.client.someone_named(&whole)
+                    {
+                        return Err(format!(
+                            "/invite {whole} could mean {whole}, or {name} into {r}. Type /invite \"{whole}\", or /invite {name} \"{r}\"."
+                        ));
+                    }
+                }
+                let (target, open) = match room {
+                    None => (need()?, true),
+                    Some(r) => {
+                        let hits: Vec<GroupId> = self
+                            .client
+                            .groups()
+                            .into_iter()
+                            .filter(|g| g.ended.is_none() && same_name(&r, &g.name))
+                            .map(|g| g.id)
+                            .collect();
+                        match hits.as_slice() {
+                            [g] => (*g, Some(*g) == sel),
+                            [] => return Err(format!("You are not in a room called {r}. To invite someone whose name has a space, put it in quotes, like /invite \"Bo Smith\".")),
+                            _ => return Err(format!("You are in more than one room called {r}. Open the one you mean and type /invite {name}.")),
+                        }
+                    }
+                };
+                let sent = self.client.invite_member(target, &name).await.map_err(e)?;
+                self.say_after_events(invite_sent_status(&sent, open));
+            }
+            Command::Join(None) => self.join_invite(None).await?,
+            Command::Join(Some(text)) => match text.parse::<InviteLink>() {
+                // Not a link: the name of a room someone invited this
+                // person to.
+                Err(socketchat_proto::LinkError::Scheme) => self.join_invite(Some(&text)).await?,
+                _ => self.join(&text, false).await?,
+            },
             Command::New(name) => {
                 let g = match self.client.new_room_server(sel) {
                     Some(server) => self.client.create_group_at(server, &name).await,
@@ -1263,6 +1421,10 @@ impl Screen {
                 self.pending = Some(Pending::Details(need()?));
                 self.app.status = Some(ASKING.into());
             }
+            Command::Status => {
+                self.pending = Some(Pending::Status(live.clone().ok()));
+                self.app.status = Some(ASKING.into());
+            }
             Command::Settings(None) => {
                 let g = need()?;
                 let s = self.client.room_settings(g).unwrap_or_default();
@@ -1328,6 +1490,10 @@ impl Screen {
         let r = match p {
             Pending::Invites => self.show_invites().await,
             Pending::Details(g) => self.show_details(g).await,
+            Pending::Status(g) => {
+                self.show_status(g).await;
+                Ok(())
+            }
         };
         if self.app.status.as_deref() == Some(ASKING) {
             self.app.status = None;
@@ -1370,6 +1536,24 @@ impl Screen {
             offset: 0,
         });
         Ok(())
+    }
+
+    async fn show_status(&mut self, g: Option<GroupId>) {
+        let s = self.client.status(g).await;
+        let room = g.map(|g| self.room_name(g));
+        let app = AppStatus {
+            theme: self.app.theme.name.as_str().into(),
+            mouse: self.app.mouse,
+            updates: update_status(
+                &self.client.update_state().unwrap_or_default(),
+                update::off_by_env(),
+                &local_date_time,
+            ),
+        };
+        self.app.modal = Some(Modal::Status {
+            lines: status_lines(&s, room.as_deref(), &app, &local_date_time),
+            offset: 0,
+        });
     }
 
     async fn sync(&mut self) {
@@ -1418,7 +1602,8 @@ enum Input {
     Key(KeyEvent, Instant),
     /// Pasted text, all of it at once.
     Paste(String),
-    /// A click or a turn of the scroll wheel, and when it was read.
+    /// A click, a drag or release of the left button, or a turn of the
+    /// scroll wheel, and when it was read.
     Mouse(MouseEvent, Instant),
     /// The window changed size.
     Redraw,
@@ -1426,8 +1611,8 @@ enum Input {
     Failed(String),
 }
 
-/// The input a terminal event carries, read at `at`. Mouse moves and
-/// releases carry none, so they never cost a redraw.
+/// The input a terminal event carries, read at `at`. Mouse moves with no
+/// button down carry none, so they never cost a redraw.
 fn input_of(ev: TermEvent, at: Instant) -> Option<Input> {
     match ev {
         TermEvent::Key(k) if k.kind == KeyEventKind::Press => Some(Input::Key(k, at)),
@@ -1436,6 +1621,8 @@ fn input_of(ev: TermEvent, at: Instant) -> Option<Input> {
             if matches!(
                 m.kind,
                 MouseEventKind::Down(MouseButton::Left)
+                    | MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Up(MouseButton::Left)
                     | MouseEventKind::ScrollUp
                     | MouseEventKind::ScrollDown
             ) =>
@@ -1610,7 +1797,7 @@ fn set_mouse_capture(w: &mut impl Write, on: bool) -> std::io::Result<()> {
     }
 }
 
-/// Whether `k` is Ctrl-C, which quits at any time.
+/// Whether `k` is Ctrl-C, which counts toward quitting at any time.
 fn quits(k: &KeyEvent) -> bool {
     k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL)
 }
@@ -1734,6 +1921,7 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
     let mut asked = Asked::default();
     loop {
         let vm = s.view();
+        s.app.keep_selection(&vm);
         term.draw(|f| draw(f, &s.app, &vm))?;
         let now = Instant::now();
         asked.shown(&s.app.modal, now);
@@ -1753,12 +1941,16 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
         if first {
             first = false;
             s.sync().await;
+            // An invite that waited while the app was closed says so.
+            if let Some(r) = s.client.room_invites().last() {
+                s.app.status.get_or_insert(invite_line(r));
+            }
             continue;
         }
         tokio::select! {
             k = keys.recv() => match k {
                 // Typed before the open question showed: not its answer.
-                // Ctrl-C still quits.
+                // Ctrl-C still counts toward quitting.
                 Some(Input::Key(k, at)) if asked.stale(at) && !quits(&k) => {}
                 Some(Input::Key(k, _)) => {
                     for a in s.app.handle_key(k, &vm) {
@@ -1798,6 +1990,13 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
                 return Ok(());
             }
             Some(c) = s.copies.1.recv() => s.copied(c),
+            // The button is held past the top or bottom of the text being
+            // selected: one more row scrolls into view.
+            _ = tokio::time::sleep(DRAG_SCROLL), if s.app.drag_scrolling() => s.app.drag_tick(),
+            // The time for a second Ctrl-C ran out.
+            _ = tokio::time::sleep_until(
+                s.app.quit_deadline().map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
+            ), if s.app.quit_deadline().is_some() => s.app.quit_expire(Instant::now()),
             // The update check answered, or failed, which shows nothing.
             Some(done) = async {
                 match s.update_check.as_mut() {
@@ -1816,6 +2015,8 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod drops;
+
     use super::{clock_time, to_base64, Action, Screen};
     use crate::app::Modal;
     use crate::commands::Command;
@@ -1843,6 +2044,69 @@ mod tests {
         let utc = chrono::FixedOffset::east_opt(0).unwrap();
         assert_eq!(clock_time(1_792_443_845, &utc), "21:04:05");
         assert_eq!(clock_time(9, &utc), "00:00:09");
+    }
+
+    /// Text the mouse selected goes on the clipboard, and the status line
+    /// says how that went.
+    #[tokio::test]
+    async fn selected_text_is_copied_and_the_status_line_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::create_profile(dir.path(), "test passphrase", "Ada")
+            .await
+            .unwrap();
+        let mut s = Screen::new(client);
+        for (works, said) in [
+            (true, "Copied."),
+            (
+                false,
+                "Asked your terminal to copy. If nothing pastes, drag with Shift or Option held.",
+            ),
+        ] {
+            let got = fake_clipboard(&mut s, works);
+            s.act(Action::CopySelected("message 38\nmessage 39".into()))
+                .await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), copy_done(&mut s))
+                .await
+                .expect("the copy reports back");
+            assert_eq!(*got.lock().unwrap(), vec!["message 38\nmessage 39"]);
+            assert_eq!(s.app.status.as_deref(), Some(said));
+            assert!(said.chars().count() <= 80, "fits an 80-column window");
+        }
+    }
+
+    /// Drags and releases of the left button reach the chat screen, so it
+    /// can select text; plain moves and other buttons do not.
+    #[test]
+    fn drags_and_releases_of_the_left_button_reach_the_screen() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let ev = |kind| {
+            crossterm::event::Event::Mouse(MouseEvent {
+                kind,
+                column: 3,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let now = std::time::Instant::now();
+        for kind in [
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            assert!(
+                matches!(
+                    super::input_of(ev(kind), now),
+                    Some(super::Input::Mouse(..))
+                ),
+                "{kind:?}"
+            );
+        }
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Drag(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Right),
+        ] {
+            assert!(super::input_of(ev(kind), now).is_none(), "{kind:?}");
+        }
     }
 
     /// Tests that change whether the chat screen holds the terminal take
@@ -2005,7 +2269,7 @@ mod tests {
         });
         asked.shown(&leave, t0 + ms(50));
         assert!(asked.stale(t0 + ms(45)));
-        for m in [Some(Modal::Help { offset: 0 }), None] {
+        for m in [Some(Modal::Help { offset: 0, pick: 0 }), None] {
             asked.shown(&m, t0 + ms(60));
             assert!(!asked.stale(t0), "{m:?} asks nothing");
         }
@@ -2452,21 +2716,24 @@ mod tests {
         assert_eq!(bo.client.mouse().unwrap(), Some(false));
         assert_eq!(
             bo.app.status.as_deref(),
-            Some(
-                "Mouse off. Your terminal selects text again. Type /mouse on to click and scroll."
-            )
+            Some("Mouse off. Your terminal selects text again. /mouse on turns it back on.")
         );
         bo.act(Action::Command(Command::Mouse(None))).await;
         assert_eq!(
             bo.app.status.as_deref(),
-            Some("Mouse off. Type /mouse on to click and scroll.")
+            Some("Mouse off. Type /mouse on to click, scroll and drag to copy.")
         );
         bo.act(Action::Command(Command::Mouse(Some(true)))).await;
         assert!(bo.app.mouse);
         assert_eq!(bo.client.mouse().unwrap(), Some(true));
         assert_eq!(
             bo.app.status.as_deref(),
-            Some("Mouse on. To select text, hold Shift as you drag (Option or Fn on a Mac).")
+            Some("Mouse on. Drag over text to copy it.")
+        );
+        bo.act(Action::Command(Command::Mouse(None))).await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("Mouse on. Drag over text to copy it. Type /mouse off to turn it off.")
         );
     }
 
@@ -2900,7 +3167,272 @@ mod tests {
 
     /// Types `/join <link>` on screen `s`.
     async fn join_on(s: &mut Screen, link: &str) {
-        s.act(Action::Command(Command::Join(link.into()))).await;
+        s.act(Action::Command(Command::Join(Some(link.into()))))
+            .await;
+    }
+
+    /// Ada's room "Room", with Bo (on a screen) in it, both on apps that
+    /// know invites by name.
+    async fn room_with_new_bo(s: &TestServer) -> (GroupId, TestClient, Screen, tempfile::TempDir) {
+        let mut a = TestClient::profile_only("Ada").await;
+        a.test_announce_version("0.5.3");
+        a.join(&s.server_invite()).await.unwrap();
+        let g = a.create_group("Room").await.unwrap();
+        let (mut bo, dir) = screen(s, "Bo").await;
+        bo.client.test_announce_version("0.5.3");
+        let link = a.invite(Some(g), false).await.unwrap().0;
+        bo.client.join(&link).await.unwrap();
+        trade(&mut a, &mut bo).await;
+        (g, a, bo, dir)
+    }
+
+    async fn trade(a: &mut TestClient, bo: &mut Screen) {
+        for _ in 0..4 {
+            a.sync().await.unwrap();
+            bo.sync().await;
+        }
+    }
+
+    /// An invite by name shows as a line and a status, opens nothing, and
+    /// `/join <room>` takes it; typing a message that starts with y does
+    /// nothing to it.
+    #[tokio::test]
+    async fn an_invite_shows_as_a_line_and_join_takes_it() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_new_bo(&srv).await;
+        bo.act(Action::Select(g)).await;
+        let climb = a.create_group("Climbing Saturdays").await.unwrap();
+        a.invite_member(climb, "Bo").await.unwrap();
+        trade(&mut a, &mut bo).await;
+        let line = "Ada invites you to Climbing Saturdays. Type /join Climbing Saturdays to join.";
+        assert_eq!(bo.app.status.as_deref(), Some(line));
+        assert!(bo.view().lines.iter().any(|l| l.notice && l.text == line));
+        assert!(bo.app.modal.is_none(), "nothing opens on its own");
+        let vm = bo.view();
+        for c in "yeah".chars() {
+            for act in bo.app.handle_key(KeyEvent::from(KeyCode::Char(c)), &vm) {
+                bo.act(act).await;
+            }
+        }
+        assert_eq!(bo.app.input, "yeah");
+        bo.app.input.clear();
+        trade(&mut a, &mut bo).await;
+        assert!(!bo.client.groups().iter().any(|x| x.id == climb));
+        bo.act(Action::Command(Command::Join(Some(
+            "Climbing Saturdays".into(),
+        ))))
+        .await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("Joining Climbing Saturdays. You are in once Ada's app adds you.")
+        );
+        trade(&mut a, &mut bo).await;
+        assert!(bo.client.groups().iter().any(|x| x.id == climb));
+    }
+
+    /// The invite line marks its command, and Tab after `/invite ` and
+    /// `/join ` fills in what the app knows: the people who share a room,
+    /// and the rooms of invites that wait.
+    #[tokio::test]
+    async fn tab_completes_names_after_invite_and_rooms_after_join() {
+        use crossterm::event::KeyCode;
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_new_bo(&srv).await;
+        bo.act(Action::Select(g)).await;
+        for c in "/join ".chars() {
+            press(&mut bo, KeyCode::Char(c));
+        }
+        press(&mut bo, KeyCode::Tab);
+        assert_eq!(bo.app.input, "/join ");
+        assert_eq!(bo.app.status.as_deref(), Some("No invite waits for you."));
+        bo.app.input.clear();
+        let climb = a.create_group("Climbing Saturdays").await.unwrap();
+        a.invite_member(climb, "Bo").await.unwrap();
+        trade(&mut a, &mut bo).await;
+        let line = bo
+            .view()
+            .lines
+            .into_iter()
+            .find(|l| l.command.is_some())
+            .expect("the invite line");
+        assert_eq!(
+            &line.text[line.command.clone().unwrap()],
+            "/join Climbing Saturdays"
+        );
+        for c in "/join ".chars() {
+            press(&mut bo, KeyCode::Char(c));
+        }
+        press(&mut bo, KeyCode::Tab);
+        assert_eq!(bo.app.input, "/join Climbing Saturdays");
+        bo.app.input.clear();
+        for c in "/invite ".chars() {
+            press(&mut bo, KeyCode::Char(c));
+        }
+        press(&mut bo, KeyCode::Down);
+        assert_eq!(bo.app.input, "/invite Ada");
+        // Nothing is read for completing while the box holds anything else.
+        bo.app.input = "hello".into();
+        let vm = bo.view();
+        assert!(vm.invite_names.is_empty() && vm.join_rooms.is_empty());
+    }
+
+    /// An invite shows in the room on screen, whatever room it came
+    /// through, as IRC shows it in the window that is open; one that came
+    /// while no screen was open moves to the room the screen opens.
+    #[tokio::test]
+    async fn an_invite_shows_in_the_room_on_screen() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_new_bo(&srv).await;
+        let mine = bo.client.create_group("Bo's notes").await.unwrap();
+        let invite_lines = |bo: &Screen| -> Vec<String> {
+            bo.view()
+                .lines
+                .into_iter()
+                .filter(|l| l.command.is_some())
+                .map(|l| l.text)
+                .collect()
+        };
+        let line = "Ada invites you to Climbing Saturdays. Type /join Climbing Saturdays to join.";
+        // Before any room is on screen, as at start-up.
+        let climb = a.create_group("Climbing Saturdays").await.unwrap();
+        a.invite_member(climb, "Bo").await.unwrap();
+        // No chat screen yet: the invite comes in with nothing on screen,
+        // as with `socketchat sync` before the chat screen starts.
+        bo.app.selected = None;
+        bo.client.set_open_room(None).unwrap();
+        for _ in 0..4 {
+            a.sync().await.unwrap();
+            bo.client.sync().await.unwrap();
+        }
+        bo.act(Action::Select(mine)).await;
+        assert_eq!(invite_lines(&bo), [line]);
+        bo.act(Action::Select(g)).await;
+        assert!(invite_lines(&bo).is_empty(), "no second copy");
+        // While a room is on screen.
+        let hikes = a.create_group("Hikes").await.unwrap();
+        bo.act(Action::Select(mine)).await;
+        a.invite_member(hikes, "Bo").await.unwrap();
+        trade(&mut a, &mut bo).await;
+        assert_eq!(
+            invite_lines(&bo),
+            [line, "Ada invites you to Hikes. Type /join Hikes to join."]
+        );
+        bo.act(Action::Select(g)).await;
+        assert!(invite_lines(&bo).is_empty());
+    }
+
+    /// `/join` alone takes the newest invite; with none waiting it says how
+    /// to use a link, and a room nobody invited this person to says so.
+    #[tokio::test]
+    async fn join_alone_takes_the_newest_invite() {
+        let srv = TestServer::start().await;
+        let (_g, mut a, mut bo, _dir) = room_with_new_bo(&srv).await;
+        bo.act(Action::Command(Command::Join(None))).await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("No invite waits for you. To use a link, type /join and the link.")
+        );
+        bo.act(Action::Command(Command::Join(Some("Hikes".into()))))
+            .await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("No invite to Hikes waits for you. An invite link starts with socketchat://.")
+        );
+        let hikes = a.create_group("Hikes").await.unwrap();
+        a.invite_member(hikes, "Bo").await.unwrap();
+        trade(&mut a, &mut bo).await;
+        bo.act(Action::Command(Command::Join(None))).await;
+        trade(&mut a, &mut bo).await;
+        assert!(bo.client.groups().iter().any(|x| x.id == hikes));
+    }
+
+    /// `/invite <name> <room>` invites someone from the open room to
+    /// another room this person is in.
+    #[tokio::test]
+    async fn invite_by_name_from_the_screen() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_new_bo(&srv).await;
+        bo.client.create_group("Bo's room").await.unwrap();
+        bo.act(Action::Select(g)).await;
+        bo.act(Action::Command(Command::InviteMember {
+            name: "Ada".into(),
+            room: Some("Bo's room".into()),
+            quoted: true,
+        }))
+        .await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("Invited Ada to Bo's room through Room. Bo's room says when they join.")
+        );
+        bo.act(Action::Command(Command::InviteMember {
+            name: "Ada".into(),
+            room: Some("Nowhere".into()),
+            quoted: false,
+        }))
+        .await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("You are not in a room called Nowhere. To invite someone whose name has a space, put it in quotes, like /invite \"Bo Smith\".")
+        );
+        trade(&mut a, &mut bo).await;
+        let got = a.room_invites();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].room, "Bo's room");
+    }
+
+    /// `/invite Ada Smith` reads as Ada into the room Smith; when someone
+    /// called Ada Smith also shares a room, it asks for quotes instead of
+    /// guessing.
+    #[tokio::test]
+    async fn invite_with_two_readings_asks_for_quotes() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_new_bo(&srv).await;
+        bo.client.create_group("Smith").await.unwrap();
+        bo.act(Action::Select(g)).await;
+        let typed = |quoted| Command::InviteMember {
+            name: "Ada".into(),
+            room: Some("Smith".into()),
+            quoted,
+        };
+        // Only one reading: Ada into Smith.
+        bo.act(Action::Command(typed(false))).await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("Invited Ada to Smith through Room. Smith says when they join.")
+        );
+        let mut ada_smith = TestClient::profile_only("Ada Smith").await;
+        ada_smith.test_announce_version("0.5.3");
+        ada_smith.join(&srv.server_invite()).await.unwrap();
+        let link = a.invite(Some(g), false).await.unwrap().0;
+        ada_smith.join(&link).await.unwrap();
+        for _ in 0..4 {
+            a.sync().await.unwrap();
+            ada_smith.sync().await.unwrap();
+            bo.sync().await;
+        }
+        let hikes = bo.client.create_group("Hikes").await.unwrap();
+        bo.act(Action::Select(hikes)).await;
+        bo.act(Action::Command(Command::InviteMember {
+            name: "Ada".into(),
+            room: Some("Smith".into()),
+            quoted: false,
+        }))
+        .await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("/invite Ada Smith could mean Ada Smith, or Ada into Smith. Type /invite \"Ada Smith\", or /invite Ada \"Smith\".")
+        );
+        // Quotes say which.
+        bo.act(Action::Command(typed(true))).await;
+        assert!(
+            bo.app
+                .status
+                .as_deref()
+                .is_some_and(|s| s.starts_with("You already invited Ada")),
+            "{:?}",
+            bo.app.status
+        );
     }
 
     #[tokio::test]
@@ -2926,6 +3458,55 @@ mod tests {
             "{lines:?}"
         );
         assert_eq!(lines[7], "Muted: no");
+    }
+
+    #[tokio::test]
+    async fn status_shows_the_server_the_room_and_the_app() {
+        use socketchat_core::keys::fingerprint_text;
+        let srv = TestServer::start().await;
+        let (g, _a, mut bo, _dir) = room_with_bo(&srv).await;
+        bo.act(Action::Select(g)).await;
+        bo.act(Action::Command(Command::Status)).await;
+        assert_eq!(bo.app.status.as_deref(), Some("Asking the server…"));
+        assert!(bo.app.modal.is_none(), "the box waits for the next draw");
+        bo.run_pending().await;
+        assert_eq!(bo.app.status, None);
+        let Some(Modal::Status { lines, .. }) = bo.app.modal.take() else {
+            panic!("no status: {:?}", bo.app.status);
+        };
+        let has = |l: &str| assert!(lines.iter().any(|x| x == l), "{l}: {lines:?}");
+        has("Server: 127.0.0.1");
+        has(&format!("Port: {}", srv.addr().port()));
+        has(&format!("Protocol: {}", socketchat_proto::PROTOCOL_VERSION));
+        has(&format!(
+            "Certificate fingerprint: {}",
+            fingerprint_text(&srv.fpr())
+        ));
+        has("Inviting into rooms: each room's setting decides");
+        has("Name: Bo");
+        has("Name: Room");
+        has("Your role: member");
+        has(&format!("Theme: {}", bo.app.theme.name.as_str()));
+        has(&format!(
+            "Mouse: {}",
+            if bo.app.mouse { "on" } else { "off" }
+        ));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("State: connected since ")),
+            "{lines:?}"
+        );
+
+        // With no room open, the box leaves the room out.
+        bo.app.selected = None;
+        bo.act(Action::Command(Command::Status)).await;
+        bo.run_pending().await;
+        let Some(Modal::Status { lines, .. }) = bo.app.modal.take() else {
+            panic!("no status: {:?}", bo.app.status);
+        };
+        assert!(!lines.iter().any(|l| l == "This room"), "{lines:?}");
+        assert!(lines.iter().any(|l| l == "Server: 127.0.0.1"), "{lines:?}");
     }
 
     #[tokio::test]
@@ -3482,5 +4063,107 @@ mod tests {
         again.act(Action::Select(g)).await;
         assert!(again.view().lines.iter().any(|l| l.text.contains(marker)));
         assert_eq!(first_up(&mut again), "");
+    }
+
+    // ---------- showing that encryption is on ----------
+
+    fn encryption_lines(s: &Screen) -> Vec<crate::ui::LineView> {
+        s.view()
+            .lines
+            .into_iter()
+            .filter(|l| l.text.starts_with("End-to-end encrypted."))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_new_room_opens_with_the_encryption_line_at_the_top() {
+        let srv = TestServer::start().await;
+        let (mut ada, _dir) = screen(&srv, "Ada").await;
+        ada.command(Command::New("Book club".into())).await.unwrap();
+        let view = ada.view();
+        let first = view.lines.first().expect("a line");
+        assert!(first.notice && first.sender.is_empty(), "{first:?}");
+        assert_eq!(
+            first.text,
+            "End-to-end encrypted. Only the people in the People list can read this room. The server passes messages along but cannot read them. /details says what it can see."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_joined_room_shows_the_line_once_above_its_messages() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_bo(&srv).await;
+        a.send_text(g, "hello").await.unwrap();
+        a.sync().await.unwrap();
+        bo.sync().await;
+        bo.act(Action::Select(g)).await;
+        let lines = bo.view().lines;
+        assert!(
+            lines[0].text.starts_with("End-to-end encrypted."),
+            "{lines:?}"
+        );
+        assert_eq!(encryption_lines(&bo).len(), 1);
+        // Opening it again adds nothing.
+        let other = bo.client.create_group("Other").await.unwrap();
+        bo.act(Action::Select(other)).await;
+        bo.act(Action::Select(g)).await;
+        assert_eq!(encryption_lines(&bo).len(), 1);
+    }
+
+    /// A room from before the line gets it after its newest line the first
+    /// time it opens, and never again.
+    #[tokio::test]
+    async fn an_older_room_shows_the_line_once_when_first_opened() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_bo(&srv).await;
+        a.send_text(g, "before the update").await.unwrap();
+        a.sync().await.unwrap();
+        bo.sync().await;
+        bo.client.test_forget_encryption_line(g);
+        let other = bo.client.create_group("Other").await.unwrap();
+        bo.act(Action::Select(other)).await;
+        bo.act(Action::Select(g)).await;
+        let lines = bo.view().lines;
+        let last = lines.last().unwrap();
+        assert!(last.text.starts_with("End-to-end encrypted."), "{lines:?}");
+        a.send_text(g, "after the update").await.unwrap();
+        a.sync().await.unwrap();
+        bo.sync().await;
+        bo.act(Action::Select(other)).await;
+        bo.act(Action::Select(g)).await;
+        let lines = bo.view().lines;
+        assert_eq!(encryption_lines(&bo).len(), 1);
+        assert_eq!(lines.last().unwrap().text, "after the update");
+    }
+
+    /// The People list marks someone new under a verified name.
+    #[tokio::test]
+    async fn the_people_list_marks_someone_new_under_a_verified_name() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut mo, mut bo, _dir) = room_with_bo_and_mo(&srv).await;
+        // Bo verifies Mo, then someone else calls themselves Mo.
+        let mk = mo.my_group_key(g).unwrap();
+        bo.client.mark_verified(g, &mk).unwrap();
+        let mut fake = TestClient::profile_only("Mo").await;
+        fake.join(&a.invite(Some(g), false).await.unwrap().0)
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            a.sync().await.unwrap();
+            mo.sync().await.unwrap();
+            fake.sync().await.unwrap();
+            bo.sync().await;
+        }
+        bo.act(Action::Select(g)).await;
+        let view = bo.view();
+        let fk = fake.my_group_key(g).unwrap();
+        assert!(
+            view.members.iter().any(|m| m.key == fk && m.changed_key),
+            "{:?}",
+            view.members
+        );
+        assert!(view.lines.iter().any(|l| l.notice
+            && l.text
+                .starts_with("Mo joined with a different key from the Mo you verified.")));
     }
 }

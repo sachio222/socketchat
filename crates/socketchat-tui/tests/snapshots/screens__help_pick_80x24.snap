@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render_marked(&app, &vm, 80, 24)"
+---
+┌ Chats ───────────┐┌ Socketchat ──────────────────────────┐┌ People ──────────┐
+│#┌ Commands ────────────────────────────────────────────────────────────────┐ │
+│@│/about                see the version and what Socketchat is              │ │
+│#│/admin <name>         make someone an admin (admins)                      │ │
+│ │/cancel <number>      stop an invite link from /invites                   │ │
+│ │/clear                delete this room's messages from this computer      │ │
+│ │/close                close this room for everyone (admins agree)         │ │
+│ │/details              see this room's admins, size and age                │ │
+│ │/dm <name>            start a two-person chat with someone in this chat   │ │
+│ │/forget <number>      delete a server and its rooms from this computer    │ │
+│ │/help                 see every command and what it does                  │ │
+│ │/invite               make a one-time link that brings someone into this  │ │
+│ │                      chat                                                │ │
+│ │/invite <name>        invite someone you share a room with to this room   │ │
+│ │/invite --dm          make a link that opens a new two-person chat        │ │
+│ │/invites              see your open invite links                          │ │
+│ │/join <link or room>  use a link, or join a room you were invited to      │ │
+│ │/join <number>        pick one of several rooms you were invited to       │ │ ◀
+│ │/keep                 say no to closing this room (admins)                │ │
+└─│/kick <name>          remove someone (admins)                             │─┘
+┌─│/leave                leave this chat and delete its history here         │─┐
+│ │↓ more                                                                    │ │
+└─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
+Up/Down pick a command · Enter use it · Esc close               socketchat 0.6.0

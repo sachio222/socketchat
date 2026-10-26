@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: s
+---
+┌ Chats ───────────┐┌ Socketchat ──────────────────────────┐┌ People ──────────┐
+│#┌ Status ──────────────────────────────────────────────────────────────────┐ │
+│@│Connection                                                                │ │
+│#│Server: chat.socketchat.org                                               │ │
+│ │Port: 7444                                                                │ │
+│ │State: connected since 2026-10-19 at 12:00                                │ │
+│ │Protocol: 3                                                               │ │
+│ │Certificate fingerprint: 0025 4a6f 94b9 de03 284d 7297 bce1 062b 5075 9abf│ │
+│ │e409 2e53 789d c2e7 0c31 567b                                             │ │
+│ │Inviting into rooms: each room's setting decides                          │ │
+│ │Other servers: 1                                                          │ │
+│ │                                                                          │ │
+│ │You                                                                       │ │
+│ │Name: Ada                                                                 │ │
+│ │Your half of each safety number: 12345 67890 23456 78901 34567 89012      │ │
+│ │Rooms on this server: 3                                                   │ │
+│ │                                                                          │ │
+│ │App                                                                       │ │
+│ │Version: 0.6.0                                                            │ │
+└─│Update check: on, once a day. Last checked 2026-10-19 at 12:00. The newest│─┘
+┌─│release then was 0.5.2.                                                   │─┐
+│ │↓ more                                                                    │ │
+└─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
+Esc close                                                       socketchat 0.6.0

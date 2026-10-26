@@ -37,8 +37,12 @@ use crate::suite::{
 use crate::topic::TopicView;
 use crate::CoreError;
 
+mod add;
 mod servers;
+mod status;
+pub use add::{invite_line, InviteSent, RoomInvite, ADD_OFFER_WAIT_SECS, ADD_QUIET_SECS};
 pub use servers::{server_text, ServerState, ServerView};
+pub use status::{Link, RoomStatus, ServerStatus, StatusView};
 
 /// Kinds of stored message line.
 pub mod kind {
@@ -49,6 +53,44 @@ pub mod kind {
     /// A topic set or cleared: the body is the topic, the sender who set
     /// it, the time when they set it.
     pub const TOPIC: i64 = 4;
+    /// An invite that waits for `/join`: a notice whose body holds the
+    /// command to type between [`super::COMMAND_START`] and
+    /// [`super::COMMAND_END`].
+    pub const INVITE: i64 = 5;
+}
+
+/// Where the command in an invite line's kept body starts and ends. Control
+/// characters, which names and room names never hold once cleaned, so a
+/// room called "Type /join 2 to join" cannot move them.
+const COMMAND_START: char = '\u{2}';
+const COMMAND_END: char = '\u{3}';
+
+/// `text` as an invite line's body keeps it, with the command at `at`
+/// marked.
+fn mark_command(text: &str, at: std::ops::Range<usize>) -> String {
+    format!(
+        "{}{COMMAND_START}{}{COMMAND_END}{}",
+        &text[..at.start],
+        &text[at.clone()],
+        &text[at.end..]
+    )
+}
+
+/// An invite line's body read back: the text without its marks, and where
+/// the command sits in it.
+fn unmark_command(body: &str) -> (String, Option<std::ops::Range<usize>>) {
+    let found = body.split_once(COMMAND_START).and_then(|(before, rest)| {
+        let (cmd, after) = rest.split_once(COMMAND_END)?;
+        Some((before, cmd, after))
+    });
+    match found {
+        Some((before, cmd, after)) => {
+            let after = after.replace([COMMAND_START, COMMAND_END], "");
+            let at = before.len()..before.len() + cmd.len();
+            (format!("{before}{cmd}{after}"), Some(at))
+        }
+        None => (body.replace([COMMAND_START, COMMAND_END], ""), None),
+    }
 }
 
 /// The app version this build announces to its rooms.
@@ -111,6 +153,10 @@ pub struct ChatLine {
     /// A topic set or cleared, by `sender_key` at `sent_unix`; `text` is the
     /// topic, empty when it was cleared. Also a notice.
     pub topic: bool,
+    /// In an invite line, where in `text` the command to type sits, as a
+    /// byte range, so a screen can make it stand out. `text` itself stays
+    /// plain.
+    pub command: Option<std::ops::Range<usize>>,
 }
 
 /// A file offered in a room, with who sent it and when.
@@ -137,6 +183,46 @@ pub struct MemberView {
     /// The app version this member said they run. `None` means they never
     /// said, so treat them as 0.4.0.
     pub app_version: Option<String>,
+    /// This member shows under a name that someone this person verified
+    /// had, in this room or another, with a different identity key, and
+    /// this person has not verified them. It clears once they do, or the
+    /// member leaves.
+    pub changed_key: bool,
+}
+
+/// Where a room's join check stands, for the line that says the room is
+/// end-to-end encrypted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoinCheck {
+    /// This person made the room, or joined it and the invite checked out.
+    Checked,
+    /// The invite checked out, and the join waits for `inviter` to confirm
+    /// it from inside the room.
+    Waiting { inviter: String },
+    /// The invite could not be checked, or the inviter can no longer
+    /// confirm it.
+    Unchecked,
+}
+
+/// The line each room shows once to say it is end-to-end encrypted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncryptionLine {
+    /// The line goes after the stored lines up to this sequence number: 0
+    /// for a room made or joined with this line, the newest line then for
+    /// a room made before it, placed when first opened.
+    pub after_seq: u64,
+    /// When it was placed.
+    pub at_unix: u64,
+    pub state: JoinCheck,
+}
+
+/// What a room says when someone shows under the name of a person this
+/// app's user verified, with a different identity key. `name` is the
+/// newcomer's name, `verified` the name the verified person had.
+pub fn changed_key_notice(name: &str, verified: &str) -> String {
+    format!(
+        "{name} joined with a different key from the {verified} you verified. Treat them as someone new until you compare safety numbers: /verify {name}"
+    )
 }
 
 /// An extension message as stored.
@@ -238,6 +324,9 @@ pub struct RoomDetails {
     pub topic_who: WhoCanSetTopic,
     /// The room's topic, if it has one.
     pub topic: Option<TopicView>,
+    /// Whether the room's suite has post-quantum key exchange for messages
+    /// and files (see [`crate::suite::post_quantum`]).
+    pub post_quantum: bool,
 }
 
 /// What became of a text sent with [`Client::send_text`].
@@ -330,6 +419,10 @@ pub enum Event {
         group: GroupId,
         view: CloseView,
     },
+    /// Someone invited this person to a room by name. The room the invite
+    /// came through holds a line saying so ([`invite_line`]), and the
+    /// invite waits for [`Client::accept_invite`].
+    Invited(RoomInvite),
     /// The room was closed. [`Event::Left`] follows.
     Closed {
         group: GroupId,
@@ -465,6 +558,8 @@ pub struct Client {
     profile: Profile,
     conns: HashMap<i64, Conn>,
     groups: HashMap<GroupId, Live>,
+    /// The room the chat screen shows, where an invite's line goes.
+    open_room: Option<GroupId>,
     events: VecDeque<Event>,
     clock_offset: u64,
     /// Groups where someone joined, so this member owes them a profile.
@@ -508,6 +603,9 @@ pub struct Client {
     pushed: HashMap<GroupId, BTreeMap<u64, Vec<u8>>>,
     /// Why the last try to reach each server failed, until one works.
     last_error: HashMap<i64, String>,
+    /// When each server's current connection opened, on this client's
+    /// clock.
+    connected_at: HashMap<i64, u64>,
     /// Texts the server said came too fast, oldest first.
     held: VecDeque<HeldText>,
     /// Rooms that hold this member back from posting, with when they let
@@ -582,6 +680,22 @@ struct Hooks {
     /// This app reads application messages as one up to 0.5.1 does, which
     /// knows no topics.
     reads_like_0_5_1: bool,
+    /// New rooms use the standard suite, which has no post-quantum key
+    /// exchange.
+    standard_suite: bool,
+    /// This app reads application messages as one up to 0.5.2 does, which
+    /// knows no requests to add someone.
+    reads_like_0_5_2: bool,
+    /// Every application message this app read, as bytes.
+    app_seen: Vec<Vec<u8>>,
+    /// Every application message this app tried to post, by group.
+    sent_msgs: Vec<(GroupId, AppMsg)>,
+    /// Requests to add someone skip this app's own checks of who may add.
+    skip_add_checks: bool,
+    /// Offers to add someone name this port in place of the room's server's.
+    add_offer_port: Option<u16>,
+    /// Offers to add someone name the room this way in place of its name.
+    add_offer_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -691,7 +805,13 @@ fn ser(m: &MlsMessageOut) -> Result<Vec<u8>, CoreError> {
 /// their key in the new chat, and the new chat's group ID.
 const DM_LINK_PREFIX: &str = "dm:";
 
-/// Who asked for a direct message, as a pending join remembers it.
+/// Pending joins through a request to add someone, made in a room both
+/// people share, store this prefix and then the same fields as a direct
+/// message's: the asker's identity, their key in the room and its group ID.
+const ADD_LINK_PREFIX: &str = "add:";
+
+/// Who asked for a direct message, or to add this person to a room, as a
+/// pending join remembers it.
 struct DmAsk {
     identity: Key,
     /// The asker's key in the new chat: the one that should add this member.
@@ -701,8 +821,13 @@ struct DmAsk {
 
 impl DmAsk {
     fn to_link(&self) -> String {
+        self.to_link_with(DM_LINK_PREFIX)
+    }
+
+    /// The link a pending join stores, after `prefix`.
+    fn to_link_with(&self, prefix: &str) -> String {
         format!(
-            "{DM_LINK_PREFIX}{}:{}:{}",
+            "{prefix}{}:{}:{}",
             hex(&self.identity.0),
             hex(&self.dm_key.0),
             hex(&self.group.0)
@@ -798,6 +923,7 @@ impl Client {
             profile,
             conns: HashMap::new(),
             groups: HashMap::new(),
+            open_room: None,
             events: VecDeque::new(),
             clock_offset: 0,
             repost: HashSet::new(),
@@ -814,6 +940,7 @@ impl Client {
             commit_grace: HashSet::new(),
             pushed: HashMap::new(),
             last_error: HashMap::new(),
+            connected_at: HashMap::new(),
             held: VecDeque::new(),
             slow_until: HashMap::new(),
             #[cfg(feature = "test-hooks")]
@@ -1074,6 +1201,8 @@ impl Client {
             }
             self.conns.insert(server_id, c);
             self.last_error.remove(&server_id);
+            let now = self.now();
+            self.connected_at.insert(server_id, now);
             if had {
                 self.emit(Event::Reconnected);
             }
@@ -1269,8 +1398,11 @@ impl Client {
             return Ok(());
         };
         let dm_rest = pending.link.strip_prefix(DM_LINK_PREFIX);
-        let dm_ask = dm_rest.and_then(DmAsk::parse);
-        let link = match dm_rest {
+        // A direct message, or a room someone asked to add this member to,
+        // from inside a room they share: the same checks hold for both.
+        let asked_rest = dm_rest.or(pending.link.strip_prefix(ADD_LINK_PREFIX));
+        let dm_ask = asked_rest.and_then(DmAsk::parse);
+        let link = match asked_rest {
             Some(_) => None,
             None => Some(
                 InviteLink::from_str(&pending.link).map_err(|e| CoreError::Other(e.to_string()))?,
@@ -1314,7 +1446,7 @@ impl Client {
         let voucher: Option<Voucher> =
             link_secret.and_then(|s| open_voucher(&voucher_seal_key(&s), &w.voucher));
         let verification = match (&voucher, inviter_fpr, link_secret, adder) {
-            _ if dm_rest.is_some() => match &dm_ask {
+            _ if asked_rest.is_some() => match &dm_ask {
                 // A direct message offered inside a shared group: the
                 // request came from that member, encrypted end to end, and
                 // named the key that would add this member to which chat.
@@ -1390,11 +1522,15 @@ impl Client {
         // not be who the person meant to join. A direct message asked for
         // inside a shared room, by the member who added this one, comes
         // from someone who already has this member's profile there.
-        let asked_in_shared_room = dm_ask
-            .as_ref()
-            .is_some_and(|a| adder == Some(a.dm_key) && gid == a.group);
+        let asked_in_shared_room = dm_rest.is_some()
+            && dm_ask
+                .as_ref()
+                .is_some_and(|a| adder == Some(a.dm_key) && gid == a.group);
         let hold = !matches!(verification, Verification::Verified) && !asked_in_shared_room;
         self.store.add_group(&row)?;
+        if matches!(verification, Verification::Unverified { .. }) {
+            self.store.set_join_unchecked(&gid)?;
+        }
         if hold {
             self.store.hold_profile(&gid)?;
         }
@@ -1457,6 +1593,12 @@ impl Client {
     /// inviter's name once they confirmed it; `None` means they can no
     /// longer confirm it, with `reason` saying why.
     fn settle_join(&mut self, gid: GroupId, confirmed: Option<String>, reason: &str) {
+        if confirmed.is_none() {
+            // The line in the room stops saying it waits; a store that
+            // cannot be written keeps the old line, and the warning below
+            // still goes out.
+            let _ = self.store.set_join_unchecked(&gid);
+        }
         let now = match &confirmed {
             Some(_) => Verification::Verified,
             None => Verification::Unverified {
@@ -1550,7 +1692,15 @@ impl Client {
                 key.credential(),
             )
         };
-        let mls = create(SUITE).map_err(mls_err)?;
+        #[cfg(feature = "test-hooks")]
+        let suite = if self.hooks.standard_suite {
+            crate::suite::FALLBACK_SUITE
+        } else {
+            SUITE
+        };
+        #[cfg(not(feature = "test-hooks"))]
+        let suite = SUITE;
+        let mls = create(suite).map_err(mls_err)?;
         let gi = ser(&mls
             .export_group_info(self.prov.crypto(), &key, false)
             .map_err(mls_err)?)?;
@@ -1637,6 +1787,7 @@ impl Client {
                 .take_while(|c| c.is_alphanumeric())
                 .collect();
             self.hooks.sent.push((gid, kind));
+            self.hooks.sent_msgs.push((gid, msg.clone()));
         }
         for attempt in 0..2 {
             // The catch-up after a refusal can end the room.
@@ -2372,7 +2523,9 @@ impl Client {
                 self.emit(Event::Disconnected);
             }
         }
-        Ok(())
+        // Requests to add someone can span two servers: they move on once
+        // every server had its turn.
+        self.add_steps().await
     }
 
     /// "Book club", or a plain description for a chat with no name yet.
@@ -2609,7 +2762,11 @@ impl Client {
             .store
             .pending_joins()?
             .into_iter()
-            .filter(|p| p.server_id == server_id && !p.link.starts_with(DM_LINK_PREFIX))
+            .filter(|p| {
+                p.server_id == server_id
+                    && !p.link.starts_with(DM_LINK_PREFIX)
+                    && !p.link.starts_with(ADD_LINK_PREFIX)
+            })
             .collect();
         for p in waiting {
             let c = self.conn(server_id).await?;
@@ -2828,11 +2985,24 @@ impl Client {
         }
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(am) => {
-                let msg = AppMsg::decode(&am.into_bytes());
-                // An app up to 0.5.1 cannot read a topic at all.
+                let bytes = am.into_bytes();
                 #[cfg(feature = "test-hooks")]
-                let msg =
-                    msg.filter(|m| !(self.hooks.reads_like_0_5_1 && matches!(m, AppMsg::Topic(_))));
+                self.hooks.app_seen.push(bytes.clone());
+                let msg = AppMsg::decode(&bytes);
+                // An app up to 0.5.1 cannot read a topic at all, and one up
+                // to 0.5.2 cannot read the steps of adding someone.
+                #[cfg(feature = "test-hooks")]
+                let msg = msg.filter(|m| {
+                    !(self.hooks.reads_like_0_5_1 && matches!(m, AppMsg::Topic(_)))
+                        && !((self.hooks.reads_like_0_5_1 || self.hooks.reads_like_0_5_2)
+                            && matches!(
+                                m,
+                                AppMsg::AddAsk { .. }
+                                    | AppMsg::AddKey { .. }
+                                    | AppMsg::AddOffer { .. }
+                                    | AppMsg::AddAnswer { .. }
+                            ))
+                });
                 if let (Some(sender), Some(msg), true) = (sender, msg, signed_by_sender) {
                     self.apply_app(gid, e.seq, sender, msg).await?;
                 }
@@ -3205,11 +3375,32 @@ impl Client {
                     // Confirmed: this member's own profile can go out now.
                     self.release_profile(gid)?;
                 }
-                if !old.is_empty() && old != name {
+                let renamed = !old.is_empty() && old != name;
+                let mut notice = renamed.then(|| format!("{old} is now called {name}"));
+                // Someone under the name of a person this app's user
+                // verified, with another key: the room says so, once.
+                if !self.store.key_warned(&gid, &sender)? {
+                    let names = self.store.verified_names()?;
+                    let row = self
+                        .store
+                        .members(&gid)?
+                        .into_iter()
+                        .find(|m| m.key == sender);
+                    if let Some(verified) = row.and_then(|r| self.lookalike(&names, &r)) {
+                        self.store.set_key_warned(&gid, &sender)?;
+                        let warn = changed_key_notice(&self.name_for(&gid, &sender), &verified);
+                        notice = Some(match notice {
+                            Some(n) => format!("{n}. {warn}"),
+                            None => warn,
+                        });
+                    }
+                }
+                if let Some(text) = notice {
                     let now = self.now();
-                    let text = format!("{old} is now called {name}");
                     self.store
                         .add_message(&gid, seq, None, kind::NOTICE, &text, now)?;
+                }
+                if renamed {
                     self.emit(Event::NameChanged {
                         group: gid,
                         old,
@@ -3234,6 +3425,11 @@ impl Client {
                 self.store.set_group_name(&gid, &name)?;
                 if let Some(l) = self.groups.get_mut(&gid) {
                     l.row.name = name.clone();
+                }
+                // The first name a room gives someone it took in through an
+                // invite by name is checked against the invite's.
+                if old.is_empty() {
+                    self.check_invited_name(gid, seq, &name)?;
                 }
                 if from_admin && !old.is_empty() && old != name {
                     let who = self.name_for(&gid, &sender);
@@ -3408,6 +3604,21 @@ impl Client {
                 }
             }
             AppMsg::Topic(t) => self.take_topic(gid, seq, sender, t)?,
+            AppMsg::AddAsk { to, ask, reply_key } => {
+                self.take_add_ask(gid, sender, to, ask, reply_key)?
+            }
+            AppMsg::AddKey {
+                to,
+                ask,
+                key,
+                offer_by,
+            } => self.take_add_key(gid, sender, to, ask, key, offer_by)?,
+            AppMsg::AddOffer { to, ask, sealed } => {
+                self.take_add_offer(gid, sender, to, ask, &sealed)?
+            }
+            AppMsg::AddAnswer { to, ask, sealed } => {
+                self.take_add_answer(gid, sender, to, ask, &sealed)?
+            }
             AppMsg::Closed { close_id } => {
                 if !self.current_admins(&gid).contains(&sender) {
                     return Ok(());
@@ -3543,6 +3754,7 @@ impl Client {
             sent_unix,
             notice,
             topic: false,
+            command: None,
         }
     }
 
@@ -3935,7 +4147,80 @@ impl Client {
             },
             topic_who: settings.topic,
             topic: self.topic(gid),
+            post_quantum: self.room_suite(gid).is_some_and(crate::suite::post_quantum),
         })
+    }
+
+    /// The MLS suite room `gid` uses.
+    pub fn room_suite(&self, gid: GroupId) -> Option<Ciphersuite> {
+        self.groups.get(&gid).map(|l| l.mls.ciphersuite())
+    }
+
+    /// The line room `gid` shows once to say it is end-to-end encrypted,
+    /// once it has one (see [`Client::place_encryption_line`]). Its state
+    /// says where the join's check stands now.
+    pub fn encryption_line(&self, gid: GroupId) -> Option<EncryptionLine> {
+        let (after_seq, at_unix, checked) = self.store.encryption_line(&gid).ok().flatten()?;
+        let state = match self.store.awaited_inviter(&gid).ok().flatten() {
+            Some((_, identity)) => JoinCheck::Waiting {
+                inviter: self.inviter_name(&identity),
+            },
+            None if !checked => JoinCheck::Unchecked,
+            None => JoinCheck::Checked,
+        };
+        Some(EncryptionLine {
+            after_seq,
+            at_unix,
+            state,
+        })
+    }
+
+    /// The name to show for the person whose identity signed this member's
+    /// invite.
+    fn inviter_name(&self, identity: &Key) -> String {
+        self.store
+            .name_of_identity(identity)
+            .ok()
+            .flatten()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "the person who invited you".into())
+    }
+
+    /// Gives room `gid` its encryption line if it has none, as a room made
+    /// before the line existed: after its newest stored line. A room's
+    /// line is placed once and stays where it is. A room whose profile is
+    /// held back without an inviter to wait for came from a join that did
+    /// not check out.
+    pub fn place_encryption_line(&mut self, gid: GroupId) -> Result<(), CoreError> {
+        if self.store.encryption_line(&gid)?.is_some() {
+            return Ok(());
+        }
+        let unchecked =
+            self.store.profile_held(&gid)? && self.store.awaited_inviter(&gid)?.is_none();
+        let now = self.now();
+        self.store.place_encryption_line(&gid, now, !unchecked)
+    }
+
+    /// The name a verified person showed under that `row`'s member also
+    /// shows under, when the member has a different identity key and is
+    /// not verified. `names` are [`Store::verified_names`].
+    fn lookalike(&self, names: &[(Key, String)], row: &MemberRow) -> Option<String> {
+        let id = row.identity?;
+        if row.verified {
+            return None;
+        }
+        let me = self.profile.identity.public();
+        let shown = [Some(&row.display_name), row.local_name.as_ref()];
+        names
+            .iter()
+            .filter(|(vid, _)| *vid != id && *vid != me)
+            .find(|(_, vname)| {
+                shown
+                    .iter()
+                    .flatten()
+                    .any(|n| !n.is_empty() && crate::sanitize::same_name(n, vname))
+            })
+            .map(|(_, vname)| vname.clone())
     }
 
     pub fn members(&self, gid: GroupId) -> Vec<MemberView> {
@@ -3954,6 +4239,7 @@ impl Client {
             .into_iter()
             .map(|m| (m.key, m))
             .collect();
+        let names = self.store.verified_names().unwrap_or_default();
         let mut out: Vec<(Option<u64>, MemberView)> = live
             .mls
             .members()
@@ -3966,6 +4252,10 @@ impl Client {
                     admin: admins.contains(&key),
                     me: key == mine,
                     app_version: row.as_ref().and_then(|r| r.app_version.clone()),
+                    changed_key: key != mine
+                        && row
+                            .as_ref()
+                            .is_some_and(|r| self.lookalike(&names, r).is_some()),
                     key,
                 };
                 (row.map(|r| r.joined_seq), view)
@@ -4008,9 +4298,10 @@ impl Client {
 
     fn chat_line(&self, gid: &GroupId, m: MessageRow) -> ChatLine {
         let topic = m.kind == kind::TOPIC;
-        let text = match topic {
-            true => crate::sanitize::clean_topic(&m.body),
-            false => m.body,
+        let (text, command) = match m.kind {
+            kind::TOPIC => (crate::sanitize::clean_topic(&m.body), None),
+            kind::INVITE => unmark_command(&m.body),
+            _ => (m.body, None),
         };
         let mut line = self.line(
             gid,
@@ -4018,9 +4309,10 @@ impl Client {
             m.sender,
             text,
             m.sent_unix,
-            topic || matches!(m.kind, kind::NOTICE | kind::FILE),
+            topic || matches!(m.kind, kind::NOTICE | kind::FILE | kind::INVITE),
         );
         line.topic = topic;
+        line.command = command;
         line
     }
 
@@ -5655,6 +5947,24 @@ impl Client {
         out
     }
 
+    /// Makes this app's new rooms use the standard suite, as an app
+    /// that offers no post-quantum suite would.
+    pub fn test_standard_suite(&mut self, on: bool) {
+        self.hooks.standard_suite = on;
+    }
+
+    /// Deletes room `gid`'s encryption line, as a room made before the
+    /// line existed has none.
+    pub fn test_forget_encryption_line(&self, gid: GroupId) {
+        self.store.test_forget_encryption_line(&gid);
+    }
+
+    /// Forgets the names of verified people, as a profile made before
+    /// Socketchat remembered them has none.
+    pub fn test_forget_verified_names(&self) {
+        self.store.test_forget_verified_names();
+    }
+
     /// The GroupInfo and ratchet tree this app sent the server when it
     /// made `gid`.
     pub fn test_uploaded_group_info(&self, gid: GroupId) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -5983,6 +6293,12 @@ impl Client {
         }
     }
 
+    /// How many pushes have arrived on this client's connections and wait
+    /// to be read.
+    pub fn test_pushes_waiting(&self) -> usize {
+        self.conns.values().map(|c| c.test_pushes_waiting()).sum()
+    }
+
     /// Makes every fetch of this group fail.
     pub fn test_break_group(&mut self, gid: GroupId) {
         self.hooks.broken.insert(gid);
@@ -5997,6 +6313,42 @@ impl Client {
     /// Makes the server's next fetch of this group come back refused.
     pub fn test_refuse_next_fetch(&mut self, gid: GroupId, why: &str) {
         self.hooks.refuse_fetch.insert(gid, why.to_string());
+    }
+
+    /// Every application message this app read, as bytes.
+    pub fn test_app_seen(&self) -> Vec<Vec<u8>> {
+        self.hooks.app_seen.clone()
+    }
+
+    /// Every application message this app tried to post in `gid`.
+    pub fn test_sent_msgs(&self, gid: GroupId) -> Vec<AppMsg> {
+        self.hooks
+            .sent_msgs
+            .iter()
+            .filter(|(g, _)| *g == gid)
+            .map(|(_, m)| m.clone())
+            .collect()
+    }
+
+    /// Makes this app read application messages as one up to 0.5.2 does.
+    pub fn test_reads_like_0_5_2(&mut self, on: bool) {
+        self.hooks.reads_like_0_5_2 = on;
+    }
+
+    /// Makes requests to add someone skip this app's own checks of who
+    /// may add, so only the server's remain.
+    pub fn test_skip_add_checks(&mut self, on: bool) {
+        self.hooks.skip_add_checks = on;
+    }
+
+    /// Makes offers to add someone name `port` for the room's server.
+    pub fn test_add_offer_port(&mut self, port: Option<u16>) {
+        self.hooks.add_offer_port = port;
+    }
+
+    /// Makes offers to add someone name the room `name`.
+    pub fn test_add_offer_name(&mut self, name: Option<&str>) {
+        self.hooks.add_offer_name = name.map(str::to_string);
     }
 
     /// KeyPackages this client saw in direct-message answers meant for

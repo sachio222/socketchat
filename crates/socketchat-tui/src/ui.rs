@@ -15,8 +15,11 @@ use socketchat_core::keys::Key;
 use socketchat_proto::msg::GroupId;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::app::{about_lines, ended_hint, version_text, App, Focus, Hits, Modal};
-use crate::commands::HELP;
+use crate::app::{
+    about_lines, ended_hint, keep_in_view, version_text, App, Focus, Hits, Modal, STATUS_HEADINGS,
+};
+use crate::commands::help_entries;
+use crate::select::{cols_of, covered, Area, Join, TextArea, TextRow};
 use crate::theme::Theme;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +43,9 @@ pub struct LineView {
     pub mine: bool,
     /// A topic set or cleared, drawn in the topic's style. Also a notice.
     pub topic: bool,
+    /// In an invite line, where in `text` the command to type sits, as a
+    /// byte range: drawn in the command style, and copied as plain text.
+    pub command: Option<std::ops::Range<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +55,9 @@ pub struct MemberLine {
     pub verified: bool,
     pub admin: bool,
     pub me: bool,
+    /// Shows under the name of someone this person verified, with a
+    /// different identity key, and is not verified.
+    pub changed_key: bool,
 }
 
 /// Everything the screen shows, gathered from the client before each draw.
@@ -63,6 +72,13 @@ pub struct ViewModel {
     pub server: Option<String>,
     /// The open room's topic, cleaned, shown under its header.
     pub topic: Option<String>,
+    /// While the message box holds `/invite`: what `/invite` takes for
+    /// each person who shares a room with this person, people not in the
+    /// open room first, for Tab and Up and Down.
+    pub invite_names: Vec<String>,
+    /// While the message box holds `/join`: what `/join` takes for each
+    /// invite that waits, newest first, from [`crate::app::join_choices`].
+    pub join_rooms: Vec<String>,
 }
 
 const SIDE: u16 = 20;
@@ -98,29 +114,40 @@ fn steps(n: usize) {
 /// `text`: a word longer than a row is cut into rows by slicing, never by
 /// rebuilding the rest of the word.
 fn wrap(text: &str, w: usize) -> Vec<String> {
+    wrap_joined(text, w).into_iter().map(|(r, _)| r).collect()
+}
+
+/// [`wrap`], with how each row follows the row before it: the first row
+/// of each line of `text` starts a line, and the others follow at the
+/// space the wrap took, or at nothing where it cut a word.
+fn wrap_joined(text: &str, w: usize) -> Vec<(String, Join)> {
     let w = w.max(1);
     let mut out = vec![];
     for para in text.split('\n') {
         let mut line = String::new();
-        // Characters in `line`.
+        // Characters in `line`, and how `line` follows the row before.
         let mut used = 0;
+        let mut join = Join::Line;
         for mut word in para.split(' ') {
             let mut n = word.chars().count();
             steps(n);
             while n > w {
                 if used > 0 {
-                    out.push(std::mem::take(&mut line));
+                    out.push((std::mem::take(&mut line), join));
                     used = 0;
+                    join = Join::Space;
                 }
                 let cut = word.char_indices().nth(w).map_or(word.len(), |(i, _)| i);
                 steps(w);
-                out.push(word[..cut].to_string());
+                out.push((word[..cut].to_string(), join));
                 word = &word[cut..];
                 n -= w;
+                join = Join::Cut;
             }
             if used > 0 && used + 1 + n > w {
-                out.push(std::mem::take(&mut line));
+                out.push((std::mem::take(&mut line), join));
                 used = 0;
+                join = Join::Space;
             }
             if used > 0 {
                 line.push(' ');
@@ -129,7 +156,7 @@ fn wrap(text: &str, w: usize) -> Vec<String> {
             line.push_str(word);
             used += n;
         }
-        out.push(line);
+        out.push((line, join));
     }
     out
 }
@@ -160,7 +187,7 @@ fn help_line(app: &App, width: usize) -> &'static str {
             Modal::Confirm { .. } => "Y yes · N no",
             Modal::Invites { .. } => "/cancel <number> stops a link · Esc close",
             Modal::Servers { .. } => "/forget <number> forgets a server · Esc close",
-            Modal::Help { .. } => "Up/Down scroll · Esc close",
+            Modal::Help { .. } => "Up/Down pick a command · Enter use it · Esc close",
             _ => "Esc close",
         };
     }
@@ -182,6 +209,7 @@ fn help_line(app: &App, width: usize) -> &'static str {
     match app.focus {
         Focus::Input => "Enter send · /help commands · Tab move · Ctrl-K switch chat · Ctrl-C quit",
         Focus::Groups => "Up/Down pick a chat · Tab move · Ctrl-K switch chat · Ctrl-C quit",
+        Focus::Messages if app.mouse => "Drag to copy · PgUp/PgDn or Up/Down scroll · Tab move",
         Focus::Messages => "PgUp/PgDn or Up/Down scroll · Tab move · Ctrl-C quit",
         Focus::Members => "✓ verified · * admin · /verify <name> · Tab move",
     }
@@ -379,7 +407,7 @@ fn box_text(input: &str) -> String {
 /// This is the rule `Paragraph` follows: split into extended grapheme
 /// clusters, draw nothing for a cluster holding a control character, and
 /// size the rest with ratatui's own `CellWidth::cell_width`.
-fn drawn_clusters(text: &str) -> Vec<(&str, usize)> {
+pub(crate) fn drawn_clusters(text: &str) -> Vec<(&str, usize)> {
     text.graphemes(true)
         .map(|g| {
             let shown = !g.contains(char::is_control);
@@ -572,16 +600,31 @@ fn draw_messages(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
     // Only the newest messages that fill the window at this scroll get
     // wrapped, however many are loaded.
     let need = (inner.height as usize).saturating_sub(rows.len()) + app.scroll as usize;
+    let first = first_shown(&vm.lines, w, need);
     let mut body: Vec<Line> = vec![];
-    for l in &vm.lines[first_shown(&vm.lines, w, need)..] {
+    // The same rows as plain text, for selecting.
+    let mut texts: Vec<TextRow> = vec![];
+    for l in &vm.lines[first..] {
         let head = message_head(l);
         let style = match (l.topic, l.notice) {
             (true, _) => t.topic,
             (_, true) => t.notice,
             _ => Style::default(),
         };
-        let pieces = message_rows(&head, l, w);
-        for (i, piece) in pieces.into_iter().enumerate() {
+        let pieces = message_text_rows(&head, l, w);
+        texts.extend(pieces.iter().cloned());
+        if let Some(at) = l.command.clone().filter(|_| l.notice && !l.topic) {
+            for parts in command_parts(&head, &l.text, at, &pieces) {
+                body.push(Line::from(
+                    parts
+                        .into_iter()
+                        .map(|(text, cmd)| Span::styled(text, if cmd { t.command } else { style }))
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            continue;
+        }
+        for (i, piece) in pieces.into_iter().map(|r| r.text).enumerate() {
             if i == 0 && !l.notice {
                 let split = head.chars().count().min(piece.chars().count());
                 // The time, then the name, then the text.
@@ -607,8 +650,86 @@ fn draw_messages(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
     let room = (inner.height as usize).saturating_sub(rows.len());
     let end = body.len().saturating_sub(app.scroll as usize);
     let start = end.saturating_sub(room);
+    let above = rows.len() as u16;
     rows.extend(body[start..end].iter().cloned());
     f.render_widget(Paragraph::new(rows), inner);
+    // Rows count up from the newest as negative numbers, so a selection
+    // stays on its text as the messages scroll.
+    let area = TextArea {
+        rect: Rect {
+            y: inner.y + above,
+            height: (end - start) as u16,
+            ..inner
+        },
+        top: start as i64 - body.len() as i64,
+        more_above: start > 0 || first > 0,
+        more_below: end < body.len(),
+        width: w,
+    };
+    app.hits.borrow_mut().text = Some(area);
+    paint_selection(f, app, Area::Messages, &area, &texts[start..end]);
+}
+
+/// Draws the part of `rows`, the rows of text on screen in `area`, that
+/// the mouse has selected, in the theme's selection style.
+fn paint_selection(f: &mut Frame, app: &App, which: Area, area: &TextArea, rows: &[TextRow]) {
+    let Some((a, b)) = app.selection(which) else {
+        return;
+    };
+    let r = area.rect;
+    for (k, row) in rows.iter().enumerate().take(r.height as usize) {
+        let Some((from, to)) = cols_of(area.top + k as i64, a, b) else {
+            continue;
+        };
+        if let (_, Some((c0, c1))) = covered(row, from, to) {
+            let c1 = c1.min(r.width as usize);
+            if c0 < c1 {
+                let cells = Rect::new(r.x + c0 as u16, r.y + k as u16, (c1 - c0) as u16, 1);
+                f.buffer_mut().set_style(cells, app.theme.selected);
+            }
+        }
+    }
+}
+
+/// Each of `rows`, the rows a notice takes on screen, cut where the
+/// command at `at` in `text` starts and ends: its pieces, each marked when
+/// it is part of the command. The rows hold the characters of the head and
+/// the text in order, less the spaces where a row breaks and plus the
+/// indent on the rows under the first, so the characters match up in turn.
+fn command_parts(
+    head: &str,
+    text: &str,
+    at: std::ops::Range<usize>,
+    rows: &[TextRow],
+) -> Vec<Vec<(String, bool)>> {
+    let full: Vec<char> = head.chars().chain(text.chars()).collect();
+    let (Some(before), Some(cmd)) = (text.get(..at.start), text.get(at.clone())) else {
+        return rows.iter().map(|r| vec![(r.text.clone(), false)]).collect();
+    };
+    let from = head.chars().count() + before.chars().count();
+    let to = from + cmd.chars().count();
+    let mut p = 0;
+    rows.iter()
+        .map(|r| {
+            let mut parts: Vec<(String, bool)> = vec![];
+            for (k, c) in r.text.chars().enumerate() {
+                let marked = if k < r.indent {
+                    false
+                } else {
+                    while p < full.len() && full[p] != c {
+                        p += 1;
+                    }
+                    p += 1;
+                    (from..to).contains(&(p - 1))
+                };
+                match parts.last_mut() {
+                    Some((s, m)) if *m == marked => s.push(c),
+                    _ => parts.push((c.to_string(), marked)),
+                }
+            }
+            parts
+        })
+        .collect()
 }
 
 /// The start of a message's first row: the time, then the sender's name,
@@ -623,26 +744,58 @@ fn message_head(l: &LineView) -> String {
 
 /// The rows a message takes at `w` characters wide, its first row
 /// starting with `head`.
+#[cfg(test)]
 fn message_rows(head: &str, l: &LineView, w: usize) -> Vec<String> {
+    message_text_rows(head, l, w)
+        .into_iter()
+        .map(|r| r.text)
+        .collect()
+}
+
+/// The rows a message takes at `w` characters wide, its first row
+/// starting with `head`, each with how it follows the row above.
+fn message_text_rows(head: &str, l: &LineView, w: usize) -> Vec<TextRow> {
     let full = format!("{head}{}", l.text);
     // Continuation lines sit under the text, clear of the time and the
     // space after it.
     let indent = l.time.chars().count() + 1;
-    let first = wrap(&full, w);
+    let first = wrap_joined(&full, w);
+    let row = |text, indent, join| TextRow { text, indent, join };
     match first.split_first() {
-        Some((head_line, _)) if w > indent * 2 => {
+        Some(((head_line, _), _)) if w > indent * 2 => {
             let used = head_line.chars().count();
             let rest: String = full.chars().skip(used).collect();
-            let mut v = vec![head_line.clone()];
-            for p in wrap(rest.trim_start(), w - indent) {
+            let body = rest.trim_start();
+            // What the head row ended at: a line break, a space, or the
+            // middle of a word.
+            let gap = &rest[..rest.len() - body.len()];
+            let mut after_head = Some(if gap.contains('\n') {
+                Join::Line
+            } else if gap.is_empty() {
+                Join::Cut
+            } else {
+                Join::Space
+            });
+            let mut v = vec![row(head_line.clone(), 0, Join::Line)];
+            for (p, j) in wrap_joined(body, w - indent) {
+                let join = after_head.take().unwrap_or(j);
                 if !p.is_empty() {
-                    v.push(format!("{}{p}", " ".repeat(indent)));
+                    v.push(row(format!("{}{p}", " ".repeat(indent)), indent, join));
                 }
             }
             v
         }
-        _ => first,
+        _ => first.into_iter().map(|(t, j)| row(t, 0, j)).collect(),
     }
+}
+
+/// The rows of the messages at `w` characters wide, newest last: at least
+/// the newest `need`, or all of them when there are fewer.
+pub(crate) fn message_body(vm: &ViewModel, w: usize, need: usize) -> Vec<TextRow> {
+    vm.lines[first_shown(&vm.lines, w, need)..]
+        .iter()
+        .flat_map(|l| message_text_rows(&message_head(l), l, w))
+        .collect()
 }
 
 /// The oldest of `lines` a draw needs: walking back from the newest, the
@@ -651,7 +804,7 @@ fn message_rows(head: &str, l: &LineView, w: usize) -> Vec<String> {
 fn first_shown(lines: &[LineView], w: usize, need: usize) -> usize {
     let mut rows = 0;
     for (i, l) in lines.iter().enumerate().rev() {
-        rows += message_rows(&message_head(l), l, w).len();
+        rows += message_text_rows(&message_head(l), l, w).len();
         if rows >= need {
             return i;
         }
@@ -667,7 +820,11 @@ fn draw_members(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            let v = if m.verified { "✓" } else { " " };
+            let v = match (m.verified, m.changed_key) {
+                (true, _) => "✓",
+                (false, true) => "!",
+                (false, false) => " ",
+            };
             let star = if m.admin { "*" } else { "" };
             let you = if m.me { " (you)" } else { "" };
             let name = fit(&m.name, w.saturating_sub(2 + star.len() + you.len()));
@@ -690,8 +847,36 @@ fn draw_members(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
         .borders(Borders::ALL)
         .border_style(border(t, app.focus == Focus::Members))
         .title_style(t.title)
-        .title(" People ");
+        .title(match app.selected {
+            Some(_) => people_title(&vm.members, r.width.saturating_sub(2) as usize),
+            None => " People ".into(),
+        });
     f.render_widget(Paragraph::new(lines).block(block), r);
+}
+
+/// The People pane's title, at most `room` columns wide: how many of the
+/// people listed carry the verified mark, this person included, as the
+/// list shows it, or "! check" while someone shows under the name of a
+/// person verified earlier with a different key. A narrower pane gets a
+/// shorter form, and one too narrow for any gets none.
+pub fn people_title(members: &[MemberLine], room: usize) -> String {
+    let verified = members.iter().filter(|m| m.verified).count();
+    let n = members.len();
+    let choices: Vec<String> = if members.iter().any(|m| m.changed_key) {
+        vec![" People ! check ".into(), " ! check ".into(), " ! ".into()]
+    } else if n == 0 {
+        vec![" People ".into()]
+    } else {
+        vec![
+            format!(" People {verified} of {n} ✓ "),
+            format!(" People {verified}/{n} ✓ "),
+            format!(" {verified}/{n} ✓ "),
+        ]
+    };
+    choices
+        .into_iter()
+        .find(|t| t.chars().count() <= room)
+        .unwrap_or_default()
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
@@ -760,39 +945,133 @@ fn qr_rows(text: &str, ec: qrcode::EcLevel) -> Vec<String> {
     }
 }
 
-/// Under the command list: how to select text while the mouse is on.
-const MOUSE_NOTE: &str = "To select text while the mouse is on, hold Shift as you drag (Option or Fn on a Mac), or type /mouse off.";
+/// Under the command list: how to select and copy text while the mouse
+/// is on.
+const MOUSE_NOTE: &str = "Drag over messages or the text in a box to copy it. To select with your terminal instead, hold Shift as you drag (Option or Fn on a Mac), or type /mouse off.";
 
-/// The help box's row for Up and Down in the message box, under the
-/// commands.
-const EARLIER_HELP: (&str, &str) = ("Up/Down", "bring back your earlier lines in this room");
+/// The help box's rows for the keys, under the commands.
+const KEYS_HELP: [(&str, &str); 5] = [
+    ("/ then Enter", "open this list to pick a command"),
+    (
+        "/s then Up/Down",
+        "step through the commands that start with /s",
+    ),
+    (
+        "Tab or Up/Down",
+        "step through the rooms or names that fit after /switch, /invite or /join",
+    ),
+    ("Up/Down", "bring back your earlier lines in this room"),
+    (
+        "Ctrl-C Ctrl-C",
+        "quit; one Ctrl-C copies the text you selected",
+    ),
+];
 
 /// Width of the command column in the help box: the longest command and
 /// one space.
 const HELP_COLUMN: usize = 22;
 
-/// Every row of the help box at `inner_w` characters wide. A description
-/// too long for its row goes on under itself, never cut short.
-fn help_rows(inner_w: usize, t: &Theme) -> Vec<Line<'static>> {
+/// Every row of the help box at `inner_w` characters wide, as drawn and
+/// as text: the commands in alphabetical order with row `pick`
+/// highlighted, then the keys and a note on selecting text. A description
+/// too long for its row goes on under itself, never cut short. Also gives
+/// each command row's first line and how many lines it takes.
+fn help_rows(inner_w: usize, t: &Theme, pick: usize) -> (Vec<Shown>, Vec<(usize, usize)>) {
     let cyan = t.accent;
+    let desc_w = inner_w.saturating_sub(HELP_COLUMN);
     let mut rows = vec![];
-    for (c, d) in HELP.iter().chain([&EARLIER_HELP]) {
-        for (i, part) in wrap(d, inner_w.saturating_sub(HELP_COLUMN))
-            .into_iter()
-            .enumerate()
-        {
-            let head = if i == 0 { *c } else { "" };
-            rows.push(Line::from(vec![
-                Span::styled(format!("{head:<HELP_COLUMN$}"), cyan),
-                Span::raw(part),
-            ]));
+    let mut layout = vec![];
+    let entries = help_entries();
+    let keys = KEYS_HELP.iter().map(|(c, d)| (*c, *d));
+    for (n, (c, d)) in entries.into_iter().chain(keys).enumerate() {
+        let lit = n == pick;
+        let first = rows.len();
+        for (i, (part, join)) in wrap_joined(d, desc_w).into_iter().enumerate() {
+            let head = if i == 0 { c } else { "" };
+            let head = format!("{head:<HELP_COLUMN$}");
+            let text = TextRow {
+                text: format!("{head}{part}"),
+                indent: if i == 0 { 0 } else { HELP_COLUMN },
+                join,
+            };
+            let line = if lit {
+                Line::from(vec![
+                    Span::styled(head, t.selected),
+                    Span::styled(format!("{part:<desc_w$}"), t.selected),
+                ])
+            } else {
+                Line::from(vec![Span::styled(head, cyan), Span::raw(part)])
+            };
+            rows.push((line, text));
+        }
+        if n < help_entries().len() {
+            layout.push((first, rows.len() - first));
         }
     }
-    rows.push(Line::from(""));
-    for part in wrap(MOUSE_NOTE, inner_w) {
-        rows.push(Line::from(Span::styled(part, t.dim)));
-    }
-    rows
+    rows.extend(plain_rows(&[String::new()], Style::default(), inner_w));
+    rows.extend(plain_rows(&[MOUSE_NOTE.into()], t.dim, inner_w));
+    (rows, layout)
+}
+
+/// A row of a box as drawn, and as text.
+type Shown = (Line<'static>, TextRow);
+
+/// Lines of text in `style`, each wrapped to `w`, as drawn and as text.
+fn plain_rows(lines: &[String], style: Style, w: usize) -> Vec<(Line<'static>, TextRow)> {
+    lines
+        .iter()
+        .flat_map(|l| wrap_joined(l, w))
+        .map(|(r, join)| {
+            (
+                Line::from(Span::styled(r.clone(), style)),
+                TextRow {
+                    text: r,
+                    indent: 0,
+                    join,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Every row of a box whose text the mouse can select, before it
+/// scrolls, as drawn and as text; `None` for the other boxes.
+pub(crate) fn box_rows(
+    app: &App,
+    m: &Modal,
+    inner_w: usize,
+) -> Option<Vec<(Line<'static>, TextRow)>> {
+    let plain = Style::default();
+    Some(match m {
+        Modal::Invites { rows, .. } | Modal::Servers { rows, .. } => {
+            plain_rows(rows, plain, inner_w)
+        }
+        // The topic line keeps the topic's style.
+        Modal::Details { lines, .. } => lines
+            .iter()
+            .flat_map(|l| {
+                let style = match l.starts_with("Topic: ") {
+                    true => app.theme.topic,
+                    false => plain,
+                };
+                plain_rows(std::slice::from_ref(l), style, inner_w)
+            })
+            .collect(),
+        // Section headings stand out as box titles do.
+        Modal::Status { lines, .. } => lines
+            .iter()
+            .flat_map(|l| {
+                let style = match STATUS_HEADINGS.contains(&l.as_str()) {
+                    true => app.theme.title,
+                    false => plain,
+                };
+                plain_rows(std::slice::from_ref(l), style, inner_w)
+            })
+            .collect(),
+        Modal::About => plain_rows(&about_lines(&app.updates), plain, inner_w),
+        Modal::Help { pick, .. } => help_rows(inner_w, &app.theme, *pick).0,
+        _ => return None,
+    })
 }
 
 /// Lines of plain text, each wrapped to `w`.
@@ -876,35 +1155,52 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
     let max_h = area.height.saturating_sub(2) as usize;
     // The row under the link that copies the invite, and its width.
     let mut copy_row: Option<(usize, usize)> = None;
+    // The help box's command row on each line, from the top.
+    let mut help_lines: Vec<Option<usize>> = vec![];
+    // The line the help box shows first, kept so its highlight shows.
+    let mut help_top: Option<usize> = None;
+    // The rows of a box whose text can be selected, and the drawn ones.
+    let texts = box_rows(app, m, inner_w);
+    let drawn =
+        || -> Vec<Line<'static>> { texts.iter().flatten().map(|(l, _)| l.clone()).collect() };
     let (title, mut lines): (String, Vec<Line>) = match m {
         Modal::Confirm { question, .. } => (String::new(), wrapped(std::slice::from_ref(question), inner_w)),
-        Modal::Invites { rows, offset } => (
+        Modal::Invites { offset, .. } => (
             " Open invite links ".into(),
-            scroll_window(app, wrapped(rows, inner_w), *offset, max_h),
+            scroll_window(app, drawn(), *offset, max_h),
         ),
-        Modal::Servers { rows, offset } => (
+        Modal::Servers { offset, .. } => (
             " Your servers ".into(),
-            scroll_window(app, wrapped(rows, inner_w), *offset, max_h),
+            scroll_window(app, drawn(), *offset, max_h),
         ),
-        Modal::Details { lines, offset } => {
-            // The topic line keeps the topic's style.
-            let rows = lines
-                .iter()
-                .flat_map(|l| {
-                    let style = match l.starts_with("Topic: ") {
-                        true => app.theme.topic,
-                        false => Style::default(),
-                    };
-                    wrap(l, inner_w).into_iter().map(move |r| Line::from(Span::styled(r, style)))
-                })
-                .collect();
-            (" Room details ".into(), scroll_window(app, rows, *offset, max_h))
+        Modal::Details { offset, .. } => {
+            (" Room details ".into(), scroll_window(app, drawn(), *offset, max_h))
         }
-        Modal::About => (" About ".into(), wrapped(&about_lines(&app.updates), inner_w)),
-        Modal::Help { offset } => (
-            " Commands ".into(),
-            scroll_window(app, help_rows(inner_w, &app.theme), *offset, max_h),
-        ),
+        Modal::Status { offset, .. } => {
+            (" Status ".into(), scroll_window(app, drawn(), *offset, max_h))
+        }
+        Modal::About => (" About ".into(), drawn()),
+        Modal::Help { offset, pick } => {
+            let (_, layout) = help_rows(inner_w, &app.theme, *pick);
+            let all = drawn();
+            // Scrolled so the highlighted command shows whole.
+            let fits = max_h.saturating_sub(2).max(2);
+            let max = all.len().saturating_sub(fits);
+            let top = keep_in_view(&layout, (max, fits), *offset, *pick).min(max);
+            let mut of_line = vec![None; all.len()];
+            for (i, (first, count)) in layout.iter().enumerate() {
+                for line in &mut of_line[*first..first + count] {
+                    *line = Some(i);
+                }
+            }
+            let shown = scroll_window(app, all, top, max_h);
+            // The last line says "↓ more" while lines below are hidden.
+            let picks = shown.len() - usize::from(top < max);
+            help_lines = (0..picks).map(|i| of_line[top + i]).collect();
+            help_top = Some(top);
+            *app.help_layout.borrow_mut() = layout;
+            (" Commands ".into(), shown)
+        }
         Modal::Invite {
             link,
             hours,
@@ -912,7 +1208,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
         } => {
             let mut v: Vec<Line> = wrap(
                 &format!(
-                    "Send this link to one person. It works once and expires in {}. Anyone who has it can ask to join.",
+                    "Send this link to one person. It works once and expires in {}. Anyone who has it can ask to join. They can paste it into an open chat with /join. To invite someone you already share a room with, type /invite and their name.",
                     hours_text(*hours)
                 ),
                 inner_w,
@@ -1025,8 +1321,50 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
         ),
         r,
     );
+    // Where the box's text sits, for selecting it: the rows on screen,
+    // less the one that says more lie below.
+    if let Some(texts) = &texts {
+        let (top, shown, max) = match m {
+            Modal::Help { offset, .. }
+            | Modal::Invites { offset, .. }
+            | Modal::Servers { offset, .. }
+            | Modal::Details { offset, .. }
+            | Modal::Status { offset, .. } => {
+                let (max, fits) = app.box_scroll.get();
+                let top = help_top.unwrap_or(*offset).min(max);
+                let shown = if top < max {
+                    fits - 1
+                } else {
+                    texts.len() - top
+                };
+                (top, shown, max)
+            }
+            _ => (0, lines_shown, 0),
+        };
+        let area = TextArea {
+            rect: Rect::new(
+                r.x + 1,
+                r.y + 1,
+                r.width.saturating_sub(2),
+                shown.min(lines_shown) as u16,
+            ),
+            top: top as i64,
+            more_above: top > 0,
+            more_below: top < max,
+            width: inner_w,
+        };
+        app.hits.borrow_mut().box_text = Some(area);
+        let rows: Vec<TextRow> = texts[top..].iter().map(|(_, t)| t.clone()).collect();
+        paint_selection(f, app, Area::Box, &area, &rows);
+    }
     let mut hits = app.hits.borrow_mut();
     hits.modal = Some(r);
+    for (i, row) in help_lines.iter().enumerate().take(lines_shown) {
+        if let Some(row) = row {
+            let at = Rect::new(r.x + 1, r.y + 1 + i as u16, r.width.saturating_sub(2), 1);
+            hits.help_rows.push((at, *row));
+        }
+    }
     if let Some((row, w)) = copy_row.filter(|(row, _)| *row < lines_shown) {
         let at = Rect::new(r.x + 1, r.y + 1 + row as u16, w as u16, 1);
         hits.targets.push((at.intersection(r), KeyCode::Char('c')));
@@ -1108,6 +1446,7 @@ mod tests {
             notice: false,
             mine: false,
             topic: false,
+            command: None,
         }
     }
 
@@ -1127,6 +1466,8 @@ mod tests {
             connected: true,
             server: None,
             topic: None,
+            invite_names: vec![],
+            join_rooms: vec![],
         }
     }
 

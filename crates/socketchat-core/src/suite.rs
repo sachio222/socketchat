@@ -12,6 +12,12 @@ pub const SUITE: Ciphersuite = Ciphersuite::MLS_128_MLKEM768X25519_AES128GCM_SHA
 /// The standard RFC 9420 suite. An operator can require it.
 pub const FALLBACK_SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
+/// Whether a suite's key exchange is post-quantum: the hybrid ML-KEM-768 +
+/// X25519 of [`SUITE`]. Its signatures are Ed25519 either way.
+pub fn post_quantum(suite: Ciphersuite) -> bool {
+    suite == SUITE
+}
+
 /// GroupContext extension that lists the group's admin keys (private-use
 /// range of RFC 9420).
 pub const ADMINS_EXT: u16 = 0xff00;

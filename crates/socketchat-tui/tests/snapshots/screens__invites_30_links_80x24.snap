@@ -2,7 +2,7 @@
 source: crates/socketchat-tui/tests/screens.rs
 expression: first
 ---
-┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People 2 of 3 ✓ ─┐
 │#┌ Open invite links ───────────────────────────────────────────────────────┐ │
 │@│1. Room 1: expires in 24 hours                                            │ │
 │#│2. Room 2: expires in 24 hours                                            │ │
@@ -25,4 +25,4 @@ expression: first
 ┌─│19. Room 19: expires in 24 hours                                          │─┐
 │ │↓ more                                                                    │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-/cancel <number> stops a link · Esc close                       socketchat 0.5.2
+/cancel <number> stops a link · Esc close                       socketchat 0.6.0

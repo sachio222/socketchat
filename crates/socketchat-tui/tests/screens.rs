@@ -9,8 +9,8 @@ use socketchat_core::settings::{WhoCanInvite, WhoCanSetTopic};
 use socketchat_core::topic::TopicView;
 use socketchat_proto::msg::GroupId;
 use socketchat_tui::app::{
-    about_lines, details_lines, invite_row, leave_step, sent_file_status, Action, App, Focus,
-    LeaveStep, Modal,
+    about_lines, details_lines, invite_row, join_choices, leave_step, sent_file_status,
+    status_lines, update_status, Action, App, AppStatus, Focus, LeaveStep, Modal,
 };
 use socketchat_tui::commands::{parse_command, Command, HELP};
 use socketchat_tui::theme::{ColorSupport, Theme};
@@ -57,19 +57,21 @@ fn crew() -> ViewModel {
             GroupView { id: g(3), name: "Climbing Saturdays".into(), unread: 12, is_dm: false, muted: false, ended: None },
         ],
         lines: vec![
-            LineView { time: "09:14:05".into(), sender: "Ada".into(), text: "Who is bringing the book list?".into(), notice: false, mine: true, topic: false },
-            LineView { time: "09:15:12".into(), sender: "Bo".into(), text: "Me. Sending it now.".into(), notice: false, mine: false, topic: false },
-            LineView { time: "09:15:40".into(), sender: String::new(), text: "Bo sent books.pdf (84 KB)".into(), notice: true, mine: false, topic: false },
-            LineView { time: "09:16:58".into(), sender: "Cy".into(), text: "Got it, thanks. Saturday still works for me, and I can bring snacks for everyone.".into(), notice: false, mine: false, topic: false },
+            LineView { time: "09:14:05".into(), sender: "Ada".into(), text: "Who is bringing the book list?".into(), notice: false, mine: true, topic: false, command: None  },
+            LineView { time: "09:15:12".into(), sender: "Bo".into(), text: "Me. Sending it now.".into(), notice: false, mine: false, topic: false, command: None  },
+            LineView { time: "09:15:40".into(), sender: String::new(), text: "Bo sent books.pdf (84 KB)".into(), notice: true, mine: false, topic: false, command: None  },
+            LineView { time: "09:16:58".into(), sender: "Cy".into(), text: "Got it, thanks. Saturday still works for me, and I can bring snacks for everyone.".into(), notice: false, mine: false, topic: false, command: None  },
         ],
         members: vec![
-            MemberLine { key: k(1), name: "Ada".into(), verified: true, admin: true, me: true },
-            MemberLine { key: k(2), name: "Bo".into(), verified: true, admin: false, me: false },
-            MemberLine { key: k(3), name: "Cy".into(), verified: false, admin: false, me: false },
+            MemberLine { key: k(1), name: "Ada".into(), verified: true, admin: true, me: true, changed_key: false },
+            MemberLine { key: k(2), name: "Bo".into(), verified: true, admin: false, me: false, changed_key: false },
+            MemberLine { key: k(3), name: "Cy".into(), verified: false, admin: false, me: false, changed_key: false },
         ],
         connected: true,
         server: None,
         topic: None,
+        invite_names: vec![],
+        join_rooms: vec![],
     }
 }
 
@@ -80,7 +82,7 @@ fn parse_every_command() {
         ("/invite --dm", Command::Invite { dm: true }),
         (
             "/join socketchat://h:1/j/x#y",
-            Command::Join("socketchat://h:1/j/x#y".into()),
+            Command::Join(Some("socketchat://h:1/j/x#y".into())),
         ),
         ("/new Book club", Command::New("Book club".into())),
         ("/dm Bo", Command::Dm("Bo".into())),
@@ -124,6 +126,7 @@ fn parse_every_command() {
         ("/mute", Command::Mute),
         ("/unmute", Command::Unmute),
         ("/details", Command::Details),
+        ("/status", Command::Status),
         ("/clear", Command::Clear),
         ("/about", Command::About),
         ("/updates", Command::Updates(None)),
@@ -168,6 +171,8 @@ fn screen_empty_first_run() {
         connected: true,
         server: None,
         topic: None,
+        invite_names: vec![],
+        join_rooms: vec![],
     };
     insta::assert_snapshot!(render(&App::new(), &vm, 80, 24));
 }
@@ -444,6 +449,7 @@ fn typing_and_enter_sends_or_runs_a_command() {
         app.handle_key(key(KeyCode::Enter), &vm),
         vec![Action::Command(Command::Leave)]
     );
+    assert!(app.handle_key(ctrl('c'), &vm).is_empty());
     assert_eq!(app.handle_key(ctrl('c'), &vm), vec![Action::Quit]);
 }
 
@@ -688,6 +694,41 @@ fn tab_completes_switch_from_first_letters() {
     assert!(app.handle_key(key(KeyCode::Tab), &vm).is_empty());
     assert_eq!(app.input, "/switch Climbing Saturdays");
     assert_eq!(app.focus, Focus::Input, "Tab completed instead of moving");
+}
+
+#[test]
+fn tab_completes_help_from_its_first_letter() {
+    let mut app = App::new();
+    let vm = crew();
+    type_text(&mut app, &vm, "/h");
+    app.handle_key(key(KeyCode::Tab), &vm);
+    assert_eq!(app.input, "/help ");
+}
+
+#[test]
+fn tab_completes_every_command_the_box_runs() {
+    // The command words the parser matches, read from its source, so a new
+    // command that Tab can't complete fails here.
+    let src = include_str!("../src/commands.rs");
+    let words: Vec<&str> = src
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('"'))
+        .filter_map(|l| l.split_once("\" =>").map(|(w, _)| w))
+        .filter(|w| w.starts_with('/') && !w.contains(' '))
+        .collect();
+    assert!(words.len() > 20, "found the command words: {words:?}");
+    let vm = crew();
+    for w in words {
+        let mut app = App::new();
+        type_text(&mut app, &vm, w);
+        app.handle_key(key(KeyCode::Tab), &vm);
+        assert!(
+            app.input.starts_with(w) && app.status.is_none(),
+            "Tab after {w} gave {:?} and {:?}",
+            app.input,
+            app.status
+        );
+    }
 }
 
 #[test]
@@ -988,6 +1029,7 @@ fn details() -> RoomDetails {
             mine: false,
             set_unix: 1_792_411_200,
         }),
+        post_quantum: true,
     }
 }
 
@@ -1016,6 +1058,11 @@ fn details_lines_say_each_fact() {
             "Slow mode: one message every 30 seconds for each member who isn't an admin",
             "Who can set the topic: admins only",
             "Closing: 1 of 2 admins agree",
+            "",
+            "Encryption: end-to-end, MLS (RFC 9420)",
+            "Post-quantum: yes for messages and files (ML-KEM-768 + X25519). Signatures and the link to the server are not post-quantum yet.",
+            "The server cannot see: messages, files, names, room name, topic.",
+            "The server sees: when messages move, message sizes in 256-byte blocks, file sizes, IP addresses, a random key for each member, which of them are admins, and the room's settings.",
         ]
     );
     // No topic, and a room that lets anyone set it.
@@ -1271,7 +1318,7 @@ fn help_scrolls_to_every_command_at_80x24() {
     let vm = crew();
     let mut app = App::new();
     app.selected = Some(g(1));
-    app.modal = Some(Modal::Help { offset: 0 });
+    app.modal = Some(Modal::Help { offset: 0, pick: 0 });
     let last = HELP.last().unwrap().0;
     let mut shown: Vec<String> = vec![];
     let first = render(&app, &vm, 80, 24);
@@ -1284,7 +1331,7 @@ fn help_scrolls_to_every_command_at_80x24() {
             .lines()
             .nth(23)
             .unwrap()
-            .starts_with("Up/Down scroll · Esc close"),
+            .starts_with("Up/Down pick a command · Enter use it · Esc close"),
         "{first}"
     );
     let mut presses = 0;
@@ -1312,20 +1359,23 @@ fn help_scrolls_to_every_command_at_80x24() {
             "{cmd} never shows"
         );
     }
-    // Down at the end stays at the end, so one Up moves back at once.
+    // The last command shows the end of the box. Down goes round to the
+    // first command at the top, and Up back round to the last at the end.
     let at_end = render(&app, &vm, 80, 24);
     insta::assert_snapshot!("help_80x24_top", first);
     insta::assert_snapshot!("help_80x24_end", at_end);
     app.handle_key(key(KeyCode::Down), &vm);
-    assert_eq!(render(&app, &vm, 80, 24), at_end);
-    app.handle_key(key(KeyCode::Up), &vm);
-    assert_ne!(render(&app, &vm, 80, 24), at_end);
-    app.handle_key(key(KeyCode::PageUp), &vm);
-    app.handle_key(key(KeyCode::PageUp), &vm);
-    app.handle_key(key(KeyCode::PageUp), &vm);
     assert_eq!(render(&app, &vm, 80, 24), first);
+    app.handle_key(key(KeyCode::Up), &vm);
+    assert_eq!(render(&app, &vm, 80, 24), at_end);
+    // PgUp and PgDn scroll a page and bring the highlight along.
+    let top_row = |s: &str| modal_text(s)[0].clone();
+    for _ in 0..4 {
+        app.handle_key(key(KeyCode::PageUp), &vm);
+    }
+    assert_eq!(top_row(&render(&app, &vm, 80, 24)), top_row(&first));
     app.handle_key(key(KeyCode::PageDown), &vm);
-    assert_ne!(render(&app, &vm, 80, 24), first);
+    assert_ne!(top_row(&render(&app, &vm, 80, 24)), top_row(&first));
     app.handle_key(key(KeyCode::Esc), &vm);
     assert!(app.modal.is_none());
 }
@@ -1509,8 +1559,8 @@ fn screen_about_modal() {
     for line in about_lines(&app.updates).iter().filter(|l| l.len() < 70) {
         assert!(s.contains(line), "{line} is missing:\n{s}");
     }
-    assert!(s.contains("Socketchat is encrypted chat"), "{s}");
-    assert!(s.contains("but cannot read them."), "{s}");
+    assert!(s.contains("Socketchat is end-to-end encrypted chat"), "{s}");
+    assert!(s.contains("how many people are in each room."), "{s}");
     assert!(about_lines("")[0].ends_with(env!("CARGO_PKG_VERSION")));
     assert!(about_lines("").contains(&"License: MIT or Apache 2.0".to_string()));
     insta::assert_snapshot!(s);
@@ -1928,7 +1978,7 @@ fn tab_completes_a_unique_command_with_a_space() {
 }
 
 #[test]
-fn tab_fills_the_common_prefix_then_cycles_in_help_order() {
+fn tab_fills_the_common_prefix_then_cycles_in_alphabetical_order() {
     let (mut app, vm) = (App::new(), crew());
     type_text(&mut app, &vm, "/in");
     tab(&mut app, &vm);
@@ -1953,7 +2003,7 @@ fn shift_tab_cycles_backward() {
         back_tab(&mut app, &vm);
         seen.push(app.input.clone());
     }
-    assert_eq!(seen, ["/clear", "/cancel", "/close"]);
+    assert_eq!(seen, ["/close", "/clear", "/cancel"]);
     assert_eq!(app.focus, Focus::Input);
 }
 
@@ -1963,13 +2013,13 @@ fn tab_with_no_common_prefix_lists_matches_in_the_dim_help_line() {
     type_text(&mut app, &vm, "/c");
     tab(&mut app, &vm);
     assert_eq!(app.input, "/c");
-    assert!(help_row(&app, &vm).contains("/close  /cancel  /clear"));
+    assert!(help_row(&app, &vm).contains("/cancel  /clear  /close"));
     let mut seen = vec![];
     for _ in 0..4 {
         tab(&mut app, &vm);
         seen.push(app.input.clone());
     }
-    assert_eq!(seen, ["/close", "/cancel", "/clear", "/close"]);
+    assert_eq!(seen, ["/cancel", "/clear", "/close", "/cancel"]);
 }
 
 #[test]
@@ -1979,10 +2029,10 @@ fn any_other_key_ends_cycling() {
     for _ in 0..3 {
         tab(&mut app, &vm);
     }
-    assert_eq!(app.input, "/cancel");
+    assert_eq!(app.input, "/clear");
     app.handle_key(key(KeyCode::Backspace), &vm);
     tab(&mut app, &vm);
-    assert_eq!(app.input, "/cancel ", "a fresh Tab, not the next match");
+    assert_eq!(app.input, "/clear ", "a fresh Tab, not the next match");
 }
 
 #[test]
@@ -2004,13 +2054,9 @@ fn tab_after_a_lone_slash_lists_commands_and_then_cycles() {
     tab(&mut app, &vm);
     assert_eq!(app.input, "/");
     let row = help_row(&app, &vm);
-    assert!(
-        row.contains("/invite  /invite") || row.contains("/invite  /join"),
-        "{row}"
-    );
-    assert!(row.contains("/join  /new"), "{row}");
+    assert!(row.contains("/about  /admin  /cancel"), "{row}");
     tab(&mut app, &vm);
-    assert_eq!(app.input, "/invite");
+    assert_eq!(app.input, "/about");
 }
 
 #[test]
@@ -2350,7 +2396,7 @@ fn help_line_while_an_earlier_line_shows() {
 fn help_box_mentions_up_and_down() {
     let mut app = App::new();
     app.selected = Some(g(1));
-    app.modal = Some(Modal::Help { offset: 0 });
+    app.modal = Some(Modal::Help { offset: 0, pick: 0 });
     let s = render(&app, &crew(), 80, 60);
     assert!(
         modal_text(&s)
@@ -2439,6 +2485,7 @@ fn topic_crew(topic: &str) -> ViewModel {
         notice: true,
         mine: true,
         topic: true,
+        command: None,
     });
     vm
 }
@@ -2520,4 +2567,1814 @@ fn the_topic_on_the_status_line_keeps_its_style() {
     assert_eq!(style_at(&app), theme.topic.fg.unwrap());
     app.status = Some("Topic: hi (set by Bo, unverified, 2026-10-25)!".into());
     assert_eq!(style_at(&app), theme.warn.fg.unwrap());
+}
+
+// ---------- Up and Down after a slash, and commands from the help box ----------
+
+/// The screen as `render` draws it, with "◀" after each row that has
+/// cells in the selection style, so a snapshot shows the highlight.
+fn render_marked(app: &App, vm: &ViewModel, w: u16, h: u16) -> String {
+    let buf = buffer(app, vm, w, h);
+    let bg = app.theme.selected.bg;
+    render(app, vm, w, h)
+        .lines()
+        .enumerate()
+        .map(|(y, line)| {
+            let lit = (0..w).any(|x| Some(buf[(x, y as u16)].bg) == bg);
+            if lit {
+                format!("{line} ◀\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect()
+}
+
+/// The command at the start of the row drawn in the selection style.
+fn picked_at(app: &App, vm: &ViewModel, w: u16, h: u16) -> Option<String> {
+    let buf = buffer(app, vm, w, h);
+    let bg = app.theme.selected.bg;
+    (0..h).find_map(|y| {
+        let lit: String = (0..w)
+            .filter(|x| Some(buf[(*x, y)].bg) == bg)
+            .map(|x| buf[(x, y)].symbol())
+            .collect();
+        let word = lit.split_whitespace().next()?.to_string();
+        word.starts_with('/').then_some(word)
+    })
+}
+
+fn picked(app: &App, vm: &ViewModel) -> String {
+    picked_at(app, vm, 80, 24).unwrap_or_default()
+}
+
+/// Every command word, once, in alphabetical order.
+fn words_abc() -> Vec<&'static str> {
+    let mut w: Vec<&str> = HELP
+        .iter()
+        .map(|(c, _)| c.split(' ').next().unwrap())
+        .collect();
+    w.sort();
+    w.dedup();
+    w
+}
+
+fn help_box() -> Modal {
+    Modal::Help { offset: 0, pick: 0 }
+}
+
+#[test]
+fn typing_a_slash_shows_no_list_of_commands() {
+    let (mut app, vm) = (App::new(), crew());
+    for text in ["/", "s"] {
+        type_text(&mut app, &vm, text);
+        let s = render(&app, &vm, 80, 24);
+        assert!(!s.contains(" Commands "), "{s}");
+        assert!(!s.contains("send a file, photo or video"), "{s}");
+    }
+}
+
+#[test]
+fn up_and_down_after_a_slash_and_letters_step_through_matching_commands() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/s");
+    let mut seen = vec![];
+    for _ in 0..7 {
+        down(&mut app, &vm);
+        seen.push(app.input.clone());
+    }
+    assert_eq!(
+        seen,
+        [
+            "/save",
+            "/send",
+            "/servers",
+            "/settings",
+            "/status",
+            "/switch",
+            "/save"
+        ]
+    );
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/switch", "Up goes back round");
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/s");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/switch", "Up first takes the last match");
+    assert_eq!(app.focus, Focus::Input);
+}
+
+#[test]
+fn typing_ends_the_step_through_and_starts_from_the_new_letters() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/s");
+    down(&mut app, &vm);
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/send");
+    app.handle_key(key(KeyCode::Backspace), &vm);
+    assert_eq!(app.input, "/sen");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/send");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/send", "one match stays put");
+    type_text(&mut app, &vm, "x");
+    assert_eq!(app.input, "/sendx");
+}
+
+#[test]
+fn a_lone_slash_and_up_bring_back_the_last_line() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "hello");
+    type_text(&mut app, &vm, "/");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "hello");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/", "the draft comes back");
+}
+
+#[test]
+fn up_and_down_stay_on_earlier_lines_through_a_recalled_command() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "hello");
+    enter_line(&mut app, &vm, "/about");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/about");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "hello");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/about");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "");
+}
+
+#[test]
+fn tab_and_up_and_down_go_through_one_list() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/c");
+    tab(&mut app, &vm);
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/cancel");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/clear");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/close");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/clear");
+}
+
+#[test]
+fn enter_on_a_lone_slash_opens_the_help_box() {
+    let (mut app, vm) = (App::new(), crew());
+    type_text(&mut app, &vm, "/");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Help)]
+    );
+    assert_eq!(app.input, "");
+    assert!(app.status.is_none(), "{:?}", app.status);
+}
+
+#[test]
+fn enter_runs_the_only_command_that_starts_with_the_letters() {
+    let vm = crew();
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/q");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Quit)]
+    );
+    // One that needs more goes in the box to type the rest.
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/jo");
+    assert!(app.handle_key(key(KeyCode::Enter), &vm).is_empty());
+    assert_eq!(app.input, "/join ");
+    assert!(app.status.is_none(), "{:?}", app.status);
+    // Letters several commands start with run nothing.
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/c");
+    assert!(app.handle_key(key(KeyCode::Enter), &vm).is_empty());
+    assert_eq!(app.input, "/c");
+    assert!(app.status.is_some());
+    // A whole word runs, even when a longer one starts with it.
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/invite");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Invite { dm: false })]
+    );
+}
+
+#[test]
+fn the_help_box_lists_commands_alphabetically_with_the_first_picked() {
+    let (mut app, vm) = (App::new(), crew());
+    app.modal = Some(help_box());
+    let s = render(&app, &vm, 80, 60);
+    let cmds: Vec<String> = modal_text(&s)
+        .iter()
+        .take_while(|r| !r.starts_with("/ then"))
+        .filter_map(|r| r.split_whitespace().next().map(String::from))
+        .filter(|w| w.starts_with('/'))
+        .collect();
+    let mut sorted = cmds.clone();
+    sorted.sort();
+    assert_eq!(cmds, sorted, "{s}");
+    assert!(cmds.len() > 30, "{s}");
+    assert_eq!(picked_at(&app, &vm, 80, 60).as_deref(), Some("/about"));
+    // Rows that are not commands come after them.
+    let rows = modal_text(&s);
+    let last_cmd = rows.iter().rposition(|r| r.starts_with("/verify")).unwrap();
+    let keys = rows.iter().position(|r| r.starts_with("Up/Down")).unwrap();
+    assert!(keys > last_cmd, "{s}");
+}
+
+#[test]
+fn up_and_down_move_the_help_highlight_and_keep_it_on_screen() {
+    let vm = crew();
+    let words = words_abc();
+    for (w, h) in [(80, 24), (50, 16), (40, 12)] {
+        let mut app = App::new();
+        app.modal = Some(help_box());
+        let mut seen = vec![picked_at(&app, &vm, w, h).unwrap_or_default()];
+        // Each row of /invite and /settings is picked in turn.
+        for _ in 0..HELP.len() {
+            app.handle_key(key(KeyCode::Down), &vm);
+            let p = picked_at(&app, &vm, w, h);
+            assert!(
+                p.is_some(),
+                "{w}x{h}: highlight off screen\n{}",
+                render(&app, &vm, w, h)
+            );
+            seen.push(p.unwrap());
+        }
+        let mut words_seen = seen.clone();
+        words_seen.dedup();
+        assert_eq!(words_seen.first().map(String::as_str), Some("/about"));
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("/about"),
+            "{w}x{h}: wraps round"
+        );
+        let mut uniq = words_seen.clone();
+        uniq.pop();
+        assert_eq!(uniq, words, "{w}x{h}");
+        app.handle_key(key(KeyCode::Up), &vm);
+        assert_eq!(picked_at(&app, &vm, w, h).as_deref(), Some("/verify"));
+    }
+    let mut app = App::new();
+    app.modal = Some(help_box());
+    for _ in 0..14 {
+        app.handle_key(key(KeyCode::Down), &vm);
+    }
+    insta::assert_snapshot!("help_pick_80x24", render_marked(&app, &vm, 80, 24));
+    insta::assert_snapshot!("help_pick_50x16", render_marked(&app, &vm, 50, 16));
+}
+
+#[test]
+fn enter_in_the_help_box_runs_or_fills_in_the_command() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.modal = Some(help_box());
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::About)]
+    );
+    assert!(app.modal.is_none());
+    // One that needs more goes in the message box to type the rest.
+    app.modal = Some(help_box());
+    app.handle_key(key(KeyCode::Down), &vm);
+    assert_eq!(picked(&app, &vm), "/admin");
+    assert!(app.handle_key(key(KeyCode::Enter), &vm).is_empty());
+    assert!(app.modal.is_none());
+    assert_eq!(app.input, "/admin ");
+    assert_eq!(app.focus, Focus::Input);
+    // A row with a word after the command keeps the word.
+    let pick = |want: &str, app: &mut App| {
+        app.input.clear();
+        app.modal = Some(help_box());
+        for _ in 0..HELP.len() {
+            if highlighted_row(app, &vm).starts_with(want) {
+                return;
+            }
+            app.handle_key(key(KeyCode::Down), &vm);
+        }
+        panic!("{want} is never picked");
+    };
+    pick("/invite --dm", &mut app);
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Invite { dm: true })]
+    );
+    pick("/settings slow", &mut app);
+    assert!(app.handle_key(key(KeyCode::Enter), &vm).is_empty());
+    assert_eq!(app.input, "/settings slow ");
+    // /switch opens the room switcher, as typing it does.
+    pick("/switch", &mut app);
+    assert!(app.handle_key(key(KeyCode::Enter), &vm).is_empty());
+    assert_eq!(app.switcher.as_deref(), Some(""));
+}
+
+/// The whole highlighted row's text at 80 by 24, trimmed.
+fn highlighted_row(app: &App, vm: &ViewModel) -> String {
+    let buf = buffer(app, vm, 80, 24);
+    let bg = app.theme.selected.bg;
+    (0..24)
+        .map(|y| {
+            (0..80)
+                .filter(|x| Some(buf[(*x, y)].bg) == bg)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .find(|l| l.trim_start().starts_with('/'))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn page_down_in_the_help_box_brings_the_highlight_along() {
+    let vm = crew();
+    let mut app = App::new();
+    app.modal = Some(help_box());
+    // The screen is drawn before each key, as the chat screen does.
+    render(&app, &vm, 80, 24);
+    app.handle_key(key(KeyCode::PageDown), &vm);
+    let p = picked(&app, &vm);
+    assert!(p.as_str() > "/about", "{p}");
+    app.handle_key(key(KeyCode::PageUp), &vm);
+    let q = picked(&app, &vm);
+    assert!(!q.is_empty() && q <= p, "{q} after {p}");
+    assert_eq!(app.handle_key(key(KeyCode::Esc), &vm), vec![]);
+    assert!(app.modal.is_none());
+}
+
+#[test]
+fn the_help_box_says_how_to_reach_commands() {
+    let mut app = App::new();
+    app.modal = Some(help_box());
+    let s = render(&app, &crew(), 80, 60);
+    let rows = modal_text(&s);
+    assert!(
+        rows.iter()
+            .any(|r| r.starts_with("/ then Enter") && r.contains("this list")),
+        "{s}"
+    );
+    assert!(rows.iter().any(|r| r.starts_with("/s then Up/Down")), "{s}");
+}
+
+// ---------- Showing that encryption is on ----------
+
+use socketchat_core::client::JoinCheck;
+use socketchat_tui::app::encryption_text;
+use socketchat_tui::ui::people_title;
+
+/// A room's one-time line, as the app shows it: a notice, never a person's
+/// message.
+fn encryption_notice(state: &JoinCheck, is_dm: bool, others_verified: bool) -> LineView {
+    LineView {
+        time: "09:10:00".into(),
+        sender: String::new(),
+        text: encryption_text(state, is_dm, others_verified),
+        notice: true,
+        mine: false,
+        topic: false,
+        command: None,
+    }
+}
+
+#[test]
+fn the_encryption_line_says_what_the_room_is() {
+    assert_eq!(
+        encryption_text(&JoinCheck::Checked, false, true),
+        "End-to-end encrypted. Only the people in the People list can read this room. The server passes messages along but cannot read them. /details says what it can see."
+    );
+    assert_eq!(
+        encryption_text(&JoinCheck::Checked, true, true),
+        "End-to-end encrypted. Only the two of you can read this chat. The server passes messages along but cannot read them. /details says what it can see."
+    );
+    let waiting = JoinCheck::Waiting {
+        inviter: "Ada".into(),
+    };
+    assert_eq!(
+        encryption_text(&waiting, false, false),
+        "End-to-end encrypted. Waiting for Ada to confirm your invite, so nobody here is verified yet. The server passes messages along but cannot read them. /details says what it can see."
+    );
+    // Someone verified in another room shows verified here too, so the
+    // line names only the inviter.
+    assert_eq!(
+        encryption_text(&waiting, false, true),
+        "End-to-end encrypted. Waiting for Ada to confirm your invite, so Ada is not verified yet. The server passes messages along but cannot read them. /details says what it can see."
+    );
+    for dm in [false, true] {
+        assert_eq!(
+            encryption_text(&JoinCheck::Unchecked, dm, false),
+            "End-to-end encrypted. The server passes messages along but cannot read them. /details says what it can see."
+        );
+    }
+}
+
+/// Ada alone in the room she just made.
+fn just_made() -> ViewModel {
+    let mut vm = crew();
+    vm.lines = vec![encryption_notice(&JoinCheck::Checked, false, false)];
+    vm.members.truncate(1);
+    vm
+}
+
+#[test]
+fn screen_a_new_room_opens_with_the_encryption_line() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let s = render(&app, &just_made(), 80, 24);
+    assert!(s.contains("09:10:00 · End-to-end encrypted."), "{s}");
+    assert!(s.contains(" People 1 of 1 ✓ "), "{s}");
+    insta::assert_snapshot!("encryption_line_new_room_80x24", s);
+    let narrow = render(&app, &just_made(), 60, 24);
+    assert!(narrow.contains(" People 1 of 1 ✓ "), "{narrow}");
+    insta::assert_snapshot!("encryption_line_new_room_60x24", narrow);
+}
+
+/// Bo has just joined Ada's room: the line sits above the first message.
+fn just_joined(state: JoinCheck) -> ViewModel {
+    let mut vm = crew();
+    let others = vm.members.iter().any(|m| !m.me && m.verified);
+    vm.lines.insert(0, encryption_notice(&state, false, others));
+    vm
+}
+
+#[test]
+fn screen_a_joined_room_shows_the_line_above_its_messages() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let vm = just_joined(JoinCheck::Checked);
+    let s = render(&app, &vm, 80, 24);
+    let first = s.lines().nth(1).unwrap();
+    assert!(first.contains("09:10:00 · End-to-end"), "{s}");
+    assert!(s.contains(" People 2 of 3 ✓ "), "{s}");
+    insta::assert_snapshot!("encryption_line_joined_80x24", s);
+    insta::assert_snapshot!("encryption_line_joined_60x24", render(&app, &vm, 60, 24));
+}
+
+#[test]
+fn screen_a_waiting_join_says_who_it_waits_for() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let mut vm = crew();
+    for m in vm.members.iter_mut().filter(|m| !m.me) {
+        m.verified = false;
+    }
+    vm.lines.insert(
+        0,
+        encryption_notice(
+            &JoinCheck::Waiting {
+                inviter: "Bo".into(),
+            },
+            false,
+            false,
+        ),
+    );
+    let s = render(&app, &vm, 80, 24);
+    assert!(s.contains("Waiting for Bo to confirm"), "{s}");
+    assert!(s.contains(" People 1 of 3 ✓ "), "{s}");
+    insta::assert_snapshot!("encryption_line_waiting_80x24", s);
+}
+
+#[test]
+fn screen_a_failed_check_keeps_the_red_warning_and_a_shorter_line() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.warning = Some("You joined, but the invite could not be checked: the invite was signed by someone other than the person in the link. Compare safety numbers with /verify before you trust anyone here.".into());
+    let vm = just_joined(JoinCheck::Unchecked);
+    let s = render(&app, &vm, 80, 24);
+    assert!(!s.contains("Only the people"), "{s}");
+    insta::assert_snapshot!("encryption_line_unchecked_80x24", s);
+}
+
+#[test]
+fn screen_a_direct_chat_line_speaks_to_two_people() {
+    let mut app = App::new();
+    app.selected = Some(g(2));
+    let mut vm = crew();
+    vm.members.truncate(2);
+    vm.lines = vec![encryption_notice(&JoinCheck::Checked, true, true)];
+    let s = render(&app, &vm, 80, 24);
+    assert!(s.contains("the two of you can read this"), "{s}");
+    insta::assert_snapshot!("encryption_line_dm_80x24", s);
+}
+
+fn people(states: &[(bool, bool, bool)]) -> Vec<MemberLine> {
+    states
+        .iter()
+        .enumerate()
+        .map(|(i, (me, verified, changed_key))| MemberLine {
+            key: k(i as u8 + 1),
+            name: format!("P{i}"),
+            verified: *verified,
+            admin: false,
+            me: *me,
+            changed_key: *changed_key,
+        })
+        .collect()
+}
+
+/// The title counts the verified marks the list shows, the person's own
+/// included, and shortens to fit.
+#[test]
+fn the_people_title_tracks_verification() {
+    let three = people(&[
+        (true, true, false),
+        (false, true, false),
+        (false, false, false),
+    ]);
+    assert_eq!(people_title(&three, 18), " People 2 of 3 ✓ ");
+    assert_eq!(people_title(&three, 14), " People 2/3 ✓ ");
+    assert_eq!(people_title(&three, 8), " 2/3 ✓ ");
+    assert_eq!(people_title(&three, 6), "");
+    assert_eq!(people_title(&[], 18), " People ");
+    let mut many = vec![(true, true, false)];
+    many.extend(std::iter::repeat_n((false, true, false), 11));
+    many.extend(std::iter::repeat_n((false, false, false), 3));
+    let many = people(&many);
+    assert_eq!(people_title(&many, 18), " People 12/15 ✓ ");
+    let check = people(&[
+        (true, true, false),
+        (false, true, false),
+        (false, false, true),
+    ]);
+    assert_eq!(people_title(&check, 18), " People ! check ");
+    assert_eq!(people_title(&check, 10), " ! check ");
+    assert_eq!(people_title(&check, 4), " ! ");
+}
+
+/// Someone joins under the name of a member verified earlier, with another
+/// key: the title asks for a check, their row is marked, and the room
+/// says why.
+#[test]
+fn screen_someone_new_under_a_verified_name() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let mut vm = crew();
+    vm.members.push(MemberLine {
+        key: k(4),
+        name: "Bo".into(),
+        verified: false,
+        admin: false,
+        me: false,
+        changed_key: true,
+    });
+    vm.lines.push(LineView {
+        time: "09:17:30".into(),
+        sender: String::new(),
+        text: socketchat_core::client::changed_key_notice("Bo", "Bo"),
+        notice: true,
+        mine: false,
+        topic: false,
+        command: None,
+    });
+    let s = render(&app, &vm, 80, 24);
+    assert!(s.contains(" People ! check "), "{s}");
+    assert!(s.contains("│! Bo"), "{s}");
+    assert!(s.contains("09:17:30 · Bo joined with a different"), "{s}");
+    insta::assert_snapshot!("people_check_80x24", s);
+    insta::assert_snapshot!("people_check_50x24", render(&app, &vm, 50, 24));
+}
+
+#[test]
+fn details_say_how_the_room_is_encrypted() {
+    let mut d = details();
+    let lines = details_lines(&d, "Book club", true, &utc_date);
+    assert!(
+        lines.contains(&"Encryption: end-to-end, MLS (RFC 9420)".into()),
+        "{lines:?}"
+    );
+    d.post_quantum = false;
+    let lines = details_lines(&d, "Book club", true, &utc_date);
+    assert!(
+        lines.contains(&"Post-quantum: no. This room uses the standard suite (0x0001).".into()),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Post-quantum: yes")),
+        "{lines:?}"
+    );
+}
+
+/// The screen at `w` by `h`, with a row of `^` under each row that holds
+/// selected cells in the messages pane, one under each such cell.
+fn render_selection(app: &App, vm: &ViewModel, w: u16, h: u16) -> String {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| draw(f, app, vm)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let lit = app.theme.selected.bg.unwrap();
+    let mut out = String::new();
+    for y in 0..h {
+        let row: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
+        out.push_str(row.trim_end());
+        out.push('\n');
+        let marks: String = (0..w)
+            .map(|x| {
+                // The messages pane, clear of the chat list's open room.
+                let pane = (21..59).contains(&x);
+                if pane && buf[(x, y)].bg == lit {
+                    '^'
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        if marks.contains('^') {
+            out.push_str(marks.trim_end());
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// A drag from "Saturday" in Cy's wrapped message to "snacks" two rows
+/// down: the cells between are drawn selected, the indent is not, and
+/// letting go copies the words as one line.
+#[test]
+fn a_selection_across_a_wrapped_message_at_80x24() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let screen = render(&app, &vm, 80, 24);
+    let at = |needle: &str| {
+        let (y, row) = screen
+            .lines()
+            .enumerate()
+            .find(|(_, r)| r.contains(needle))
+            .unwrap();
+        let x = row[..row.find(needle).unwrap()].chars().count() as u16;
+        (x, y as u16)
+    };
+    let mouse = |kind, (column, row): (u16, u16)| MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    let (from, to) = (at("Saturday"), at("snacks"));
+    let to = (to.0 + 5, to.1);
+    let now = std::time::Instant::now();
+    app.drawn(now);
+    app.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), from),
+        now,
+        &vm,
+    );
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), to), now, &vm);
+    insta::assert_snapshot!("selection_80x24", render_selection(&app, &vm, 80, 24));
+    assert_eq!(
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), to), now, &vm),
+        vec![Action::CopySelected(
+            "Saturday still works for me, and I can bring snacks".into()
+        )]
+    );
+}
+
+#[test]
+fn screen_details_scroll_to_the_encryption_section() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let lines = details_lines(&details(), "Book club", true, &utc_date);
+    app.modal = Some(Modal::Details { lines, offset: 0 });
+    let vm = crew();
+    // Too short for every line, so the box scrolls.
+    let top = render(&app, &vm, 80, 20);
+    assert!(!top.contains("The server sees:"), "{top}");
+    for _ in 0..20 {
+        app.handle_key(key(KeyCode::Down), &vm);
+    }
+    let s = render(&app, &vm, 80, 20);
+    assert!(s.contains("The server sees:"), "{s}");
+    insta::assert_snapshot!("details_encryption_80x20", s);
+}
+
+#[test]
+fn about_says_what_the_server_still_sees() {
+    assert_eq!(
+        about_lines("")[2],
+        "Socketchat is end-to-end encrypted chat with a server you run yourself. The server passes messages along but cannot read them. It still sees timing, message sizes, IP addresses and how many people are in each room."
+    );
+}
+
+/// No word in the app's own lines about encryption overpromises.
+#[test]
+fn encryption_words_avoid_promises_the_app_cannot_keep() {
+    let mut texts = vec![about_lines("")[2].clone()];
+    for state in [
+        JoinCheck::Checked,
+        JoinCheck::Unchecked,
+        JoinCheck::Waiting {
+            inviter: "Ada".into(),
+        },
+    ] {
+        for dm in [false, true] {
+            texts.push(encryption_text(&state, dm, false));
+        }
+    }
+    let mut d = details();
+    texts.extend(details_lines(&d, "Book club", true, &utc_date));
+    d.post_quantum = false;
+    texts.extend(details_lines(&d, "Book club", true, &utc_date));
+    texts.push(socketchat_core::client::changed_key_notice("Bo", "Bo"));
+    for t in texts {
+        let lower = t.to_lowercase();
+        for word in [
+            "secure",
+            "private",
+            "anonymous",
+            "military",
+            "quantum-safe",
+            "quantum-proof",
+        ] {
+            assert!(!lower.contains(word), "{word} in {t}");
+        }
+    }
+}
+
+#[test]
+fn the_messages_help_line_says_dragging_copies_while_the_mouse_is_on() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.focus = Focus::Messages;
+    assert!(
+        help_row(&app, &vm).starts_with("Drag to copy · PgUp/PgDn or Up/Down scroll · Tab move"),
+        "{}",
+        help_row(&app, &vm)
+    );
+    app.mouse = false;
+    assert!(
+        !help_row(&app, &vm).contains("Drag"),
+        "{}",
+        help_row(&app, &vm)
+    );
+}
+
+/// A profile connected to its server with a group chat open.
+fn status_view() -> socketchat_core::client::StatusView {
+    use socketchat_core::client::{Link, RoomStatus, ServerStatus, StatusView};
+    StatusView {
+        name: "Ada".into(),
+        safety_digits: "12345 67890 23456 78901 34567 89012".into(),
+        server: Some(ServerStatus {
+            host: "chat.socketchat.org".into(),
+            port: 7444,
+            cert_fpr: std::array::from_fn(|i| (i * 37 % 256) as u8),
+            // 2026-10-19 at 12:00 UTC.
+            link: Link::Connected {
+                since_unix: 1_792_411_200,
+                protocol: 3,
+            },
+            rooms: 3,
+            members_invite: Some(true),
+        }),
+        other_servers: 1,
+        room: Some(RoomStatus {
+            is_dm: false,
+            members: 3,
+            verified: 2,
+            admins: 1,
+            admin: true,
+            invite: WhoCanInvite::Admins,
+            slow_secs: 30,
+            topic_who: WhoCanSetTopic::Admins,
+            topic: true,
+            suite: "MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519 (0x004F)".into(),
+            post_quantum: true,
+        }),
+    }
+}
+
+fn app_status() -> AppStatus {
+    AppStatus {
+        theme: "phosphor".into(),
+        mouse: true,
+        updates: "Update check: on, once a day. Last checked 2026-10-19 at 12:00. The newest release then was 0.5.2.".into(),
+    }
+}
+
+fn utc_date_time(unix: u64) -> String {
+    chrono::DateTime::from_timestamp(unix as i64, 0)
+        .unwrap()
+        .format("%Y-%m-%d at %H:%M")
+        .to_string()
+}
+
+fn status_text(s: &socketchat_core::client::StatusView, room: Option<&str>) -> Vec<String> {
+    status_lines(s, room, &app_status(), &utc_date_time)
+}
+
+#[test]
+fn status_lines_say_each_fact() {
+    assert_eq!(
+        status_text(&status_view(), Some("Book club")),
+        vec![
+            "Connection",
+            "Server: chat.socketchat.org",
+            "Port: 7444",
+            "State: connected since 2026-10-19 at 12:00",
+            "Protocol: 3",
+            "Certificate fingerprint: 0025 4a6f 94b9 de03 284d 7297 bce1 062b 5075 9abf e409 2e53 789d c2e7 0c31 567b",
+            "Inviting into rooms: each room's setting decides",
+            "Other servers: 1",
+            "",
+            "You",
+            "Name: Ada",
+            "Your half of each safety number: 12345 67890 23456 78901 34567 89012",
+            "Rooms on this server: 3",
+            "",
+            "This room",
+            "Name: Book club",
+            "Kind: group chat",
+            "Members: 3, 2 verified",
+            "Admins: 1",
+            "Your role: admin",
+            "Who can invite: admins only",
+            "Slow mode: one message every 30 seconds for each member who isn't an admin",
+            "Who can set the topic: admins only",
+            "Has a topic: yes",
+            "Encryption: end-to-end, MLS (RFC 9420)",
+            "Suite: MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519 (0x004F)",
+            "Post-quantum: yes for messages and files (ML-KEM-768 + X25519). Signatures and the link to the server are not post-quantum yet.",
+            "",
+            "App",
+            &format!("Version: {}", env!("CARGO_PKG_VERSION")),
+            "Update check: on, once a day. Last checked 2026-10-19 at 12:00. The newest release then was 0.5.2.",
+            "Theme: phosphor",
+            "Mouse: on",
+            "",
+            "/details lists what the server can and cannot see in each room.",
+        ]
+    );
+}
+
+#[test]
+fn status_says_how_the_connection_stands() {
+    use socketchat_core::client::Link;
+    let state = |link: Link| {
+        let mut s = status_view();
+        let server = s.server.as_mut().unwrap();
+        server.link = link;
+        server.members_invite = None;
+        status_text(&s, Some("Book club"))
+    };
+    let lines = state(Link::Unreachable("connection refused".into()));
+    assert!(
+        lines.contains(&"State: could not reach: connection refused".into()),
+        "{lines:?}"
+    );
+    // Only a live connection has a protocol, and only it asks the rule.
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Protocol")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Inviting")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("Certificate fingerprint: 0025 ")),
+        "the pinned certificate still shows: {lines:?}"
+    );
+    let lines = state(Link::Lost);
+    assert!(
+        lines.contains(&"State: connection lost; reconnecting".into()),
+        "{lines:?}"
+    );
+    let lines = state(Link::NotYet);
+    assert!(
+        lines.contains(&"State: not connected yet".into()),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn status_names_the_server_rules_that_apply() {
+    use socketchat_core::client::Link;
+    let mut s = status_view();
+    s.server.as_mut().unwrap().members_invite = Some(false);
+    s.room.as_mut().unwrap().invite = WhoCanInvite::Anyone;
+    let lines = status_text(&s, Some("Book club"));
+    assert!(
+        lines.contains(&"Inviting into rooms: admins only, in every room on this server".into()),
+        "{lines:?}"
+    );
+    // The room's own line says whose rule it is, as /details does.
+    assert!(
+        lines.contains(
+            &"Who can invite: admins only, because this server lets only admins invite people"
+                .into()
+        ),
+        "{lines:?}"
+    );
+    // A server on protocol 2 cannot enforce the room's settings.
+    let mut old = status_view();
+    old.server.as_mut().unwrap().link = Link::Connected {
+        since_unix: 1_792_411_200,
+        protocol: 2,
+    };
+    old.server.as_mut().unwrap().members_invite = None;
+    let lines = status_text(&old, Some("Book club"));
+    assert!(lines.contains(&"Protocol: 2".into()), "{lines:?}");
+    assert!(
+        lines.contains(&"This server runs an older version of Socketchat, so it can't enforce who can invite or slow mode.".into()),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn status_without_a_room_or_a_server_leaves_those_out() {
+    let mut s = status_view();
+    s.room = None;
+    s.other_servers = 0;
+    let lines = status_text(&s, None);
+    assert!(!lines.contains(&"This room".into()), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Other servers")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"Rooms on this server: 3".into()),
+        "{lines:?}"
+    );
+    s.server = None;
+    let lines = status_text(&s, None);
+    assert_eq!(lines[..3], ["Connection", "Server: none yet", ""]);
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Rooms on")),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"Name: Ada".into()), "{lines:?}");
+}
+
+#[test]
+fn status_marks_a_direct_chat_and_a_member() {
+    let mut s = status_view();
+    let room = s.room.as_mut().unwrap();
+    room.is_dm = true;
+    room.members = 2;
+    room.verified = 2;
+    room.admins = 2;
+    room.admin = false;
+    room.topic = false;
+    room.post_quantum = false;
+    room.suite = "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519 (0x0001)".into();
+    let lines = status_text(&s, Some("Bo"));
+    for want in [
+        "Name: Bo",
+        "Kind: direct chat",
+        "Members: 2, 2 verified",
+        "Admins: 2",
+        "Your role: member",
+        "Has a topic: no",
+        "Suite: MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519 (0x0001)",
+        "Post-quantum: no. This room uses the standard suite (0x0001).",
+    ] {
+        assert!(lines.contains(&want.into()), "{want}: {lines:?}");
+    }
+}
+
+#[test]
+fn status_says_what_the_update_check_last_found() {
+    use socketchat_core::update::UpdateState;
+    let on = UpdateState {
+        on: true,
+        asked_unix: Some(1_792_411_200),
+        answered_unix: Some(1_792_411_200),
+        latest: Some("0.5.3".into()),
+    };
+    assert_eq!(
+        update_status(&on, false, &utc_date_time),
+        "Update check: on, once a day. Last checked 2026-10-19 at 12:00. The newest release then was 0.5.3."
+    );
+    let never = UpdateState {
+        answered_unix: None,
+        latest: None,
+        ..on.clone()
+    };
+    assert_eq!(
+        update_status(&never, false, &utc_date_time),
+        "Update check: on, once a day. Not checked yet."
+    );
+    let off = UpdateState {
+        on: false,
+        ..on.clone()
+    };
+    assert_eq!(
+        update_status(&off, false, &utc_date_time),
+        "Update check: off. Type /updates on to turn it on."
+    );
+    assert!(update_status(&on, true, &utc_date_time).starts_with("Update check: off for this run"));
+}
+
+#[test]
+fn status_words_avoid_promises_the_app_cannot_keep() {
+    let mut s = status_view();
+    let mut texts = status_text(&s, Some("Book club"));
+    s.room.as_mut().unwrap().post_quantum = false;
+    texts.extend(status_text(&s, Some("Book club")));
+    for t in texts {
+        let lower = t.to_lowercase();
+        for word in [
+            "secure",
+            "private",
+            "anonymous",
+            "military",
+            "quantum-safe",
+            "quantum-proof",
+        ] {
+            assert!(!lower.contains(word), "{word} in {t}");
+        }
+    }
+}
+
+fn status_app(s: &socketchat_core::client::StatusView, room: Option<&str>) -> App {
+    let mut app = App::new();
+    app.selected = room.map(|_| g(1));
+    app.modal = Some(Modal::Status {
+        lines: status_text(s, room),
+        offset: 0,
+    });
+    app
+}
+
+#[test]
+fn screen_status_connected() {
+    let mut app = status_app(&status_view(), Some("Book club"));
+    let s = render(&app, &crew(), 80, 24);
+    assert!(s.contains(" Status "), "{s}");
+    assert!(
+        s.contains("State: connected since 2026-10-19 at 12:00"),
+        "{s}"
+    );
+    insta::assert_snapshot!("status_connected_80x24", s);
+    insta::assert_snapshot!("status_connected_50x24", render(&app, &crew(), 50, 24));
+    // The box scrolls to its last line.
+    for _ in 0..40 {
+        app.handle_key(key(KeyCode::Down), &crew());
+    }
+    let s = render(&app, &crew(), 80, 24);
+    assert!(
+        s.contains("/details lists what the server can and cannot see"),
+        "{s}"
+    );
+    insta::assert_snapshot!("status_connected_end_80x24", s);
+    app.handle_key(key(KeyCode::Esc), &crew());
+    assert!(app.modal.is_none());
+}
+
+#[test]
+fn screen_status_offline() {
+    use socketchat_core::client::Link;
+    let mut st = status_view();
+    let server = st.server.as_mut().unwrap();
+    server.link = Link::Unreachable("connection refused".into());
+    server.members_invite = None;
+    let app = status_app(&st, Some("Book club"));
+    let mut vm = crew();
+    vm.connected = false;
+    let s = render(&app, &vm, 80, 24);
+    assert!(
+        s.contains("State: could not reach: connection refused"),
+        "{s}"
+    );
+    insta::assert_snapshot!("status_offline_80x24", s);
+    insta::assert_snapshot!("status_offline_50x24", render(&app, &vm, 50, 24));
+}
+
+#[test]
+fn screen_status_with_no_room_open() {
+    let mut st = status_view();
+    st.room = None;
+    let app = status_app(&st, None);
+    let mut vm = crew();
+    vm.lines.clear();
+    vm.members.clear();
+    let s = render(&app, &vm, 80, 24);
+    assert!(!s.contains("This room"), "{s}");
+    assert!(s.contains("Rooms on this server: 3"), "{s}");
+    insta::assert_snapshot!("status_no_room_80x24", s);
+    insta::assert_snapshot!("status_no_room_50x24", render(&app, &vm, 50, 24));
+}
+
+#[test]
+fn screen_status_direct_chat() {
+    let mut st = status_view();
+    let room = st.room.as_mut().unwrap();
+    room.is_dm = true;
+    room.members = 2;
+    room.verified = 2;
+    room.admins = 2;
+    let lines = status_text(&st, Some("Bo"));
+    let at = lines.iter().position(|l| l == "This room").unwrap();
+    let mut app = status_app(&st, Some("Bo"));
+    app.selected = Some(g(2));
+    // Scrolled so the room's section starts the box at 80 columns, where
+    // the certificate fingerprint above it takes two rows.
+    app.modal = Some(Modal::Status {
+        lines,
+        offset: at + 1,
+    });
+    // Ada and Bo, as the direct chat's People list shows them.
+    let mut vm = crew();
+    vm.members.truncate(2);
+    let s = render(&app, &vm, 80, 24);
+    assert!(s.contains("Kind: direct chat"), "{s}");
+    insta::assert_snapshot!("status_dm_80x24", s);
+    insta::assert_snapshot!("status_dm_50x24", render(&app, &vm, 50, 24));
+}
+
+// ---------- /invite <name> and /join <room> ----------
+
+#[test]
+fn invite_and_join_parse_every_form() {
+    assert_eq!(parse_command("/invite"), Ok(Command::Invite { dm: false }));
+    assert_eq!(
+        parse_command("/invite --dm"),
+        Ok(Command::Invite { dm: true })
+    );
+    assert_eq!(
+        parse_command("/invite Bo"),
+        Ok(Command::InviteMember {
+            name: "Bo".into(),
+            room: None,
+            quoted: false
+        })
+    );
+    assert_eq!(
+        parse_command("/invite Bo#1a2b"),
+        Ok(Command::InviteMember {
+            name: "Bo#1a2b".into(),
+            room: None,
+            quoted: false
+        })
+    );
+    assert_eq!(
+        parse_command("/invite Bo Smith"),
+        Ok(Command::InviteMember {
+            name: "Bo".into(),
+            room: Some("Smith".into()),
+            quoted: false
+        })
+    );
+    assert_eq!(
+        parse_command("/invite \"Bo Smith\" Climbing Saturdays"),
+        Ok(Command::InviteMember {
+            name: "Bo Smith".into(),
+            room: Some("Climbing Saturdays".into()),
+            quoted: true
+        })
+    );
+    assert_eq!(parse_command("/join"), Ok(Command::Join(None)));
+    assert_eq!(
+        parse_command("/join Climbing Saturdays"),
+        Ok(Command::Join(Some("Climbing Saturdays".into())))
+    );
+    assert!(parse_command("/add Bo").is_err(), "no /add command");
+}
+
+#[test]
+fn help_lists_invite_by_name_and_join_by_room() {
+    let rows: Vec<(&str, &str)> = HELP.to_vec();
+    let at = rows.iter().position(|(c, _)| *c == "/invite").unwrap();
+    assert_eq!(
+        &rows[at..at + 5],
+        &[
+            (
+                "/invite",
+                "make a one-time link that brings someone into this chat"
+            ),
+            (
+                "/invite <name>",
+                "invite someone you share a room with to this room"
+            ),
+            (
+                "/invite --dm",
+                "make a link that opens a new two-person chat"
+            ),
+            (
+                "/join <link or room>",
+                "use a link, or join a room you were invited to"
+            ),
+            (
+                "/join <number>",
+                "pick one of several rooms you were invited to"
+            ),
+        ]
+    );
+    assert!(!rows.iter().any(|(c, _)| c.starts_with("/add")));
+}
+
+#[test]
+fn typing_a_message_that_starts_with_y_answers_nothing() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.status = Some(
+        "Ada invites you to Climbing Saturdays. Type /join Climbing Saturdays to join.".into(),
+    );
+    let mut acts = Vec::new();
+    for c in "yeah see you there".chars() {
+        acts.extend(app.handle_key(key(KeyCode::Char(c)), &vm));
+    }
+    assert!(acts.is_empty(), "{acts:?}");
+    assert!(app.modal.is_none());
+    assert_eq!(app.input, "yeah see you there");
+}
+
+#[test]
+fn invite_statuses_say_what_happens_next() {
+    use socketchat_core::client::InviteSent;
+    use socketchat_tui::app::invite_sent_status;
+    let sent = InviteSent {
+        name: "Bo".into(),
+        via: "Book club".into(),
+        room: "Climbing Saturdays".into(),
+        wait_secs: None,
+    };
+    assert_eq!(
+        invite_sent_status(&sent, true),
+        "Invited Bo through Book club. This room says when they join."
+    );
+    assert_eq!(
+        invite_sent_status(&sent, false),
+        "Invited Bo to Climbing Saturdays through Book club. Climbing Saturdays says when they join."
+    );
+    let held = InviteSent {
+        wait_secs: Some(30),
+        ..sent
+    };
+    assert_eq!(
+        invite_sent_status(&held, true),
+        "Book club limits fast posting, so Bo gets the invite in 30 seconds. This room says when they join."
+    );
+}
+
+#[test]
+fn invite_box_says_where_a_link_goes_and_how_to_invite_by_name() {
+    let app = invite_app(LONG_LINK);
+    let s = render(&app, &crew(), 100, 50);
+    let flat = s
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        flat.contains("They can paste it into an open chat with /join."),
+        "{s}"
+    );
+    assert!(
+        flat.contains(
+            "To invite someone you already share a room with, type /invite and their name."
+        ),
+        "{s}"
+    );
+}
+
+/// `/join` and `/invite` alone each do something, but the help rows that
+/// name a room, a number or a person go in the message box to type the
+/// rest, and so do letters only `/join` starts with.
+#[test]
+fn help_rows_with_a_name_or_number_wait_for_it() {
+    use socketchat_tui::commands::help_entries;
+    let vm = crew();
+    for (usage, want) in [
+        ("/join <link or room>", "/join "),
+        ("/join <number>", "/join "),
+        ("/invite <name>", "/invite "),
+    ] {
+        let mut app = App::new();
+        app.selected = Some(g(1));
+        let pick = help_entries()
+            .iter()
+            .position(|(u, _)| *u == usage)
+            .unwrap();
+        app.modal = Some(Modal::Help { offset: 0, pick });
+        assert!(
+            app.handle_key(key(KeyCode::Enter), &vm).is_empty(),
+            "{usage}"
+        );
+        assert_eq!(app.input, want, "{usage}");
+    }
+    let mut app = App::new();
+    let pick = help_entries()
+        .iter()
+        .position(|(u, _)| *u == "/invite")
+        .unwrap();
+    app.selected = Some(g(1));
+    app.modal = Some(Modal::Help { offset: 0, pick });
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Invite { dm: false })]
+    );
+}
+
+// ---------- the invite line's command ----------
+
+const INVITE: &str =
+    "Ada invites you to Climbing Saturdays. Type /join Climbing Saturdays to join.";
+
+/// Book club with one invite line, its command marked.
+fn invited_crew() -> ViewModel {
+    let mut vm = crew();
+    let at = INVITE.find("/join").unwrap();
+    vm.lines.push(LineView {
+        time: "09:17:30".into(),
+        sender: String::new(),
+        text: INVITE.into(),
+        notice: true,
+        mine: false,
+        topic: false,
+        command: Some(at..INVITE.len() - " to join.".len()),
+    });
+    vm
+}
+
+/// A window width at which the invite line breaks inside its command.
+const WRAP_W: u16 = 114;
+
+fn drawn(app: &App, vm: &ViewModel, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| draw(f, app, vm)).unwrap();
+    t.backend().buffer().clone()
+}
+
+#[test]
+fn the_invite_line_makes_its_command_stand_out() {
+    for theme in [
+        Theme::phosphor(ColorSupport::TrueColor),
+        Theme::classic(ColorSupport::TrueColor),
+    ] {
+        let mut app = App::new();
+        app.theme = theme.clone();
+        app.selected = Some(g(1));
+        let vm = invited_crew();
+        let s = render(&app, &vm, 140, 24);
+        assert!(s.contains("Type /join Climbing Saturdays to join."), "{s}");
+        let buf = drawn(&app, &vm, 140, 24);
+        let (x, y) = find_text(&buf, 140, 24, "/join Climbing Saturdays").unwrap();
+        for i in 0.."/join Climbing Saturdays".chars().count() as u16 {
+            let c = &buf[(x + i, y)];
+            assert_eq!(c.fg, theme.command.fg.unwrap(), "{:?}", c.symbol());
+            assert!(c.modifier.contains(Modifier::BOLD), "{:?}", c.symbol());
+            assert!(!c.modifier.contains(Modifier::ITALIC), "{:?}", c.symbol());
+        }
+        // The words around it read as a notice.
+        let (nx, ny) = find_text(&buf, 140, 24, "Ada invites").unwrap();
+        assert_eq!(Some(buf[(nx, ny)].fg), theme.notice.fg);
+        assert!(buf[(nx, ny)].modifier.contains(Modifier::ITALIC));
+        let after = &buf[(x + 25, y)];
+        assert_eq!(after.symbol(), "t");
+        assert_eq!(Some(after.fg), theme.notice.fg);
+        // The command has a style of its own, unlike a notice's or a name's.
+        assert_ne!(theme.command, theme.notice);
+    }
+}
+
+#[test]
+fn the_command_stays_marked_where_the_line_wraps() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let vm = invited_crew();
+    // At this width the line breaks inside the command.
+    let s = render(&app, &vm, WRAP_W, 24);
+    let rows: Vec<&str> = s.lines().collect();
+    let i = rows
+        .iter()
+        .position(|r| r.contains("Type /join Climbing "))
+        .unwrap_or_else(|| panic!("{s}"));
+    assert!(!rows[i].contains("Climbing Saturdays to"), "{s}");
+    assert!(rows[i + 1].contains("Saturdays to join."), "{s}");
+    let buf = drawn(&app, &vm, WRAP_W, 24);
+    let (x, y) = find_text(&buf, WRAP_W, 24, "/join Climbing").unwrap();
+    for k in 0..14 {
+        assert!(buf[(x + k, y)].modifier.contains(Modifier::BOLD), "{k}");
+    }
+    let (x, y) = find_text(&buf, WRAP_W, 24, "Saturdays to join.").unwrap();
+    for k in 0..9 {
+        assert!(buf[(x + k, y)].modifier.contains(Modifier::BOLD), "{k}");
+    }
+    assert!(!buf[(x + 10, y)].modifier.contains(Modifier::BOLD));
+    assert!(buf[(x + 10, y)].modifier.contains(Modifier::ITALIC));
+}
+
+// ---------- Tab after /invite and /join ----------
+
+/// Book club, where Bo and Cy are; Dee and two people called Eve share
+/// other rooms with Ada.
+fn inviting_crew() -> ViewModel {
+    let mut vm = crew();
+    vm.invite_names = vec![
+        "Dee".into(),
+        "Dee Dee".into(),
+        "Eve#1a2b".into(),
+        "Eve#9f3c".into(),
+        "Bo".into(),
+        "Cy".into(),
+    ];
+    vm
+}
+
+#[test]
+fn tab_after_invite_completes_names_and_goes_round() {
+    let vm = inviting_crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    type_text(&mut app, &vm, "/invite ");
+    let mut seen = vec![];
+    for _ in 0..7 {
+        tab(&mut app, &vm);
+        seen.push(app.input.clone());
+    }
+    assert_eq!(
+        seen,
+        [
+            "/invite Dee",
+            "/invite \"Dee Dee\"",
+            "/invite Eve#1a2b",
+            "/invite Eve#9f3c",
+            "/invite Bo",
+            "/invite Cy",
+            "/invite Dee",
+        ]
+    );
+    assert_eq!(app.focus, Focus::Input);
+    back_tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite Cy", "Shift-Tab goes back");
+}
+
+#[test]
+fn tab_after_invite_and_letters_takes_the_names_that_start_with_them() {
+    let vm = inviting_crew();
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/invite e");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite Eve#1a2b");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite Eve#9f3c");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite Eve#1a2b");
+    // The name Tab gave runs as one name.
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::InviteMember {
+            name: "Eve#1a2b".into(),
+            room: None,
+            quoted: false,
+        })]
+    );
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/invite dee");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite Dee", "the exact name first");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite \"Dee Dee\"");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::InviteMember {
+            name: "Dee Dee".into(),
+            room: None,
+            quoted: true,
+        })]
+    );
+}
+
+#[test]
+fn tab_after_invite_says_when_no_name_fits() {
+    let vm = inviting_crew();
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/invite Zed");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite Zed");
+    assert_eq!(app.focus, Focus::Input);
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Nobody called Zed shares a room with you.")
+    );
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/invite ");
+    tab(&mut app, &crew());
+    assert_eq!(app.input, "/invite ");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Nobody else shares a room with you yet.")
+    );
+    // A name and a room, or the direct-chat switch, are not a name to
+    // complete: Tab moves on as before.
+    for typed in ["/invite Bo Hikes", "/invite --dm"] {
+        let mut app = App::new();
+        type_text(&mut app, &vm, typed);
+        tab(&mut app, &vm);
+        assert_eq!(app.input, typed);
+        assert_eq!(app.focus, Focus::Groups, "{typed}");
+    }
+}
+
+#[test]
+fn the_ghost_after_invite_is_what_tab_would_give() {
+    let vm = inviting_crew();
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/invite c");
+    assert_eq!(app.ghost(&vm).as_deref(), Some("y"));
+    app.handle_key(key(KeyCode::Right), &vm);
+    assert_eq!(app.input, "/invite Cy");
+}
+
+/// Ada has two invites waiting, the newer one first, as Tab offers them.
+fn joining_crew() -> ViewModel {
+    let mut vm = crew();
+    vm.join_rooms = vec!["Hikes".into(), "Climbing Saturdays".into()];
+    vm
+}
+
+#[test]
+fn tab_after_join_completes_rooms_with_invites_newest_first() {
+    let vm = joining_crew();
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/join ");
+    let mut seen = vec![];
+    for _ in 0..3 {
+        tab(&mut app, &vm);
+        seen.push(app.input.clone());
+    }
+    assert_eq!(
+        seen,
+        ["/join Hikes", "/join Climbing Saturdays", "/join Hikes"]
+    );
+    back_tab(&mut app, &vm);
+    assert_eq!(app.input, "/join Climbing Saturdays");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Join(Some(
+            "Climbing Saturdays".into()
+        )))]
+    );
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/join cl");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/join Climbing Saturdays");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/join Climbing Saturdays", "one match stays put");
+}
+
+#[test]
+fn tab_after_join_says_when_no_invite_waits() {
+    let mut app = App::new();
+    type_text(&mut app, &crew(), "/join ");
+    tab(&mut app, &crew());
+    assert_eq!(app.input, "/join ");
+    assert_eq!(app.status.as_deref(), Some("No invite waits for you."));
+    let vm = joining_crew();
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/join Chess");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/join Chess");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("No invite to Chess waits for you.")
+    );
+}
+
+#[test]
+fn join_choices_are_newest_first_once_each_and_numbered_when_a_name_is_a_number() {
+    let waiting = [
+        (1, "Climbing Saturdays".to_string()),
+        (2, "Hikes".to_string()),
+        (3, "climbing  saturdays".to_string()),
+        (4, "7".to_string()),
+    ];
+    assert_eq!(join_choices(&waiting), ["4", "climbing saturdays", "Hikes"]);
+}
+
+// ---------- Up and Down after /switch, /invite and /join ----------
+
+#[test]
+fn up_and_down_after_switch_step_through_the_rooms_tab_gives() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    type_text(&mut app, &vm, "/switch ");
+    let mut seen = vec![];
+    for _ in 0..4 {
+        down(&mut app, &vm);
+        seen.push(app.input.clone());
+    }
+    assert_eq!(
+        seen,
+        [
+            "/switch Book club",
+            "/switch Bo",
+            "/switch Climbing Saturdays",
+            "/switch Book club"
+        ]
+    );
+    up(&mut app, &vm);
+    assert_eq!(
+        app.input, "/switch Climbing Saturdays",
+        "Up goes back round"
+    );
+    assert_eq!(app.focus, Focus::Input);
+    // Enter opens the room Up and Down picked.
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Select(g(3))]
+    );
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/switch b");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/switch Bo", "Up first takes the last match");
+    // Tab and Up and Down go through one list.
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/switch b");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/switch Book club");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/switch Bo");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/switch Book club");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/switch Bo");
+    back_tab(&mut app, &vm);
+    assert_eq!(app.input, "/switch Book club");
+}
+
+#[test]
+fn up_and_down_after_invite_and_join_step_like_tab() {
+    let vm = inviting_crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    type_text(&mut app, &vm, "/invite ");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/invite Dee");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/invite \"Dee Dee\"");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/invite Dee");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/invite Cy");
+    let vm = joining_crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    type_text(&mut app, &vm, "/join ");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/join Climbing Saturdays");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/join Hikes");
+    let mut app = App::new();
+    type_text(&mut app, &crew(), "/join ");
+    down(&mut app, &crew());
+    assert_eq!(app.input, "/join ");
+    assert_eq!(app.status.as_deref(), Some("No invite waits for you."));
+}
+
+#[test]
+fn up_and_down_still_bring_back_earlier_lines_everywhere_else() {
+    let vm = joining_crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "hello");
+    enter_line(&mut app, &vm, "/switch Bo");
+    // Empty box.
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/switch Bo");
+    // A recalled /switch line keeps Up on earlier lines.
+    up(&mut app, &vm);
+    assert_eq!(app.input, "hello");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/switch Bo");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "");
+    // Plain text and a lone slash.
+    for typed in ["hi", "/"] {
+        let mut app = App::new();
+        app.selected = Some(g(1));
+        enter_line(&mut app, &vm, "hello");
+        type_text(&mut app, &vm, typed);
+        up(&mut app, &vm);
+        assert_eq!(app.input, "hello", "{typed}");
+    }
+    // /switch without a space still steps through command words.
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/switch");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/switch");
+}
+
+#[test]
+fn help_says_tab_and_up_and_down_complete_after_switch_invite_and_join() {
+    let switch = HELP.iter().find(|(c, _)| *c == "/switch [room]").unwrap();
+    assert_eq!(switch.1, "open a room; Tab or Up/Down completes the name");
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.modal = Some(Modal::Help { offset: 0, pick: 0 });
+    let s = render(&app, &crew(), 80, 60);
+    let text = modal_text(&s).join(" ");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        text.contains("Tab or Up/Down step through the rooms or names that fit after /switch, /invite or /join"),
+        "{s}"
+    );
+}
+
+#[test]
+fn a_paste_ends_the_run_through_names() {
+    let vm = inviting_crew();
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/invite ");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite Dee");
+    app.handle_paste("x");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/invite Deex");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Nobody called Deex shares a room with you.")
+    );
+}
+
+// ---------- Ctrl-C twice quits ----------
+
+#[test]
+fn one_ctrl_c_asks_for_another_and_two_quit() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    assert!(app.handle_key(ctrl('c'), &vm).is_empty());
+    assert_eq!(app.status.as_deref(), Some("Press Ctrl-C again to quit."));
+    assert!(help_row(&app, &vm).starts_with("Press Ctrl-C again to quit."));
+    assert_eq!(app.handle_key(ctrl('c'), &vm), vec![Action::Quit]);
+}
+
+#[test]
+fn another_key_between_the_two_starts_over() {
+    let vm = crew();
+    let mut app = App::new();
+    assert!(app.handle_key(ctrl('c'), &vm).is_empty());
+    app.handle_key(key(KeyCode::Char('x')), &vm);
+    assert_eq!(app.status, None);
+    assert_eq!(app.input, "x");
+    assert!(app.handle_key(ctrl('c'), &vm).is_empty(), "asks again");
+    assert_eq!(app.handle_key(ctrl('c'), &vm), vec![Action::Quit]);
+}
+
+#[test]
+fn the_second_ctrl_c_counts_for_two_seconds() {
+    let vm = crew();
+    let mut app = App::new();
+    app.handle_key(ctrl('c'), &vm);
+    let armed = app.quit_deadline().expect("waiting for a second Ctrl-C");
+    // The time runs out: the notice goes, and Ctrl-C asks again.
+    app.quit_expire(armed + std::time::Duration::from_millis(1));
+    assert_eq!(app.status, None);
+    assert_eq!(app.quit_deadline(), None);
+    assert!(app.handle_key(ctrl('c'), &vm).is_empty());
+    // Before it runs out, nothing changes.
+    let armed = app.quit_deadline().unwrap();
+    app.quit_expire(armed - std::time::Duration::from_millis(500));
+    assert_eq!(app.status.as_deref(), Some("Press Ctrl-C again to quit."));
+    assert_eq!(app.handle_key(ctrl('c'), &vm), vec![Action::Quit]);
+}
+
+#[test]
+fn ctrl_c_in_a_box_follows_the_same_two_presses() {
+    let vm = crew();
+    for m in [
+        Modal::Help { offset: 0, pick: 0 },
+        Modal::About,
+        Modal::Confirm {
+            question: "Leave Book club?".into(),
+            yes: Box::new(Action::Command(Command::Leave)),
+        },
+    ] {
+        let mut app = App::new();
+        app.selected = Some(g(1));
+        app.modal = Some(m.clone());
+        assert!(app.handle_key(ctrl('c'), &vm).is_empty(), "{m:?}");
+        assert_eq!(app.modal, Some(m.clone()), "the box stays open");
+        assert_eq!(app.handle_key(ctrl('c'), &vm), vec![Action::Quit]);
+    }
+}
+
+#[test]
+fn help_box_says_ctrl_c_twice_quits() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.modal = Some(Modal::Help { offset: 0, pick: 0 });
+    let s = render(&app, &crew(), 80, 60);
+    let text = modal_text(&s).join(" ");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        text.contains("Ctrl-C Ctrl-C quit; one Ctrl-C copies the text you selected"),
+        "{s}"
+    );
 }

@@ -381,6 +381,13 @@ impl ServerHandle {
         self.state.queued.frames.load(Ordering::Relaxed)
     }
 
+    /// Connections that hold a slot: from when the server accepts one until
+    /// it has given back every slot the connection took. For tests.
+    #[doc(hidden)]
+    pub fn connections(&self) -> usize {
+        self.state.per_ip.total()
+    }
+
     /// Bytes waiting to be written, over every connection. For tests.
     #[doc(hidden)]
     pub fn queued_bytes(&self) -> usize {

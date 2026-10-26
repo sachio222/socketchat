@@ -2,8 +2,6 @@
 //! each server's state is, errors that name the server, and forgetting a
 //! server this computer can no longer use.
 
-use std::time::Duration;
-
 use socketchat_core::client::{server_text, ServerState};
 use socketchat_testkit::{settle, TestClient, TestServer};
 
@@ -14,8 +12,7 @@ fn nth(c: &TestClient, n: usize) -> i64 {
 
 /// Stops a server and waits for its port to close.
 async fn stop(s: &TestServer) {
-    s.handle.shutdown();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.shut_down().await;
 }
 
 #[test]

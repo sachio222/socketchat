@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: s
+---
+┌ Chats ───────────┐┌ Bo ──────────────────────────────────┐┌ People 2 of 2 ✓ ─┐
+│# Book club       ││09:10:00 · End-to-end encrypted. Only ││✓ Ada* (you)      │
+│@ Bo             3││         the two of you can read this ││✓ Bo              │
+│# Climbing Sat… 12││         chat. The server passes      ││                  │
+│                  ││         messages along but cannot    ││                  │
+│                  ││         read them. /details says what││                  │
+│                  ││         it can see.                  ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  Say hi to Bo                                                  / for commands│
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter send · /help commands · Tab move · Ctrl-K switch chat · Ctrl-C quit

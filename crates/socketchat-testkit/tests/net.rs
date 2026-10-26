@@ -173,7 +173,7 @@ async fn crowded_network_is_told_why() {
         Response::Challenge(_)
     ));
     drop(first);
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    s.connections_down_to(0).await;
     Conn::connect("127.0.0.1", s.addr().port(), s.fpr())
         .await
         .unwrap();

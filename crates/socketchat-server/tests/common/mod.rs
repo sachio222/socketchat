@@ -208,6 +208,20 @@ pub fn auth_sig(k: &KeyPair, challenge: &[u8; 32]) -> socketchat_proto::msg::Sig
     k.sign(CTX_AUTH, &[challenge.as_slice(), &k.public().0].concat())
 }
 
+/// Waits until the server holds no more than `n` connections, looking
+/// every 2 ms, and fails the test after 5 seconds.
+pub async fn connections_down_to(h: &socketchat_server::ServerHandle, n: usize) {
+    let started = std::time::Instant::now();
+    while h.connections() > n {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the server still holds {} connections, not {n}",
+            h.connections()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+}
+
 // ---------- MLS helpers for group tests ----------
 
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};

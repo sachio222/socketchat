@@ -20,7 +20,17 @@ pub enum Command {
     Invite {
         dm: bool,
     },
-    Join(String),
+    /// Invite someone from another room to the open room, or to `room`.
+    /// `quoted` says the person used quotes, which settles where the name
+    /// ends.
+    InviteMember {
+        name: String,
+        room: Option<String>,
+        quoted: bool,
+    },
+    /// Use a link, or join a room this person was invited to by its name
+    /// or its number; with no words, the one invite that waits.
+    Join(Option<String>),
     New(String),
     Dm(String),
     Send(String),
@@ -57,6 +67,9 @@ pub enum Command {
     Mute,
     Unmute,
     Details,
+    /// The server, the connection, this profile, the open room and the
+    /// app, in one box.
+    Status,
     /// Show this room's settings, or change one.
     Settings(Option<Setting>),
     Clear,
@@ -81,16 +94,30 @@ pub const HELP: &[(&str, &str)] = &[
         "make a one-time link that brings someone into this chat",
     ),
     (
+        "/invite <name>",
+        "invite someone you share a room with to this room",
+    ),
+    (
         "/invite --dm",
         "make a link that opens a new two-person chat",
     ),
-    ("/join <link>", "use an invite link someone sent you"),
+    (
+        "/join <link or room>",
+        "use a link, or join a room you were invited to",
+    ),
+    (
+        "/join <number>",
+        "pick one of several rooms you were invited to",
+    ),
     ("/new <name>", "start a new group chat"),
     (
         "/dm <name>",
         "start a two-person chat with someone in this chat",
     ),
-    ("/send <path>", "send a file, photo or video"),
+    (
+        "/send <path>",
+        "send a file, photo or video, or drag one onto the window",
+    ),
     ("/save <file> [folder]", "save a file someone sent"),
     ("/verify <name>", "compare safety numbers with someone"),
     ("/rename <name> <new>", "rename someone on your screen only"),
@@ -100,7 +127,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("/leave", "leave this chat and delete its history here"),
     (
         "/switch [room]",
-        "open another room; Tab completes the name",
+        "open a room; Tab or Up/Down completes the name",
     ),
     ("/title <name>", "rename this room for everyone (admins)"),
     (
@@ -139,25 +166,65 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     (
         "/mouse [on|off]",
-        "turn mouse clicks and scrolling on or off",
+        "turn clicking, scrolling and drag to copy on or off",
     ),
     (
         "/updates [on|off]",
         "turn the daily check for a new version on or off",
     ),
+    (
+        "/status",
+        "see the server, connection, this room and the app",
+    ),
     ("/about", "see the version and what Socketchat is"),
+    ("/help", "see every command and what it does"),
     ("/quit", "close Socketchat"),
 ];
 
-/// Each command word in `HELP`, once, in `HELP` order: what Tab completes.
+/// The command word a `HELP` row starts with, such as `/invite` for
+/// `/invite --dm`.
+fn word_of(usage: &str) -> &str {
+    usage.split_whitespace().next().unwrap_or(usage)
+}
+
+/// The rows of `HELP` in alphabetical order of their command words, rows
+/// for one command in `HELP` order: what the help box lists.
+pub fn help_entries() -> Vec<(&'static str, &'static str)> {
+    let mut rows = HELP.to_vec();
+    rows.sort_by_key(|(c, _)| word_of(c));
+    rows
+}
+
+/// What picking a help row puts in the message box: the row without its
+/// placeholders, so `/save <file> [folder]` gives `/save` and
+/// `/settings slow` stays whole.
+pub fn command_of(usage: &str) -> String {
+    usage
+        .split_whitespace()
+        .take_while(|w| !w.starts_with('<') && !w.starts_with('['))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether the command word `word`, typed alone, waits for more words in
+/// the message box instead of running: it does not run alone, or every
+/// `HELP` row for it names something to type, as `/join <link or room>`
+/// does, though `/join` alone joins the one invite that waits.
+pub fn needs_more(word: &str) -> bool {
+    parse_command(word).is_err()
+        || !HELP
+            .iter()
+            .any(|(u, _)| command_of(u) == word && !u.contains('<'))
+}
+
+/// Each command word in `HELP`, once, in alphabetical order: what Tab and
+/// Up and Down after a slash go through. Every word the parser runs is in
+/// `HELP`, and every word in `HELP` runs; tests on both sides keep it that
+/// way.
 pub fn command_words() -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = vec![];
-    for (c, _) in HELP {
-        let word = c.split_whitespace().next().unwrap_or(c);
-        if !out.contains(&word) {
-            out.push(word);
-        }
-    }
+    let mut out: Vec<&'static str> = HELP.iter().map(|(c, _)| word_of(c)).collect();
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -198,9 +265,19 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         "/invite" => match rest {
             "" => Command::Invite { dm: false },
             "--dm" => Command::Invite { dm: true },
-            _ => return Err("Usage: /invite, or /invite --dm".into()),
+            _ => {
+                let w = words(rest);
+                let Some(name) = w.first().filter(|n| !n.trim().is_empty()) else {
+                    return Err("Usage: /invite, /invite <name> or /invite --dm".into());
+                };
+                Command::InviteMember {
+                    name: name.clone(),
+                    room: (w.len() > 1).then(|| w[1..].join(" ")),
+                    quoted: rest.contains('"'),
+                }
+            }
         },
-        "/join" => Command::Join(need("/join <link>")?),
+        "/join" => Command::Join((!rest.is_empty()).then(|| rest.to_string())),
         "/new" => Command::New(need("/new <name>")?),
         "/dm" => Command::Dm(need("/dm <name>")?),
         "/send" => Command::Send(need("/send <path>")?),
@@ -251,6 +328,7 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         "/mute" => Command::Mute,
         "/unmute" => Command::Unmute,
         "/details" => Command::Details,
+        "/status" => Command::Status,
         "/settings" => Command::Settings(parse_setting(rest)?),
         "/clear" => Command::Clear,
         "/about" => Command::About,
@@ -377,6 +455,17 @@ pub fn pick_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reverse of the screen test that reads the parser's words: every
+    /// command word Tab offers is one the parser runs.
+    #[test]
+    fn every_command_word_in_help_runs() {
+        for w in command_words() {
+            if let Err(e) = parse_command(w) {
+                assert!(!e.starts_with("There is no"), "{w}: {e}");
+            }
+        }
+    }
 
     #[test]
     fn save_with_an_empty_name_is_a_usage_error() {

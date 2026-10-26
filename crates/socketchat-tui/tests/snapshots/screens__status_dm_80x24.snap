@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: s
+---
+┌ Chats ───────────┐┌ Bo ──────────────────────────────────┐┌ People 2 of 2 ✓ ─┐
+│#┌ Status ──────────────────────────────────────────────────────────────────┐ │
+│@│This room                                                                 │ │
+│#│Name: Bo                                                                  │ │
+│ │Kind: direct chat                                                         │ │
+│ │Members: 2, 2 verified                                                    │ │
+│ │Admins: 2                                                                 │ │
+│ │Your role: admin                                                          │ │
+│ │Who can invite: admins only                                               │ │
+│ │Slow mode: one message every 30 seconds for each member who isn't an admin│ │
+│ │Who can set the topic: admins only                                        │ │
+│ │Has a topic: yes                                                          │ │
+│ │Encryption: end-to-end, MLS (RFC 9420)                                    │ │
+│ │Suite: MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519 (0x004F)           │ │
+│ │Post-quantum: yes for messages and files (ML-KEM-768 + X25519). Signatures│ │
+│ │and the link to the server are not post-quantum yet.                      │ │
+│ │                                                                          │ │
+│ │App                                                                       │ │
+│ │Version: 0.6.0                                                            │ │
+└─│Update check: on, once a day. Last checked 2026-10-19 at 12:00. The newest│─┘
+┌─│release then was 0.5.2.                                                   │─┐
+│ │↓ more                                                                    │s│
+└─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
+Esc close                                                       socketchat 0.6.0

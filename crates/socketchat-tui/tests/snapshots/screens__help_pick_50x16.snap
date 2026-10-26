@@ -1,0 +1,20 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render_marked(&app, &vm, 50, 16)"
+---
+┌ Chats ───────────┐┌ Socketchat ──────┐┌ People ┐
+│#┌ Commands ──────────────────────────────────┐u│
+│@│                      this room             │ │
+│#│/invite --dm          make a link that opens│ │
+│ │                      a new two-person chat │ │
+│ │/invites              see your open invite  │ │
+│ │                      links                 │ │
+│ │/join <link or room>  use a link, or join a │ │
+│ │                      room you were invited │ │
+│ │                      to                    │ │
+│ │/join <number>        pick one of several   │ │ ◀
+└─│                      rooms you were invited│─┘ ◀
+┌─│                      to                    │─┐ ◀
+│ │↓ more                                      │…│
+└─└──────────────────────────────────[ Close ]─┘─┘
+Up/Down pick a command · Enter use it · Esc close

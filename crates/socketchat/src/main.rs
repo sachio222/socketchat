@@ -20,7 +20,10 @@ use socketchat_proto::InviteLink;
 use socketchat_server::{
     acceptable_use_text, init, make_server_invite, public_host_warning, Config, Server,
 };
-use socketchat_tui::app::{forget_warning, forgot_text, local_date, server_row};
+use socketchat_tui::app::{
+    forget_warning, forgot_text, local_date, local_date_time, server_row, status_lines,
+    update_status, AppStatus,
+};
 
 #[derive(Parser)]
 #[command(
@@ -58,14 +61,19 @@ enum Cmd {
         #[arg(long, value_name = "NUMBER")]
         server: Option<usize>,
     },
-    /// Print an invite link on one line.
+    /// Print an invite link on one line, or invite someone you share a
+    /// room with by name.
     Invite {
         /// The group to invite into. Leave out with --dm for a new two-person chat.
         #[arg(long)]
         group: Option<String>,
         /// Make a link that opens a new two-person chat.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "name")]
         dm: bool,
+        /// Someone you share another room with, to invite by name instead of
+        /// with a link: their name, or their name and the start of their
+        /// key, as Bo#1a2b. They join with /join in the chat screen.
+        name: Vec<String>,
     },
     /// See your open invite links, or cancel one.
     Invites {
@@ -111,6 +119,13 @@ enum Cmd {
     },
     /// Fetch everything new and print what happened (for scripts).
     Sync,
+    /// Print the server and the connection to it, your name, a room and
+    /// the app's settings, one fact a line.
+    Status {
+        /// A room to include, by name.
+        #[arg(long)]
+        group: Option<String>,
+    },
     /// Print the command that updates Socketchat. It installs nothing.
     Update,
 }
@@ -412,6 +427,11 @@ async fn sync_and_report(c: &mut Client) -> Result<(), Fail> {
                 group_name(c, group)
             ),
             Event::JoinRequestHandled { group } => println!("Someone you invited joined {}.", group_name(c, group)),
+            // A line from the app itself names no sender.
+            Event::Message { group, line } if line.notice && line.sender_key.is_none() => println!(
+                "{}",
+                message_lines(&format!("[{}] · ", group_name(c, group)), &line.text)
+            ),
             Event::Message { group, line } => println!(
                 "{}",
                 message_lines(
@@ -553,7 +573,30 @@ async fn profile_command(c: &mut Client, cmd: Cmd) -> Result<(), Fail> {
             report_warnings(c);
             Ok(())
         }
-        Cmd::Invite { group, dm } => {
+        Cmd::Invite { group, name, .. } if !name.is_empty() => {
+            c.sync().await?;
+            let Some(group) = group else {
+                return Err(Fail(
+                    1,
+                    "Name the room to invite them to with --group <name>.".into(),
+                ));
+            };
+            let gid = group_by_name(c, &group)?;
+            let room = group_name(c, gid);
+            let sent = c.invite_member(gid, &name.join(" ")).await;
+            c.purge_read(None);
+            report_warnings(c);
+            let sent = sent?;
+            let who = clean_name(&sent.name);
+            let via = clean_name(&sent.via);
+            let when = match sent.wait_secs {
+                None => String::new(),
+                Some(n) => format!(" {via} limits fast posting, so socketchat sync or the chat screen sends it in {n} seconds or later."),
+            };
+            println!("Invited {who} to {room} through {via}.{when} Once {who} types /join {room}, socketchat sync or the chat screen adds them.");
+            Ok(())
+        }
+        Cmd::Invite { group, dm, .. } => {
             c.sync().await?;
             let (link, expires_unix) = match (group, dm) {
                 (None, true) => c.invite(None, true).await?,
@@ -717,6 +760,32 @@ async fn profile_command(c: &mut Client, cmd: Cmd) -> Result<(), Fail> {
             Ok(())
         }
         Cmd::Sync => sync_and_report(c).await,
+        Cmd::Status { group } => {
+            // A server that cannot be reached is part of the answer.
+            c.sync().await?;
+            let gid = group.as_deref().map(|g| group_by_name(c, g)).transpose()?;
+            let s = c.status(gid).await;
+            let room = gid.map(|g| group_name(c, g));
+            let saved = c.theme()?;
+            let app = AppStatus {
+                theme: socketchat_tui::theme::pick_theme(
+                    saved.as_deref(),
+                    std::env::var("SOCKETCHAT_THEME").ok().as_deref(),
+                    None,
+                )
+                .name
+                .as_str()
+                .into(),
+                mouse: c.mouse()?.unwrap_or(true),
+                updates: update_status(&c.update_state()?, update::off_by_env(), &local_date_time),
+            };
+            c.purge_read(None);
+            report_warnings(c);
+            for line in status_lines(&s, room.as_deref(), &app, &local_date_time) {
+                println!("{line}");
+            }
+            Ok(())
+        }
         // main_inner and main run these.
         Cmd::Server { .. } | Cmd::Join { .. } | Cmd::Update => Ok(()),
     }
@@ -825,7 +894,8 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             | Cmd::Send { .. }
             | Cmd::Topic { .. }
             | Cmd::Log { .. }
-            | Cmd::Sync),
+            | Cmd::Sync
+            | Cmd::Status { .. }),
         ) => {
             let mut c = open().await?;
             let check = c.start_update_check();

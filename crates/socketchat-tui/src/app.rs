@@ -7,19 +7,26 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
-use socketchat_core::client::{Ended, RoomDetails, ServerState, ServerView};
+use socketchat_core::client::{
+    Ended, InviteSent, Link, RoomDetails, ServerState, ServerView, StatusView,
+};
 use socketchat_core::invite::hours_text;
-use socketchat_core::keys::Key;
+use socketchat_core::keys::{fingerprint_text, Key};
 use socketchat_core::sanitize::{direction_char, single_spaced, MAX_TEXT_BYTES};
 use socketchat_core::settings::{every, WhoCanInvite, WhoCanSetTopic};
 use socketchat_proto::msg::GroupId;
 use socketchat_proto::Token;
 
-use crate::commands::{command_words, parse_command, Command};
+use crate::commands::{command_of, command_words, help_entries, parse_command, Command};
+use crate::select::{ordered, picked, Area, Spot, TextArea};
 use crate::theme::{Theme, THEMES};
-use crate::ui::{GroupView, ViewModel};
+use crate::ui::{box_rows, message_body, GroupView, LineView, ViewModel};
 
 pub use socketchat_proto::invite_message;
+
+mod dropped;
+pub(crate) use dropped::{cleaned_status, not_sent, sendable};
+pub use dropped::{dropped_paths, Attachment, DropKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -101,10 +108,14 @@ pub enum Modal {
     Servers { rows: Vec<String>, offset: usize },
     /// A room's details, scrolled down by `offset` rows.
     Details { lines: Vec<String>, offset: usize },
+    /// The server, the connection, this profile, the open room and the
+    /// app, from [`status_lines`], scrolled down by `offset` rows.
+    Status { lines: Vec<String>, offset: usize },
     /// The version, what socketchat is and where to find it.
     About,
-    /// The command list, scrolled down by `offset` rows.
-    Help { offset: usize },
+    /// The command list, scrolled down by `offset` rows, with row `pick`
+    /// of [`help_entries`] highlighted.
+    Help { offset: usize, pick: usize },
 }
 
 impl Modal {
@@ -121,6 +132,34 @@ impl Modal {
     }
 }
 
+/// What `/invite <name>` says once the invite is on its way. `open` says
+/// the invite is to the room on screen.
+pub fn invite_sent_status(s: &InviteSent, open: bool) -> String {
+    let (to, says) = if open {
+        (String::new(), "This room".to_string())
+    } else {
+        (format!(" to {}", s.room), s.room.clone())
+    };
+    let sent = match s.wait_secs {
+        None => format!("Invited {}{to} through {}.", s.name, s.via),
+        Some(n) => format!(
+            "{} limits fast posting, so {} gets the invite in {}.",
+            s.via,
+            s.name,
+            seconds_text(n)
+        ),
+    };
+    format!("{sent} {says} says when they join.")
+}
+
+fn seconds_text(n: u64) -> String {
+    if n == 1 {
+        "1 second".into()
+    } else {
+        format!("{n} seconds")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Send(GroupId, String),
@@ -129,11 +168,17 @@ pub enum Action {
     /// Send this video, or this photo that cannot be cleaned, as it is, to
     /// this room.
     ConfirmVideo(GroupId, String),
+    /// Send the files dropped in the message box to this room, then the
+    /// words around them.
+    SendDrop(GroupId),
     /// Join with this link, trusting the certificate it names.
     AcceptCertificate(String),
     MarkVerified(Key),
     /// Put this text on the terminal's clipboard.
     Copy(String),
+    /// Put this text, which the person selected with the mouse, on the
+    /// clipboard, and say on the status line how that went.
+    CopySelected(String),
     /// Vote yes on closing this room, which asks the other admins when
     /// nobody has yet.
     CloseRoom(GroupId),
@@ -236,7 +281,7 @@ pub fn about_lines(updates: &str) -> Vec<String> {
     let mut lines = vec![
         version_text(),
         String::new(),
-        "Socketchat is encrypted chat with a server you run yourself. The server passes messages along but cannot read them.".into(),
+        "Socketchat is end-to-end encrypted chat with a server you run yourself. The server passes messages along but cannot read them. It still sees timing, message sizes, IP addresses and how many people are in each room.".into(),
         String::new(),
         env!("CARGO_PKG_REPOSITORY").into(),
         format!("License: {license}"),
@@ -270,6 +315,17 @@ pub fn update_about(
     }
 }
 
+/// The local date and time of `unix`, as "YYYY-MM-DD at HH:MM".
+pub fn local_date_time(unix: u64) -> String {
+    chrono::DateTime::from_timestamp(unix as i64, 0)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d at %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
 /// The local date `unix` falls on, as YYYY-MM-DD.
 pub fn local_date(unix: u64) -> String {
     chrono::DateTime::from_timestamp(unix as i64, 0)
@@ -279,6 +335,30 @@ pub fn local_date(unix: u64) -> String {
                 .to_string()
         })
         .unwrap_or_default()
+}
+
+/// The line a room shows once to say it is end-to-end encrypted.
+pub fn encryption_text(
+    state: &socketchat_core::client::JoinCheck,
+    is_dm: bool,
+    others_verified: bool,
+) -> String {
+    use socketchat_core::client::JoinCheck;
+    let who = match state {
+        JoinCheck::Checked if is_dm => " Only the two of you can read this chat.".to_string(),
+        JoinCheck::Checked => " Only the people in the People list can read this room.".to_string(),
+        // Someone verified in another room shows verified here as well.
+        JoinCheck::Waiting { inviter } if others_verified => format!(
+            " Waiting for {inviter} to confirm your invite, so {inviter} is not verified yet."
+        ),
+        JoinCheck::Waiting { inviter } => format!(
+            " Waiting for {inviter} to confirm your invite, so nobody here is verified yet."
+        ),
+        JoinCheck::Unchecked => String::new(),
+    };
+    format!(
+        "End-to-end encrypted.{who} The server passes messages along but cannot read them. /details says what it can see."
+    )
 }
 
 /// "socketchat 0.5.1", from the version in Cargo.toml.
@@ -314,21 +394,187 @@ pub fn details_lines(
         format!("You joined: {}", date(d.joined_unix)),
         format!("Muted: {}", if d.muted { "yes" } else { "no" }),
     ];
-    let mut settings = settings_lines(d.invite, d.slow_secs, d.topic_who);
-    // The server's own rule is stricter than the room's: say whose it is.
-    if d.server_members_invite == Some(false) && d.invite == WhoCanInvite::Anyone {
-        settings[0] =
-            "Who can invite: admins only, because this server lets only admins invite people"
-                .into();
-    }
-    lines.extend(settings);
+    lines.extend(room_settings_lines(
+        d.invite,
+        d.slow_secs,
+        d.topic_who,
+        d.server_members_invite,
+    ));
     if d.server_enforces == Some(false) {
         lines.push(OLD_SERVER_SETTINGS.into());
     }
     if let Some(c) = d.close.as_ref().filter(|c| c.yes > 0 && !c.kept) {
         lines.push(format!("Closing: {} of {} admins agree", c.yes, c.needed));
     }
+    lines.push(String::new());
+    lines.extend(
+        encryption_lines(d.post_quantum)
+            .into_iter()
+            .map(String::from),
+    );
     lines
+}
+
+/// The Encryption section of `/details`, for a room whose suite is
+/// post-quantum or not. Each claim matches SECURITY.md.
+pub fn encryption_lines(post_quantum: bool) -> [&'static str; 4] {
+    [
+        "Encryption: end-to-end, MLS (RFC 9420)",
+        if post_quantum {
+            "Post-quantum: yes for messages and files (ML-KEM-768 + X25519). Signatures and the link to the server are not post-quantum yet."
+        } else {
+            "Post-quantum: no. This room uses the standard suite (0x0001)."
+        },
+        "The server cannot see: messages, files, names, room name, topic.",
+        "The server sees: when messages move, message sizes in 256-byte blocks, file sizes, IP addresses, a random key for each member, which of them are admins, and the room's settings.",
+    ]
+}
+
+/// A room's settings as `/details` and `/status` show them: as
+/// [`settings_lines`] has them, unless the server's own rule on inviting,
+/// `server_members_invite`, is stricter than the room's, when the line
+/// says whose rule it is.
+fn room_settings_lines(
+    invite: WhoCanInvite,
+    slow_secs: u32,
+    topic: WhoCanSetTopic,
+    server_members_invite: Option<bool>,
+) -> Vec<String> {
+    let mut settings = settings_lines(invite, slow_secs, topic);
+    if server_members_invite == Some(false) && invite == WhoCanInvite::Anyone {
+        settings[0] =
+            "Who can invite: admins only, because this server lets only admins invite people"
+                .into();
+    }
+    settings
+}
+
+/// What `/status` says about the app that the client does not know: the
+/// theme in use, whether the mouse is on, and the update check from
+/// [`update_status`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppStatus {
+    pub theme: String,
+    pub mouse: bool,
+    pub updates: String,
+}
+
+/// The section headings of the `/status` box.
+pub const STATUS_HEADINGS: [&str; 4] = ["Connection", "You", "This room", "App"];
+
+/// The lines of the `/status` box and of `socketchat status`: a heading for
+/// each section, then one fact a line. `room` is the open room's name as
+/// the list shows it; `when` writes a time as a date and a time of day.
+pub fn status_lines(
+    s: &StatusView,
+    room: Option<&str>,
+    app: &AppStatus,
+    when: &dyn Fn(u64) -> String,
+) -> Vec<String> {
+    let [connection, you, this_room, app_heading] = STATUS_HEADINGS;
+    let mut lines = vec![connection.to_string()];
+    match &s.server {
+        None => lines.push("Server: none yet".into()),
+        Some(server) => {
+            lines.push(format!("Server: {}", server.host));
+            lines.push(format!("Port: {}", server.port));
+            lines.push(match &server.link {
+                Link::Connected { since_unix, .. } => {
+                    format!("State: connected since {}", when(*since_unix))
+                }
+                Link::Lost => "State: connection lost; reconnecting".into(),
+                Link::Unreachable(why) => format!("State: could not reach: {why}"),
+                Link::NotYet => "State: not connected yet".into(),
+            });
+            if let Link::Connected { protocol, .. } = server.link {
+                lines.push(format!("Protocol: {protocol}"));
+            }
+            lines.push(format!(
+                "Certificate fingerprint: {}",
+                fingerprint_text(&server.cert_fpr)
+            ));
+            match server.members_invite {
+                Some(true) => lines.push("Inviting into rooms: each room's setting decides".into()),
+                Some(false) => lines
+                    .push("Inviting into rooms: admins only, in every room on this server".into()),
+                None => {}
+            }
+        }
+    }
+    if s.other_servers > 0 {
+        lines.push(format!("Other servers: {}", s.other_servers));
+    }
+    lines.push(String::new());
+    lines.push(you.into());
+    lines.push(format!("Name: {}", s.name));
+    lines.push(format!(
+        "Your half of each safety number: {}",
+        s.safety_digits
+    ));
+    if let Some(server) = &s.server {
+        lines.push(format!("Rooms on this server: {}", server.rooms));
+    }
+    if let (Some(r), Some(name)) = (&s.room, room) {
+        lines.push(String::new());
+        lines.push(this_room.into());
+        lines.push(format!("Name: {name}"));
+        lines.push(format!(
+            "Kind: {}",
+            if r.is_dm { "direct chat" } else { "group chat" }
+        ));
+        lines.push(format!("Members: {}, {} verified", r.members, r.verified));
+        lines.push(format!("Admins: {}", r.admins));
+        lines.push(format!(
+            "Your role: {}",
+            if r.admin { "admin" } else { "member" }
+        ));
+        let server = s.server.as_ref();
+        lines.extend(room_settings_lines(
+            r.invite,
+            r.slow_secs,
+            r.topic_who,
+            server.and_then(|s| s.members_invite),
+        ));
+        let old = server
+            .is_some_and(|s| matches!(s.link, Link::Connected { protocol, .. } if protocol < 3));
+        if old {
+            lines.push(OLD_SERVER_SETTINGS.into());
+        }
+        lines.push(format!(
+            "Has a topic: {}",
+            if r.topic { "yes" } else { "no" }
+        ));
+        let [encryption, post_quantum, ..] = encryption_lines(r.post_quantum);
+        lines.push(encryption.into());
+        lines.push(format!("Suite: {}", r.suite));
+        lines.push(post_quantum.into());
+    }
+    lines.push(String::new());
+    lines.push(app_heading.into());
+    lines.push(format!("Version: {}", env!("CARGO_PKG_VERSION")));
+    lines.push(app.updates.clone());
+    lines.push(format!("Theme: {}", app.theme));
+    lines.push(format!("Mouse: {}", if app.mouse { "on" } else { "off" }));
+    lines.push(String::new());
+    lines.push("/details lists what the server can and cannot see in each room.".into());
+    lines
+}
+
+/// What `/status` says about the update check: what `/about` says (see
+/// [`update_about`]), and the newest release GitHub named when it last
+/// answered.
+pub fn update_status(
+    s: &socketchat_core::update::UpdateState,
+    env_off: bool,
+    when: &dyn Fn(u64) -> String,
+) -> String {
+    let said = update_about(s, env_off, when);
+    match (&s.latest, s.answered_unix) {
+        (Some(v), Some(_)) if s.on && !env_off => {
+            format!("{said} The newest release then was {v}.")
+        }
+        _ => said,
+    }
 }
 
 /// Said in a room's details when its server is from before 0.5.2.
@@ -402,19 +648,121 @@ fn fold(name: &str) -> String {
 /// after the cursor go through them in this order. Nothing typed matches
 /// every room.
 fn ranked<'a>(text: &str, groups: &'a [GroupView]) -> Vec<&'a GroupView> {
+    ranked_at(text, groups.iter().map(|g| g.name.as_str()))
+        .into_iter()
+        .map(|i| &groups[i])
+        .collect()
+}
+
+/// The places in `names` that `text` can mean, best first, by the rule
+/// [`ranked`] follows for rooms.
+fn ranked_at<'a>(text: &str, names: impl Iterator<Item = &'a str>) -> Vec<usize> {
     let t = fold(text);
-    let names: Vec<(String, &GroupView)> = groups.iter().map(|g| (fold(&g.name), g)).collect();
-    let exact = names.iter().filter(|(n, _)| *n == t);
-    let starts = names.iter().filter(|(n, _)| *n != t && n.starts_with(&t));
-    let first: Vec<&GroupView> = exact.chain(starts).map(|(_, g)| *g).collect();
+    let names: Vec<(usize, String)> = names.map(fold).enumerate().collect();
+    let exact = names.iter().filter(|(_, n)| *n == t);
+    let starts = names.iter().filter(|(_, n)| *n != t && n.starts_with(&t));
+    let first: Vec<usize> = exact.chain(starts).map(|(i, _)| *i).collect();
     if !first.is_empty() {
         return first;
     }
     names
         .iter()
-        .filter(|(n, _)| n.contains(&t))
-        .map(|(_, g)| *g)
+        .filter(|(_, n)| n.contains(&t))
+        .map(|(i, _)| *i)
         .collect()
+}
+
+/// What `/join` takes for each invite in `waiting`, each a number and a
+/// room, oldest first: newest first, one plain space between words, and
+/// each room name once, since `/join` with a name two invites share lists
+/// both by number. A room whose name is a number goes by the invite's own
+/// number, which `/join` reads before any room name.
+pub fn join_choices(waiting: &[(u64, String)]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for (number, room) in waiting.iter().rev() {
+        let room = single_spaced(room);
+        if out.iter().any(|o| fold(o) == fold(&room)) {
+            continue;
+        }
+        if room.bytes().all(|b| b.is_ascii_digit()) {
+            out.push(number.to_string());
+        } else {
+            out.push(room);
+        }
+    }
+    out
+}
+
+/// The command whose word Tab, Up and Down complete after it, `/invite `
+/// or `/join `, and the word as typed, when the message box holds one of
+/// them. After `/invite` that is one name, or a quoted name that may hold
+/// spaces; a name and a room, or `--dm`, is not completed. After `/join`
+/// it is any room name, but not a link.
+fn arg_typed(input: &str) -> Option<(&'static str, String)> {
+    if let Some(rest) = input.strip_prefix("/invite ") {
+        let typed = match rest.strip_prefix('"') {
+            Some(q) => {
+                let q = q.strip_suffix('"').unwrap_or(q);
+                if q.contains('"') {
+                    return None;
+                }
+                q
+            }
+            None if rest.contains(char::is_whitespace) || rest.starts_with('-') => return None,
+            None => rest,
+        };
+        return Some(("/invite ", typed.to_string()));
+    }
+    let rest = input.strip_prefix("/join ")?;
+    (!rest.contains("://")).then(|| ("/join ", rest.to_string()))
+}
+
+/// What can follow `head` for `typed`, best first: the names `/invite`
+/// takes, a name with spaces in quotes, or the rooms `/join` takes.
+fn arg_choices(head: &str, typed: &str, vm: &ViewModel) -> Vec<String> {
+    let all: Vec<&str> = if head == "/invite " {
+        // A quote cannot be typed inside a name: `/invite` reads it as
+        // the start or end of one.
+        vm.invite_names
+            .iter()
+            .map(String::as_str)
+            .filter(|n| !n.contains('"'))
+            .collect()
+    } else {
+        vm.join_rooms.iter().map(String::as_str).collect()
+    };
+    ranked_at(typed, all.iter().copied())
+        .into_iter()
+        .map(|i| {
+            let n = single_spaced(all[i]);
+            if head == "/invite " && n.contains(' ') {
+                format!("\"{n}\"")
+            } else {
+                n
+            }
+        })
+        .collect()
+}
+
+/// What the status line says when nothing can follow `head` for `typed`.
+fn no_arg(head: &str, typed: &str) -> String {
+    match (head, typed.is_empty()) {
+        ("/invite ", true) => "Nobody else shares a room with you yet.".into(),
+        ("/invite ", false) => format!("Nobody called {typed} shares a room with you."),
+        (_, true) => "No invite waits for you.".into(),
+        (_, false) => format!("No invite to {typed} waits for you."),
+    }
+}
+
+/// The next match after `idx` (`forward`) or the one before, going round
+/// `n` matches; with no match picked yet, the first or the last.
+fn step_at(idx: Option<usize>, forward: bool, n: usize) -> usize {
+    match (idx, forward) {
+        (None, true) => 0,
+        (None, false) => n - 1,
+        (Some(i), true) => (i + 1) % n,
+        (Some(i), false) => (i + n - 1) % n,
+    }
 }
 
 /// The room `/switch <text>` opens: the first of [`ranked`].
@@ -441,6 +789,18 @@ pub struct TabCycle {
     typed: String,
     /// The match the last press picked; `None` before the first pick.
     idx: Option<usize>,
+}
+
+/// Where Tab, Shift-Tab, Up and Down are in the names after `/invite` or
+/// the rooms after `/join`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArgCycle {
+    /// `/invite ` or `/join `.
+    head: &'static str,
+    /// The word as typed before the first press.
+    typed: String,
+    /// The match the last press picked.
+    idx: usize,
 }
 
 /// What one Tab does to a command word or theme name.
@@ -530,6 +890,9 @@ pub struct App {
     pub completion: Option<(String, usize, GroupId)>,
     /// While Tab completes a command word or theme name.
     pub tab_cycle: Option<TabCycle>,
+    /// While Tab, Shift-Tab, Up or Down complete a name after `/invite`
+    /// or a room after `/join`.
+    pub arg_cycle: Option<ArgCycle>,
     /// Commands to list on the help line after a Tab with several matches.
     pub hint: Option<Vec<String>>,
     /// The links the last `/invites` box listed; `/cancel <n>` takes the
@@ -554,6 +917,12 @@ pub struct App {
     /// What `/about` says about the update check.
     pub updates: String,
     pub(crate) hits: RefCell<Hits>,
+    /// Where each row of [`help_entries`] fell in the help box at the last
+    /// draw: its first line and how many lines it took.
+    pub(crate) help_layout: RefCell<Vec<(usize, usize)>>,
+    /// A press of the left button in text, and the selection a drag from
+    /// it made.
+    drag: Option<Drag>,
     /// The box on screen and when it first showed there. A click read
     /// before then was meant for something else, so it never presses the
     /// box's buttons.
@@ -564,7 +933,18 @@ pub struct App {
     earlier: HashMap<GroupId, Vec<String>>,
     /// Set while Up and Down show an earlier line.
     recall: Option<Recall>,
+    /// When the first of two Ctrl-C presses came; a second one within
+    /// [`QUIT_WINDOW`] quits.
+    quit_armed: Option<Instant>,
+    /// Files dropped on the window, waiting in the message box.
+    attachments: Vec<Attachment>,
 }
+
+/// How long after one Ctrl-C a second one quits.
+pub const QUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The status line after one Ctrl-C.
+pub const QUIT_AGAIN: &str = "Press Ctrl-C again to quit.";
 
 /// The room Tab picked, while the text still shows its name.
 fn tab_pick(
@@ -594,6 +974,81 @@ pub(crate) struct Hits {
     /// The box's buttons and other clickable lines, each with the key a
     /// click on it stands for.
     pub targets: Vec<(Rect, KeyCode)>,
+    /// Each line of a command in the help box, with that command's row of
+    /// [`help_entries`].
+    pub help_rows: Vec<(Rect, usize)>,
+    /// The messages' rows of text, for selecting them.
+    pub text: Option<TextArea>,
+    /// The open box's rows of text, when the mouse can select them.
+    pub box_text: Option<TextArea>,
+}
+
+/// The first line the help box shows so that all of row `pick` shows,
+/// moving from `offset` as little as it can. `layout` holds each row's
+/// first line and line count, and `(max, fits)` the furthest the box
+/// scrolls and the lines it shows; while lines below are hidden, the last
+/// of them says so.
+pub(crate) fn keep_in_view(
+    layout: &[(usize, usize)],
+    (max, fits): (usize, usize),
+    offset: usize,
+    pick: usize,
+) -> usize {
+    let Some(&(first, count)) = layout.get(pick) else {
+        return offset;
+    };
+    let offset = offset.min(max);
+    let shown = if offset < max {
+        fits.saturating_sub(1)
+    } else {
+        fits
+    };
+    if first < offset {
+        first
+    } else if first + count > offset + shown {
+        (first + count)
+            .saturating_sub(fits.saturating_sub(1))
+            .min(max)
+    } else {
+        offset
+    }
+}
+
+/// A press of the left button in text, and where a drag from it went.
+#[derive(Clone, Debug)]
+struct Drag {
+    area: Area,
+    /// Where the press came, and where the pointer is now.
+    anchor: Spot,
+    head: Spot,
+    /// The pointer moved with the button down: a selection, not a click.
+    moved: bool,
+    /// The button is still down.
+    held: bool,
+    /// The cell the pointer was last seen on.
+    at: (u16, u16),
+    /// What the text under the selection was when the press came: for
+    /// the messages, the open room, how many there were and the newest;
+    /// for a box, the box, scrolled to the top.
+    under: (Option<GroupId>, usize, Option<LineView>, Option<Modal>),
+    /// The width the rows were wrapped to.
+    width: usize,
+    /// The help box's row the press came on when it was already picked:
+    /// a release with no drag uses it.
+    use_row: Option<usize>,
+}
+
+/// A box as a selection in it sees it: scrolling leaves the text where
+/// it was, so the scroll is left out.
+fn unscrolled(m: &Option<Modal>) -> Option<Modal> {
+    m.clone().map(|m| match m {
+        Modal::Help { .. } => Modal::Help { offset: 0, pick: 0 },
+        Modal::Invites { rows, .. } => Modal::Invites { rows, offset: 0 },
+        Modal::Servers { rows, .. } => Modal::Servers { rows, offset: 0 },
+        Modal::Details { lines, .. } => Modal::Details { lines, offset: 0 },
+        Modal::Status { lines, .. } => Modal::Status { lines, offset: 0 },
+        m => m,
+    })
 }
 
 /// Whether `a` and `b` are the same box on screen: a box that scrolled or
@@ -606,6 +1061,7 @@ fn same_box(a: &Modal, b: &Modal) -> bool {
                 | (Modal::Invites { .. }, Modal::Invites { .. })
                 | (Modal::Servers { .. }, Modal::Servers { .. })
                 | (Modal::Details { .. }, Modal::Details { .. })
+                | (Modal::Status { .. }, Modal::Status { .. })
                 | (Modal::Invite { .. }, Modal::Invite { .. })
         )
 }
@@ -688,6 +1144,7 @@ impl App {
             member_cursor: 0,
             completion: None,
             tab_cycle: None,
+            arg_cycle: None,
             hint: None,
             invite_tokens: Vec::new(),
             server_ids: Vec::new(),
@@ -698,9 +1155,13 @@ impl App {
             update_notice: None,
             updates: String::new(),
             hits: RefCell::new(Hits::default()),
+            help_layout: RefCell::new(vec![]),
+            drag: None,
             shown: None,
             earlier: HashMap::new(),
             recall: None,
+            quit_armed: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -751,6 +1212,104 @@ impl App {
         self.recall = next;
     }
 
+    /// Whether Up and Down go through command words: the box holds a slash
+    /// and at least one letter that this person typed, not a line Up
+    /// brought back, and some command starts with them. While Tab goes
+    /// through command words, what was typed before the first Tab counts.
+    fn steps_commands(&self) -> bool {
+        if self.focus != Focus::Input || self.recalling() {
+            return false;
+        }
+        let typed = match &self.tab_cycle {
+            Some(c) if c.head.is_empty() => c.typed.as_str(),
+            Some(_) => return false,
+            None => self.input.as_str(),
+        };
+        typed.len() > 1
+            && typed.starts_with('/')
+            && !typed.contains(char::is_whitespace)
+            && !word_matches("", typed).is_empty()
+    }
+
+    /// Puts the next command word (`forward`) or the one before in the
+    /// box, from those that start with what was typed, going round.
+    fn step_word(&mut self, forward: bool) {
+        let (typed, idx) = match &self.tab_cycle {
+            Some(c) if c.head.is_empty() => (c.typed.clone(), c.idx),
+            _ => (self.input.clone(), None),
+        };
+        let words = word_matches("", &typed);
+        let n = words.len();
+        let i = match (idx, forward) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(i), true) => (i + 1) % n,
+            (Some(i), false) => (i + n - 1) % n,
+        };
+        self.input = words[i].clone();
+        self.hint = Some(words);
+        self.tab_cycle = Some(TabCycle {
+            head: "",
+            typed,
+            idx: Some(i),
+        });
+    }
+
+    /// The help box with row `pick` highlighted, scrolled so all of it
+    /// shows; the last command shows the end of the box.
+    fn help_at(&self, offset: usize, pick: usize) -> Modal {
+        let (max, fits) = self.box_scroll.get();
+        let offset = if pick + 1 == help_entries().len() {
+            max
+        } else {
+            keep_in_view(&self.help_layout.borrow(), (max, fits), offset, pick)
+        };
+        Modal::Help { offset, pick }
+    }
+
+    /// After PgUp or PgDn moved the help box to `offset`: the highlighted
+    /// row, moved to the nearest row that shows whole when it no longer
+    /// does.
+    fn help_pick_in_view(&self, offset: usize, pick: usize) -> usize {
+        let layout = self.help_layout.borrow();
+        let (max, fits) = self.box_scroll.get();
+        let shown = if offset < max {
+            fits.saturating_sub(1)
+        } else {
+            fits
+        };
+        let whole =
+            |(first, count): &(usize, usize)| *first >= offset && first + count <= offset + shown;
+        if layout.get(pick).is_none_or(whole) {
+            return pick;
+        }
+        let rows = layout.iter().enumerate().filter(|(_, r)| whole(r));
+        let near = if layout[pick].0 < offset {
+            rows.map(|(i, _)| i).next()
+        } else {
+            rows.map(|(i, _)| i).next_back()
+        };
+        near.unwrap_or(pick)
+    }
+
+    /// Enter on row `pick` of the help box: the box closes, and its command
+    /// runs as if typed, or goes in the message box when it needs more.
+    fn use_help_row(&mut self, pick: usize, vm: &ViewModel) -> Vec<Action> {
+        self.modal = None;
+        self.focus = Focus::Input;
+        let Some((usage, _)) = help_entries().get(pick).copied() else {
+            return vec![];
+        };
+        let cmd = command_of(usage);
+        if !usage.contains('<') && parse_command(&cmd).is_ok() {
+            self.input = cmd;
+            self.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), vm)
+        } else {
+            self.input = format!("{cmd} ");
+            vec![]
+        }
+    }
+
     /// Whether the message box shows an earlier line Up or Down brought
     /// back.
     pub fn recalling(&self) -> bool {
@@ -796,6 +1355,10 @@ impl App {
     /// sent it. A click on a box's button acts like that button's key, and
     /// only once the box was on screen before the click.
     pub fn handle_mouse(&mut self, m: MouseEvent, at: Instant, vm: &ViewModel) -> Vec<Action> {
+        // Off, the terminal keeps the mouse for selecting text.
+        if !self.mouse {
+            return vec![];
+        }
         let (x, y) = (m.column, m.row);
         let up = match m.kind {
             MouseEventKind::ScrollUp => Some(true),
@@ -811,12 +1374,23 @@ impl App {
                     (offset + WHEEL_ROWS).min(max)
                 }
             };
+            if let Some(Modal::Help { offset, pick }) = self.modal {
+                // The wheel moves the highlight, stopping at the ends.
+                let last = help_entries().len().saturating_sub(1);
+                let pick = if up {
+                    pick.saturating_sub(1)
+                } else {
+                    (pick + 1).min(last)
+                };
+                self.modal = Some(self.help_at(offset, pick));
+                return vec![];
+            }
             match &mut self.modal {
                 Some(
-                    Modal::Help { offset }
-                    | Modal::Invites { offset, .. }
+                    Modal::Invites { offset, .. }
                     | Modal::Servers { offset, .. }
-                    | Modal::Details { offset, .. },
+                    | Modal::Details { offset, .. }
+                    | Modal::Status { offset, .. },
                 ) => *offset = step(*offset),
                 Some(_) => {}
                 None if self.switcher.is_some() => {}
@@ -825,12 +1399,40 @@ impl App {
             }
             return vec![];
         }
-        if m.kind != MouseEventKind::Down(MouseButton::Left) {
-            return vec![];
+        match m.kind {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.drag_to(x, y);
+                return vec![];
+            }
+            MouseEventKind::Up(MouseButton::Left) => return self.let_go(x, y, vm),
+            MouseEventKind::Down(MouseButton::Left) => {}
+            _ => return vec![],
         }
+        // A new press ends the last selection.
+        self.drag = None;
         let hits = self.hits.borrow().clone();
         if self.modal.is_some() {
             let fresh = self.shown.as_ref().is_some_and(|(_, since)| at >= *since);
+            // A click on a command in the help box picks it; a click on the
+            // one already picked uses it, as Enter does.
+            let row = hits
+                .help_rows
+                .iter()
+                .find(|(r, _)| r.contains(Position { x, y }))
+                .map(|(_, i)| *i);
+            if let (Some(Modal::Help { offset, pick }), Some(i), true) =
+                (self.modal.clone(), row, fresh)
+            {
+                if i != pick {
+                    self.modal = Some(Modal::Help { offset, pick: i });
+                }
+                self.press(Area::Box, hits.box_text, x, y, vm);
+                // A release with no drag uses the row already picked.
+                if let Some(d) = &mut self.drag {
+                    d.use_row = (i == pick).then_some(i);
+                }
+                return vec![];
+            }
             let pressed = hits
                 .targets
                 .iter()
@@ -838,7 +1440,13 @@ impl App {
                 .map(|(_, code)| *code);
             return match pressed {
                 Some(code) if fresh => self.handle_key(KeyEvent::new(code, KeyModifiers::NONE), vm),
-                _ => vec![],
+                Some(_) => vec![],
+                None => {
+                    if hits.modal.is_some_and(|r| r.contains(Position { x, y })) {
+                        self.press(Area::Box, hits.box_text, x, y, vm);
+                    }
+                    vec![]
+                }
             };
         }
         if self.switcher.is_some() {
@@ -856,6 +1464,7 @@ impl App {
             }
         } else if hits.messages.contains(at) {
             self.focus = Focus::Messages;
+            self.press(Area::Messages, hits.text, x, y, vm);
         } else if hits.members.contains(at) {
             self.focus = Focus::Members;
             if let Some(i) = row_in(hits.members, x, y).filter(|i| *i < vm.members.len()) {
@@ -865,6 +1474,222 @@ impl App {
             self.focus = Focus::Input;
         }
         vec![]
+    }
+
+    /// What the selection holds the text under: see [`Drag::under`].
+    fn under(&self, vm: &ViewModel) -> (Option<GroupId>, usize, Option<LineView>, Option<Modal>) {
+        (
+            self.selected,
+            vm.lines.len(),
+            vm.lines.last().cloned(),
+            unscrolled(&self.modal),
+        )
+    }
+
+    /// A press of the left button at `(x, y)` in `area`'s text, which a
+    /// drag turns into a selection.
+    fn press(&mut self, which: Area, area: Option<TextArea>, x: u16, y: u16, vm: &ViewModel) {
+        let Some(area) = area else {
+            return;
+        };
+        if let Some((spot, _)) = area.spot(x, y) {
+            self.drag = Some(Drag {
+                area: which,
+                anchor: spot,
+                head: spot,
+                moved: false,
+                held: true,
+                at: (x, y),
+                under: self.under(vm),
+                width: area.width,
+                use_row: None,
+            });
+        }
+    }
+
+    /// Where the selection's text sits on screen, as the last draw put it.
+    fn area_of(&self, which: Area) -> Option<TextArea> {
+        let hits = self.hits.borrow();
+        match which {
+            Area::Messages => hits.text,
+            Area::Box => hits.box_text,
+        }
+    }
+
+    /// The pointer moved to `(x, y)` with the button down: the selection
+    /// grows or shrinks to it, and past the top or bottom of the text it
+    /// scrolls one row.
+    fn drag_to(&mut self, x: u16, y: u16) {
+        let Some(d) = self.drag.as_ref().filter(|d| d.held) else {
+            return;
+        };
+        let Some(area) = self.area_of(d.area) else {
+            return;
+        };
+        let Some((spot, side)) = area.spot(x, y) else {
+            return;
+        };
+        let which = d.area;
+        if let Some(d) = &mut self.drag {
+            d.head = spot;
+            d.moved = true;
+            d.at = (x, y);
+        }
+        match (which, side) {
+            (Area::Messages, -1) if area.more_above => self.scroll = self.scroll.saturating_add(1),
+            (Area::Messages, 1) if area.more_below => self.scroll = self.scroll.saturating_sub(1),
+            // The help box keeps its highlighted command in view, so the
+            // highlight moves to the next command past the edge, and the
+            // box scrolls to show it.
+            (Area::Box, -1 | 1) if matches!(self.modal, Some(Modal::Help { .. })) => {
+                let Some(Modal::Help { offset, .. }) = self.modal else {
+                    return;
+                };
+                let (top, bottom) = (
+                    area.top as usize,
+                    area.top as usize + area.rect.height as usize,
+                );
+                let layout = self.help_layout.borrow().clone();
+                let last = layout.len().saturating_sub(1);
+                let pick = if side < 0 {
+                    layout.iter().rposition(|(first, _)| *first < top)
+                } else {
+                    layout
+                        .iter()
+                        .position(|(first, count)| first + count > bottom)
+                        .or(Some(last))
+                };
+                if let Some(pick) = pick {
+                    self.modal = Some(self.help_at(offset, pick));
+                }
+            }
+            (Area::Box, -1 | 1) => {
+                let (max, _) = self.box_scroll.get();
+                if let Some(
+                    Modal::Invites { offset, .. }
+                    | Modal::Servers { offset, .. }
+                    | Modal::Details { offset, .. }
+                    | Modal::Status { offset, .. },
+                ) = &mut self.modal
+                {
+                    *offset = match side {
+                        -1 => offset.saturating_sub(1),
+                        _ => (*offset + 1).min(max),
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The button came up at `(x, y)`: a drag copies what it selected,
+    /// and a click with no drag does nothing more.
+    fn let_go(&mut self, x: u16, y: u16, vm: &ViewModel) -> Vec<Action> {
+        let Some(d) = self.drag.as_ref().filter(|d| d.held) else {
+            return vec![];
+        };
+        if !d.moved {
+            let use_row = d.use_row;
+            self.drag = None;
+            return match use_row {
+                Some(i) => self.use_help_row(i, vm),
+                None => vec![],
+            };
+        }
+        let spot = self.area_of(d.area).and_then(|a| a.spot(x, y));
+        if let Some(d) = &mut self.drag {
+            d.held = false;
+            if let Some((spot, _)) = spot {
+                d.head = spot;
+            }
+        }
+        match self.selected_text(vm) {
+            Some(text) if !text.is_empty() => vec![Action::CopySelected(text)],
+            _ => vec![],
+        }
+    }
+
+    /// The two ends of the selection in `which`, if one is made there.
+    pub(crate) fn selection(&self, which: Area) -> Option<(Spot, Spot)> {
+        self.drag
+            .as_ref()
+            .filter(|d| d.moved && d.area == which)
+            .map(|d| (d.anchor, d.head))
+    }
+
+    /// The text the mouse has selected, as it will be copied: what the
+    /// screen shows, with a line the screen wrapped as one line and the
+    /// indent under a message's first line left out.
+    pub fn selected_text(&self, vm: &ViewModel) -> Option<String> {
+        let d = self.drag.as_ref().filter(|d| d.moved)?;
+        let (start, end) = ordered(d.anchor, d.head);
+        Some(match d.area {
+            Area::Messages => {
+                // Rows count back from the newest, which is -1.
+                let rows = message_body(vm, d.width, start.row.unsigned_abs() as usize);
+                let n = rows.len() as i64;
+                picked(
+                    rows.iter().enumerate().map(|(i, r)| (i as i64 - n, r)),
+                    start,
+                    end,
+                )
+            }
+            Area::Box => {
+                let rows = box_rows(self, self.modal.as_ref()?, d.width)?;
+                picked(
+                    rows.iter().enumerate().map(|(i, (_, r))| (i as i64, r)),
+                    start,
+                    end,
+                )
+            }
+        })
+    }
+
+    /// Whether the button is held with the pointer past the top or bottom
+    /// of the selected text, where more rows can scroll into view.
+    pub fn drag_scrolling(&self) -> bool {
+        let Some(d) = self.drag.as_ref().filter(|d| d.held && d.moved) else {
+            return false;
+        };
+        let Some(area) = self.area_of(d.area) else {
+            return false;
+        };
+        match area.spot(d.at.0, d.at.1) {
+            Some((_, -1)) => area.more_above,
+            Some((_, 1)) => area.more_below,
+            _ => false,
+        }
+    }
+
+    /// While the button is held past the top or bottom of the selected
+    /// text, scrolls one row further, as moving the pointer there does.
+    pub fn drag_tick(&mut self) {
+        if let Some((x, y)) = self
+            .drag
+            .as_ref()
+            .filter(|_| self.drag_scrolling())
+            .map(|d| d.at)
+        {
+            self.drag_to(x, y);
+        }
+    }
+
+    /// Keeps the selection only while the text under it stays in place:
+    /// new messages, another room, another box or a window of another
+    /// width end it.
+    pub fn keep_selection(&mut self, vm: &ViewModel) {
+        let Some(d) = &self.drag else {
+            return;
+        };
+        let under = self.under(vm);
+        let width = self.area_of(d.area).map(|a| a.width);
+        let same = match d.area {
+            Area::Messages => d.under.0 == under.0 && d.under.1 == under.1 && d.under.2 == under.2,
+            Area::Box => d.under.3 == under.3,
+        };
+        if !same || width != Some(d.width) {
+            self.drag = None;
+        }
     }
 
     /// The room Enter in the switcher opens, which the switcher highlights.
@@ -882,23 +1707,71 @@ impl App {
             .collect()
     }
 
-    /// The room name Tab puts in place of `typed`: each further Tab moves
-    /// to the next match and wraps round.
-    fn complete(&mut self, typed: &str, vm: &ViewModel) -> Option<String> {
-        let (typed, next) = match self.completion.take() {
-            Some((t, i, _)) => (t, i + 1),
-            None => (typed.to_string(), 0),
+    /// The room name Tab puts in place of `typed`: each further Tab (or
+    /// Down, `forward`) moves to the next match, and Shift-Tab or Up to the
+    /// one before, going round.
+    fn complete(&mut self, typed: &str, vm: &ViewModel, forward: bool) -> Option<String> {
+        let (typed, idx) = match self.completion.take() {
+            Some((t, i, _)) => (t, Some(i)),
+            None => (typed.to_string(), None),
         };
         let matches = ranked(&typed, &vm.groups);
         if matches.is_empty() {
             self.status = Some(no_room(&typed));
             return None;
         }
-        let i = next % matches.len();
+        let i = step_at(idx, forward, matches.len());
         // One plain space between words, so the command it makes runs.
         let (name, id) = (single_spaced(&matches[i].name), matches[i].id);
         self.completion = Some((typed, i, id));
         Some(name)
+    }
+
+    /// Whether Tab and Shift-Tab, or with `spaced` Up and Down, go
+    /// through the rooms after `/switch`, the names after `/invite` or the
+    /// rooms after `/join`. Up and Down need the space after the command
+    /// word: before it they go through command words.
+    fn completes_args(&self, spaced: bool) -> bool {
+        let switch = match spaced {
+            true => self.input.starts_with("/switch "),
+            false => switch_text(&self.input).is_some(),
+        };
+        switch || self.arg_cycle.is_some() || arg_typed(&self.input).is_some()
+    }
+
+    /// Puts the next room or name (`forward`) after `/switch`, `/invite`
+    /// or `/join` in the message box, or the one before, from those that
+    /// fit what was typed, going round; or says on the status line that
+    /// none does.
+    fn step_arg(&mut self, vm: &ViewModel, forward: bool) {
+        if self.arg_cycle.is_none() {
+            if let Some(now) = switch_text(&self.input) {
+                let now = now.to_string();
+                if let Some(name) = self.complete(&now, vm, forward) {
+                    self.input = format!("/switch {name}");
+                }
+                return;
+            }
+        }
+        let (head, typed, idx) = match self.arg_cycle.take() {
+            Some(c) => (c.head, c.typed, Some(c.idx)),
+            None => match arg_typed(&self.input) {
+                Some((head, typed)) => (head, typed, None),
+                None => return,
+            },
+        };
+        let choices = arg_choices(head, &typed, vm);
+        if choices.is_empty() {
+            self.status = Some(no_arg(head, &typed));
+            return;
+        }
+        let i = step_at(idx, forward, choices.len());
+        self.input = format!("{head}{}", choices[i]);
+        self.arg_cycle = Some(ArgCycle {
+            head,
+            typed,
+            idx: i,
+        });
     }
 
     /// What Tab does to the command word (or `/theme` name) being typed;
@@ -984,6 +1857,15 @@ impl App {
                 return None;
             }
             format!("/switch {}", single_spaced(&rooms[next % rooms.len()].name))
+        } else if let Some((head, typed, next)) = match &self.arg_cycle {
+            Some(c) => Some((c.head, c.typed.clone(), c.idx + 1)),
+            None => arg_typed(&self.input).map(|(h, t)| (h, t, 0)),
+        } {
+            let choices = arg_choices(head, &typed, vm);
+            if choices.is_empty() {
+                return None;
+            }
+            format!("{head}{}", choices[next % choices.len()])
         } else {
             self.tab_step(true)?.text
         };
@@ -999,23 +1881,47 @@ impl App {
     /// Keys while a box is open. `None` passes the key on to the message
     /// box: typing over the invite list or a question closes it and goes
     /// on as typing.
-    fn modal_key(&mut self, m: Modal, k: KeyEvent) -> Option<Vec<Action>> {
+    fn modal_key(&mut self, m: Modal, k: KeyEvent, vm: &ViewModel) -> Option<Vec<Action>> {
         // Shift makes a capital Y; Ctrl or Alt with y is not an answer.
         let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
         let yes = plain && matches!(k.code, KeyCode::Char('y' | 'Y'));
         let typing = plain && matches!(k.code, KeyCode::Char(_));
         let act = match (m, yes) {
-            (Modal::Help { offset }, _) => match scrolled(offset, k.code, self.box_scroll.get()) {
-                Some(offset) => {
-                    self.modal = Some(Modal::Help { offset });
+            // Up and Down move the highlight, going round; PgUp and PgDn
+            // scroll a page and bring it along; Enter uses the command.
+            (Modal::Help { offset, pick }, _) => {
+                let n = help_entries().len();
+                let next = match k.code {
+                    KeyCode::Up => Some(self.help_at(offset, (pick + n - 1) % n)),
+                    KeyCode::Down => Some(self.help_at(offset, (pick + 1) % n)),
+                    KeyCode::PageUp | KeyCode::PageDown => {
+                        scrolled(offset, k.code, self.box_scroll.get()).map(|offset| Modal::Help {
+                            offset,
+                            pick: self.help_pick_in_view(offset, pick),
+                        })
+                    }
+                    KeyCode::Enter => return Some(self.use_help_row(pick, vm)),
+                    _ => None,
+                };
+                if let Some(m) = next {
+                    self.modal = Some(m);
                     return Some(vec![]);
                 }
-                None => None,
-            },
+                None
+            }
             (Modal::Details { lines, offset }, _) => {
                 match scrolled(offset, k.code, self.box_scroll.get()) {
                     Some(offset) => {
                         self.modal = Some(Modal::Details { lines, offset });
+                        return Some(vec![]);
+                    }
+                    None => None,
+                }
+            }
+            (Modal::Status { lines, offset }, _) => {
+                match scrolled(offset, k.code, self.box_scroll.get()) {
+                    Some(offset) => {
+                        self.modal = Some(Modal::Status { lines, offset });
                         return Some(vec![]);
                     }
                     None => None,
@@ -1072,32 +1978,86 @@ impl App {
         Some(act.into_iter().collect())
     }
 
+    /// Until when a second Ctrl-C quits, after a first one.
+    pub fn quit_deadline(&self) -> Option<Instant> {
+        self.quit_armed.map(|t| t + QUIT_WINDOW)
+    }
+
+    /// At `now`, past the time for a second Ctrl-C: the next one asks
+    /// again, and the status line no longer says to press it.
+    pub fn quit_expire(&mut self, now: Instant) {
+        if self.quit_deadline().is_some_and(|end| now > end) {
+            self.quit_armed = None;
+            if self.status.as_deref() == Some(QUIT_AGAIN) {
+                self.status = None;
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, k: KeyEvent, vm: &ViewModel) -> Vec<Action> {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // Ctrl-C quits on the second press, as in other terminal apps, so
+        // one meant to copy does not close the app. With text selected,
+        // the first copies it.
         if ctrl && k.code == KeyCode::Char('c') {
-            return vec![Action::Quit];
+            if self
+                .quit_deadline()
+                .is_some_and(|end| Instant::now() <= end)
+            {
+                return vec![Action::Quit];
+            }
+            if let Some(text) = self.selected_text(vm) {
+                self.drag = None;
+                self.quit_armed = None;
+                return vec![Action::CopySelected(text)];
+            }
+            self.quit_armed = Some(Instant::now());
+            self.status = Some(QUIT_AGAIN.into());
+            return vec![];
         }
+        self.quit_armed = None;
         // A status message stays on the help line until the next key.
         self.status = None;
+        // Any key ends a selection.
+        self.drag = None;
+        self.tidy_attachments(!matches!(k.code, KeyCode::Up | KeyCode::Down));
         // Up and Down go on through earlier lines; any other key makes what
         // the box holds the new draft.
         if !matches!(k.code, KeyCode::Up | KeyCode::Down) {
             self.recall = None;
         }
+        let tabs = matches!(k.code, KeyCode::Tab | KeyCode::BackTab);
+        let up_down = matches!(k.code, KeyCode::Up | KeyCode::Down);
+        // After `/switch `, `/invite ` or `/join `, Tab, Shift-Tab, Up and
+        // Down go through the rooms or names that fit; Up and Down only
+        // while the box holds what this person typed, not an earlier line.
+        let arg_step = self.modal.is_none()
+            && self.switcher.is_none()
+            && ((tabs && self.completes_args(false))
+                || (up_down
+                    && self.focus == Focus::Input
+                    && !self.recalling()
+                    && self.completes_args(true)));
+        // After a slash and a letter, Up and Down go through the commands
+        // as Tab does.
+        let word_step = up_down && !arg_step && self.steps_commands();
         // Tab runs on through a command word; any other key ends the run.
-        if !matches!(k.code, KeyCode::Tab | KeyCode::BackTab) {
+        if !tabs && !word_step {
             self.tab_cycle = None;
+        }
+        if !arg_step {
+            self.arg_cycle = None;
         }
         self.hint = None;
         // Each Tab moves on to the next room name; any other key ends that,
         // and Enter opens the room Tab picked.
-        let picked = if k.code == KeyCode::Tab {
+        let picked = if k.code == KeyCode::Tab || arg_step {
             None
         } else {
             self.completion.take()
         };
         if let Some(m) = self.modal.clone() {
-            if let Some(acts) = self.modal_key(m, k) {
+            if let Some(acts) = self.modal_key(m, k, vm) {
                 return acts;
             }
         }
@@ -1115,7 +2075,7 @@ impl App {
                     }
                 }
                 KeyCode::Tab => {
-                    if let Some(name) = self.complete(&q, vm) {
+                    if let Some(name) = self.complete(&q, vm, true) {
                         self.switcher = Some(name);
                     }
                 }
@@ -1133,11 +2093,8 @@ impl App {
             KeyCode::Char('k') if ctrl => {
                 self.switcher = Some(String::new());
             }
-            KeyCode::Tab if switch_text(&self.input).is_some() => {
-                let typed = switch_text(&self.input).unwrap_or("").to_string();
-                if let Some(name) = self.complete(&typed, vm) {
-                    self.input = format!("/switch {name}");
-                }
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down if arg_step => {
+                self.step_arg(vm, matches!(k.code, KeyCode::Tab | KeyCode::Down))
             }
             KeyCode::Tab | KeyCode::BackTab if self.tab_step(k.code == KeyCode::Tab).is_some() => {
                 if let Some(st) = self.tab_step(k.code == KeyCode::Tab) {
@@ -1181,6 +2138,7 @@ impl App {
             KeyCode::Down if self.focus == Focus::Messages => {
                 self.scroll = self.scroll.saturating_sub(1)
             }
+            KeyCode::Up | KeyCode::Down if word_step => self.step_word(k.code == KeyCode::Down),
             KeyCode::Up | KeyCode::Down if self.focus == Focus::Input => {
                 self.recall_step(k.code == KeyCode::Up)
             }
@@ -1191,7 +2149,9 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.focus = Focus::Input;
-                self.input.pop();
+                if !self.backspace_attachment() {
+                    self.input.pop();
+                }
             }
             KeyCode::Char(c) if !ctrl => {
                 self.focus = Focus::Input;
@@ -1204,6 +2164,9 @@ impl App {
                 }
             }
             KeyCode::Enter => {
+                if let Some(acts) = self.enter_attachments(vm) {
+                    return acts;
+                }
                 let raw = std::mem::take(&mut self.input);
                 let line = raw.trim();
                 if line.is_empty() {
@@ -1234,6 +2197,26 @@ impl App {
                     .iter()
                     .find(|g| Some(g.id) == self.selected)
                     .and_then(|g| g.ended);
+                // A slash alone opens the list of commands.
+                if line == "/" {
+                    return vec![Action::Command(Command::Help)];
+                }
+                // Letters only one command starts with mean that command:
+                // it runs, or goes in the box to type the rest.
+                let only = match parse_command(line) {
+                    Err(e) if e.starts_with("There is no") && !line.contains(' ') => {
+                        Some(word_matches("", line)).filter(|m| m.len() == 1)
+                    }
+                    _ => None,
+                };
+                let line = match only.as_ref().map(|m| m[0].as_str()) {
+                    Some(word) if crate::commands::needs_more(word) => {
+                        self.input = format!("{word} ");
+                        return vec![];
+                    }
+                    Some(word) => word,
+                    None => line,
+                };
                 if line.starts_with('/') {
                     match parse_command(line) {
                         Ok(Command::Switch(None)) => {
@@ -1282,13 +2265,21 @@ impl App {
     /// A paste, which the terminal hands over as one piece of text. It
     /// goes into the message box as typed text, line breaks included, and
     /// nothing is sent or run until Enter. An open box closes first; a
-    /// question it asked counts as answered no.
+    /// question it asked counts as answered no. A paste of nothing but
+    /// paths is a drop, as the `dropped` module tells.
     pub fn handle_paste(&mut self, text: &str) -> Vec<Action> {
         self.status = None;
+        self.drag = None;
+        self.tidy_attachments(true);
         self.recall = None;
         self.completion = None;
         self.tab_cycle = None;
+        self.arg_cycle = None;
         self.hint = None;
+        // Files dropped on the window, wherever they land.
+        if let Some(acts) = self.paste_files(text) {
+            return acts;
+        }
         let text = pasted(text);
         if let Some(q) = &mut self.switcher {
             q.push_str(&text.replace('\n', " "));

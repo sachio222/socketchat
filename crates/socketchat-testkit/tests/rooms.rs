@@ -4,7 +4,7 @@ use socketchat_core::close::{CloseOutcome, CLOSE_ASK_SECS};
 use socketchat_core::net::NetError;
 use socketchat_core::CoreError;
 use socketchat_proto::msg::{Entry, GroupId, Push};
-use socketchat_testkit::{drain, settle, TestClient, TestServer};
+use socketchat_testkit::{drain, settle, until, TestClient, TestServer};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn unix_now() -> u64 {
@@ -687,8 +687,7 @@ async fn alone_leaver_ends_locally_when_the_server_is_gone() {
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("Room").await.unwrap();
     drain(&mut a).await;
-    s.handle.shutdown();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    s.shut_down().await;
     a.leave(g).await.unwrap();
     assert!(a.test_traces(g).is_empty(), "{:?}", a.test_traces(g));
     assert!(!listed(&a, g));
@@ -1528,8 +1527,7 @@ async fn unreachable_server_does_not_blank_the_list() {
     a.join(&s2.server_invite()).await.unwrap();
     // Server links go on the newest server; the older one stops.
     let (link, _) = a.invite(None, false).await.unwrap();
-    s1.handle.shutdown();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    s1.shut_down().await;
     drain(&mut a).await;
     let rows = a.test_invite_rows();
     let list = a.invites().await.unwrap();
@@ -1607,7 +1605,10 @@ async fn reconnecting_keeps_pushes_from_the_old_connection() {
     let (g, mut a, mut b) = pair(&s).await;
     assert_eq!(a.test_pushed(g).0, 0);
     b.send_text(g, "pushed").await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    until("the push to reach a", || {
+        std::future::ready(a.test_pushes_waiting() >= 1)
+    })
+    .await;
     a.test_kill_connections();
     a.invites().await.unwrap();
     assert!(a.connected());

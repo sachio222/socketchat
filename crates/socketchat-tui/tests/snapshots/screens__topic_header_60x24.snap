@@ -2,7 +2,7 @@
 source: crates/socketchat-tui/tests/screens.rs
 expression: narrow
 ---
-┌ Chats ───────────┐┌ Book… ───────────┐┌ People ──────────┐
+┌ Chats ───────────┐┌ Book… ───────────┐┌ People 2 of 3 ✓ ─┐
 │# Book club       ││Topic: Piranesi,… ││✓ Ada* (you)      │
 │@ Bo             3││Sending it now.   ││✓ Bo              │
 │# Climbing Sat… 12││09:15:40 · Bo sent││  Cy              │

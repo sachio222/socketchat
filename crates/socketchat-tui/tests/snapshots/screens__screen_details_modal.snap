@@ -2,14 +2,10 @@
 source: crates/socketchat-tui/tests/screens.rs
 expression: s
 ---
-┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
-│# Book club       ││09:14:05 Ada: Who is bringing the book││✓ Ada* (you)      │
-│@ Bo             3││         list?                        ││✓ Bo              │
-│# Climbing Sat… 12││09:15:12 Bo: Me. Sending it now.      ││  Cy              │
-│                  ││09:15:40 · Bo sent books.pdf (84 KB)  ││                  │
-│ ┌ Room details ────────────────────────────────────────────────────────────┐ │
-│ │Name: Book club                                                           │ │
-│ │Server: chat.socketchat.org                                               │ │
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People 2 of 3 ✓ ─┐
+│#┌ Room details ────────────────────────────────────────────────────────────┐ │
+│@│Name: Book club                                                           │ │
+│#│Server: chat.socketchat.org                                               │ │
 │ │Topic: Piranesi, chapters 1 to 5 (set by Bo, verified, 2026-10-19)        │ │
 │ │Admins: Ada, Bo                                                           │ │
 │ │Members: 3                                                                │ │
@@ -20,9 +16,13 @@ expression: s
 │ │Slow mode: one message every 30 seconds for each member who isn't an admin│ │
 │ │Who can set the topic: admins only                                        │ │
 │ │Closing: 1 of 2 admins agree                                              │ │
-│ └────────────────────────────────────────────────────────────────[ Close ]─┘ │
-└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  What's on your mind? #Book club                               / for commands│
-└──────────────────────────────────────────────────────────────────────────────┘
-Esc close                                                       socketchat 0.5.2
+│ │                                                                          │ │
+│ │Encryption: end-to-end, MLS (RFC 9420)                                    │ │
+│ │Post-quantum: yes for messages and files (ML-KEM-768 + X25519). Signatures│ │
+│ │and the link to the server are not post-quantum yet.                      │ │
+│ │The server cannot see: messages, files, names, room name, topic.          │ │
+└─│The server sees: when messages move, message sizes in 256-byte blocks,    │─┘
+┌─│file sizes, IP addresses, a random key for each member, which of them are │─┐
+│ │admins, and the room's settings.                                          │s│
+└─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
+Esc close                                                       socketchat 0.6.0

@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: s
+---
+┌ Chats ───────────┐┌ Book club · offline ─────────────────┐┌ People 2 of 3 ✓ ─┐
+│#┌ Status ──────────────────────────────────────────────────────────────────┐ │
+│@│Connection                                                                │ │
+│#│Server: chat.socketchat.org                                               │ │
+│ │Port: 7444                                                                │ │
+│ │State: could not reach: connection refused                                │ │
+│ │Certificate fingerprint: 0025 4a6f 94b9 de03 284d 7297 bce1 062b 5075 9abf│ │
+│ │e409 2e53 789d c2e7 0c31 567b                                             │ │
+│ │Other servers: 1                                                          │ │
+│ │                                                                          │ │
+│ │You                                                                       │ │
+│ │Name: Ada                                                                 │ │
+│ │Your half of each safety number: 12345 67890 23456 78901 34567 89012      │ │
+│ │Rooms on this server: 3                                                   │ │
+│ │                                                                          │ │
+│ │This room                                                                 │ │
+│ │Name: Book club                                                           │ │
+│ │Kind: group chat                                                          │ │
+│ │Members: 3, 2 verified                                                    │ │
+└─│Admins: 1                                                                 │─┘
+┌─│Your role: admin                                                          │─┐
+│ │↓ more                                                                    │s│
+└─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
+Esc close                                                       socketchat 0.6.0

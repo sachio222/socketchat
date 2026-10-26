@@ -188,7 +188,7 @@ async fn connections_per_address_are_capped() {
     assert_eq!(third.recv().await, None);
     // Closing one frees its slot.
     drop(two);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    connections_down_to(&e.h, 1).await;
     let mut again = Raw::connect(e.h.addr, e.h.cert_fpr).await;
     again.hello().await;
     one.challenge().await;

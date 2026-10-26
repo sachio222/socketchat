@@ -2,27 +2,27 @@
 source: crates/socketchat-tui/tests/screens.rs
 expression: at_end
 ---
-┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People 2 of 3 ✓ ─┐
 │#┌ Commands ────────────────────────────────────────────────────────────────┐ │
-│@│/servers              see your servers and whether each is connected      │ │
-│#│/forget <number>      delete a server and its rooms from this computer    │ │
-│ │/mute                 hide this room's new-message count                  │ │
-│ │/unmute               show this room's new-message count again            │ │
-│ │/details              see this room's admins, size and age                │ │
-│ │/settings             see this room's settings                            │ │
-│ │/settings invite      admins or anyone: who can bring people in (admins)  │ │
-│ │/settings slow        seconds or off: how long members wait between       │ │
-│ │                      messages (admins)                                   │ │
-│ │/settings topic       admins or anyone: who can set the topic (admins)    │ │
-│ │/clear                delete this room's messages from this computer      │ │
+│@│                      messages (admins)                                   │ │
+│#│/settings topic       admins or anyone: who can set the topic (admins)    │ │
+│ │/status               see the server, connection, this room and the app   │ │
+│ │/switch [room]        open a room; Tab or Up/Down completes the name      │ │
 │ │/theme [name]         see or change the colors: phosphor or classic       │ │
-│ │/mouse [on|off]       turn mouse clicks and scrolling on or off           │ │
+│ │/title <name>         rename this room for everyone (admins)              │ │
+│ │/topic [text]         see or set the topic; /topic --clear removes it     │ │
+│ │/unmute               show this room's new-message count again            │ │
 │ │/updates [on|off]     turn the daily check for a new version on or off    │ │
-│ │/about                see the version and what Socketchat is              │ │
-│ │/quit                 close Socketchat                                    │ │
+│ │/verify <name>        compare safety numbers with someone                 │ │
+│ │/ then Enter          open this list to pick a command                    │ │
+│ │/s then Up/Down       step through the commands that start with /s        │ │
+│ │Tab or Up/Down        step through the rooms or names that fit after      │ │
+│ │                      /switch, /invite or /join                           │ │
 │ │Up/Down               bring back your earlier lines in this room          │ │
-└─│                                                                          │─┘
-┌─│To select text while the mouse is on, hold Shift as you drag (Option or Fn│─┐
-│ │on a Mac), or type /mouse off.                                            │s│
+│ │Ctrl-C Ctrl-C         quit; one Ctrl-C copies the text you selected       │ │
+│ │                                                                          │ │
+└─│Drag over messages or the text in a box to copy it. To select with your   │─┘
+┌─│terminal instead, hold Shift as you drag (Option or Fn on a Mac), or type │─┐
+│ │/mouse off.                                                               │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Up/Down scroll · Esc close                                      socketchat 0.5.2
+Up/Down pick a command · Enter use it · Esc close               socketchat 0.6.0

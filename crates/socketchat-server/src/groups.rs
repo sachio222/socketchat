@@ -355,6 +355,7 @@ pub fn create_group(
     }
     // The whole check runs without the database lock, against storage
     // that is thrown away, so a large group cannot hold up other requests.
+    state.cfg.new_room_check_hold.pass();
     let (vgi, tree) = match parse_new_group(group_info, ratchet_tree) {
         Ok(parsed) => parsed,
         Err(why) => return refused(why),
@@ -645,8 +646,9 @@ pub fn post(
             return Response::Error("could not store the message".into());
         };
         quota::note_stored(state, cost, 0);
-        drop(guard);
         push_entry(state, cs, &group, seq, mls, &old_members);
+        drop(guard);
+        state.cfg.post_written_hold.pass();
         return Response::Posted { seq };
     }
 
@@ -710,8 +712,9 @@ pub fn post(
         return Response::Error("could not store the message".into());
     };
     quota::note_stored(state, cost, 0);
-    drop(guard);
     push_entry(state, cs, &group, seq, mls, &old_members);
+    drop(guard);
+    state.cfg.post_written_hold.pass();
     Response::Posted { seq }
 }
 
@@ -787,6 +790,7 @@ fn post_commit(
     if !delay.is_zero() {
         std::thread::sleep(delay);
     }
+    state.cfg.commit_check_hold.pass();
     let processed = match pg.process_message(&RustCrypto::default(), pm) {
         Ok(p) => p,
         Err(e) => return Response::Refused(format!("the group change did not check out: {e}")),
@@ -978,10 +982,6 @@ fn post_commit(
     if left || welcomed.is_some() {
         crate::db::checkpoint(&guard);
     }
-    drop(guard);
-    for f in unwanted {
-        let _ = std::fs::remove_dir_all(crate::files::file_dir(state, &f));
-    }
     if let Some(w) = welcomed {
         let mb = w.mailbox;
         state
@@ -989,6 +989,11 @@ fn post_commit(
             .push_many(&[mb], &ServerFrame::Push(Push::Welcome(w)), None);
     }
     push_entry(state, cs, &group, seq, mls, &old_members);
+    drop(guard);
+    state.cfg.post_written_hold.pass();
+    for f in unwanted {
+        let _ = std::fs::remove_dir_all(crate::files::file_dir(state, &f));
+    }
     Response::Posted { seq }
 }
 
@@ -1002,6 +1007,11 @@ fn is_joined(db: &Connection, group: &Gid, k: &Key) -> bool {
     .unwrap_or(false)
 }
 
+/// Pushes a new entry to the room. Called before the write lets go of the
+/// database lock, so the push is queued on every member's connection ahead
+/// of the answer to anything that member asks next, and pushes leave in log
+/// order: a member told it is out of the room already holds the commit
+/// that took it out.
 fn push_entry(state: &State, cs: &ConnState, group: &Gid, seq: u64, mls: &[u8], to: &[Key]) {
     let frame = ServerFrame::Push(Push::Entry {
         group: *group,

@@ -2,11 +2,12 @@
 source: crates/socketchat-tui/tests/screens.rs
 expression: "render(&app, &crew(), 100, 50)"
 ---
-┌ Chats ───────────┐┌ Book club ───────────────────────────────────────────────┐┌ People ──────────┐
-│# Book club       ││09:14:05 Ada: Who is bringing the book list?              ││✓ Ada* (you)      │
-│@ Bo       ┌ Invite link ─────────────────────────────────────────────────────────────┐           │
-│# Climbing │Send this link to one person. It works once and expires in 2 hours. Anyone│           │
-│           │who has it can ask to join.                                               │           │
+┌ Chats ───────────┐┌ Book club ───────────────────────────────────────────────┐┌ People 2 of 3 ✓ ─┐
+│# Book club┌ Invite link ─────────────────────────────────────────────────────────────┐(you)      │
+│@ Bo       │Send this link to one person. It works once and expires in 2 hours. Anyone│           │
+│# Climbing │who has it can ask to join. They can paste it into an open chat with      │           │
+│           │/join. To invite someone you already share a room with, type /invite and  │           │
+│           │their name.                                                               │           │
 │           │                                                                          │           │
 │           │socketchat://chat.example.com:7444/j/AAECAwQFBgcICQoLDA0ODw#3q2-7wABAgMEBQ│           │
 │           │YHCAkKCwwNDg8QERITFBUWFxgZGhs.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.│           │
@@ -46,9 +47,8 @@ expression: "render(&app, &crew(), 100, 50)"
 │           │      █ ███ █ ▀▄  ▄█▀▀▀█ ▄ ▄ █▄   ███▀██ ▄█    ▀█▀ ▀▀▄▀▀█ ▀█▀█▀▄▀ ▄       │           │
 │           │      █ ▀▀▀ █   ▀ ▀█▀▄█▀▄▄ ▄▄  ▄ ▀ █▀▄  ▄█   ▀▀▀ █ █▀█  ▀█▄▄ ▄ ▀██        │           │
 │           │      ▀▀▀▀▀▀▀ ▀ ▀ ▀▀▀    ▀▀▀▀▀▀▀▀  ▀ ▀       ▀  ▀   ▀ ▀ ▀▀▀▀  ▀▀▀▀▀       │           │
-│           │                                                                          │           │
 └───────────│                                                                          │───────────┘
-┌───────────└────────────────────────────────────────────────────────────────[ Close ]─┘───────────┐
-│  What's on your mind? #Book club                                                   / for commands│
+┌───────────│                                                                          │───────────┐
+│  What's on└────────────────────────────────────────────────────────────────[ Close ]─┘or commands│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-C copy an invite message · Esc close                                                socketchat 0.5.2
+C copy an invite message · Esc close                                                socketchat 0.6.0

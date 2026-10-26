@@ -217,6 +217,7 @@ impl Client {
         let gone = self.store.forget_server(server_id)?;
         self.conns.remove(&server_id);
         self.last_error.remove(&server_id);
+        self.connected_at.remove(&server_id);
         let mut rooms = 0;
         for gid in &gone {
             if let Some(mut live) = self.groups.remove(gid) {

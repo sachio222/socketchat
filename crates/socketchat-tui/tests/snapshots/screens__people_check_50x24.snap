@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render(&app, &vm, 50, 24)"
+---
+┌ Chats ───────────┐┌ Book… ───────────┐┌ ! ─────┐
+│# Book club       ││09:15:40 · Bo sent││✓ * (you│
+│@ Bo             3││books.pdf (84 KB) ││✓ Bo    │
+│# Climbing Sat… 12││09:16:58 Cy: Got  ││  Cy    │
+│                  ││it, thanks.       ││! Bo    │
+│                  ││Saturday still    ││        │
+│                  ││works for me, and ││        │
+│                  ││I can bring snacks││        │
+│                  ││for everyone.     ││        │
+│                  ││09:17:30 · Bo     ││        │
+│                  ││joined with a     ││        │
+│                  ││different key from││        │
+│                  ││the Bo you        ││        │
+│                  ││verified. Treat   ││        │
+│                  ││them as someone   ││        │
+│                  ││new until you     ││        │
+│                  ││compare safety    ││        │
+│                  ││numbers: /verify  ││        │
+│                  ││Bo                ││        │
+└──────────────────┘└──────────────────┘└────────┘
+┌────────────────────────────────────────────────┐
+│  What's on your mind? #Book club               │
+└────────────────────────────────────────────────┘
+Enter send · /help commands · Tab move · Ctrl-K s…

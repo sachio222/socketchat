@@ -3,13 +3,9 @@ source: crates/socketchat-tui/tests/servers.rs
 expression: "render(&app, &crew(), 80, 24)"
 ---
 ┌ Chats ───────────┐┌ Book club · chat.socketchat.org ─────┐┌ People ──────────┐
-│# Book club       ││                                      ││                  │
-│# Climbing Saturd…││                                      ││                  │
-│# Old crew        ││                                      ││                  │
-│                  ││                                      ││                  │
-│ ┌ Room details ────────────────────────────────────────────────────────────┐ │
-│ │Name: Book club                                                           │ │
-│ │Server: chat.socketchat.org                                               │ │
+│#┌ Room details ────────────────────────────────────────────────────────────┐ │
+│#│Name: Book club                                                           │ │
+│#│Server: chat.socketchat.org                                               │ │
 │ │Topic: none                                                               │ │
 │ │Admins: Ada                                                               │ │
 │ │Members: 2                                                                │ │
@@ -19,10 +15,14 @@ expression: "render(&app, &crew(), 80, 24)"
 │ │Who can invite: anyone in the room                                        │ │
 │ │Slow mode: off                                                            │ │
 │ │Who can set the topic: admins only                                        │ │
-│ └────────────────────────────────────────────────────────────────[ Close ]─┘ │
-│                  ││                                      ││                  │
-└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  What's on your mind? #Book club                               / for commands│
+│ │                                                                          │ │
+│ │Encryption: end-to-end, MLS (RFC 9420)                                    │ │
+│ │Post-quantum: yes for messages and files (ML-KEM-768 + X25519). Signatures│ │
+│ │and the link to the server are not post-quantum yet.                      │ │
+│ │The server cannot see: messages, files, names, room name, topic.          │ │
+│ │The server sees: when messages move, message sizes in 256-byte blocks,    │ │
+└─│file sizes, IP addresses, a random key for each member, which of them are │─┘
+┌─│admins, and the room's settings.                                          │─┐
+│ └────────────────────────────────────────────────────────────────[ Close ]─┘s│
 └──────────────────────────────────────────────────────────────────────────────┘
-Esc close                                                       socketchat 0.5.2
+Esc close                                                       socketchat 0.6.0

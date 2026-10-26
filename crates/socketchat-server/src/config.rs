@@ -100,6 +100,25 @@ pub struct Config {
     #[serde(skip)]
     #[doc(hidden)]
     pub commit_check_delay: CheckDelay,
+    /// Holds one group change's check, outside the database lock, until a
+    /// test lets it go. Not read from the file; tests use it to make a
+    /// change land while another is being checked, without guessing how
+    /// long the check takes.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub commit_check_hold: CheckHold,
+    /// Holds the check of one new room's tree, outside the database lock,
+    /// until a test lets it go. Not read from the file; tests use it to
+    /// ask for other things while a new room is being checked.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub new_room_check_hold: CheckHold,
+    /// Holds one post after it is written and the database lock is let
+    /// go, before the server answers it. Not read from the file; tests use
+    /// it to ask for other things between a write and its answer.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub post_written_hold: CheckHold,
 }
 
 /// A pause that every copy of one [`Config`] shares, so a test can turn it
@@ -124,6 +143,141 @@ impl CheckDelay {
 impl PartialEq for CheckDelay {
     fn eq(&self, other: &Self) -> bool {
         self.get() == other.get()
+    }
+}
+
+/// A hold at one point in the server, outside the database lock, which
+/// every copy of one [`Config`] shares: the check of a group change, the
+/// check of a new room, or a post between its write and its answer. A test
+/// arms it with [`CheckHold::hold_next`], waits with
+/// [`HeldCheck::reached`] until a request has stopped there, does what
+/// must happen meanwhile, then lets it go with [`HeldCheck::release`], or
+/// by dropping the [`HeldCheck`] if the test fails first. Other requests
+/// pass straight through. Off unless a test arms it; the server then pays
+/// one atomic load each time a request passes.
+///
+/// A held check goes on by itself after [`HOLD_LIMIT`], and
+/// [`HeldCheck::release`] then fails the test. A server that makes other
+/// requests wait on a held check can stall every worker thread, timers
+/// included, so without the limit such a test would hang, not fail.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct CheckHold(std::sync::Arc<HoldInner>);
+
+#[derive(Debug, Default)]
+struct HoldInner {
+    armed: std::sync::atomic::AtomicBool,
+    state: std::sync::Mutex<HoldState>,
+    released: std::sync::Condvar,
+    reached: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct HoldState {
+    catch_next: bool,
+    released: bool,
+    expired: bool,
+}
+
+/// Longest a check stays held. Far past anything a passing test spends
+/// while holding one; a request that gets no answer for 5 seconds fails
+/// the test connection before this.
+#[doc(hidden)]
+pub const HOLD_LIMIT: Duration = Duration::from_secs(30);
+
+impl CheckHold {
+    /// Stops the next request to reach the hold until it is released.
+    #[must_use = "dropping the hold releases it at once"]
+    pub fn hold_next(&self) -> HeldCheck {
+        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.catch_next = true;
+        st.released = false;
+        st.expired = false;
+        self.0
+            .armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        HeldCheck(self.clone())
+    }
+
+    /// Called by the server on a blocking thread at the hold's point: waits
+    /// there if a test asked to hold this one.
+    pub(crate) fn pass(&self) {
+        if !self.0.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !st.catch_next {
+            return;
+        }
+        st.catch_next = false;
+        self.0.reached.notify_one();
+        let until = std::time::Instant::now() + HOLD_LIMIT;
+        while !st.released {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                st.expired = true;
+                return;
+            }
+            st = self
+                .0
+                .released
+                .wait_timeout(st, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+/// A test's hand on the server, not a setting: any two compare equal.
+impl PartialEq for CheckHold {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// The hold [`CheckHold::hold_next`] set. Releasing or dropping it lets
+/// the held check go on.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct HeldCheck(CheckHold);
+
+impl HeldCheck {
+    /// Returns once a request has stopped at the hold.
+    /// Panics after a minute, so a request that never comes fails the test
+    /// instead of hanging it.
+    pub async fn reached(&self) {
+        tokio::time::timeout(Duration::from_secs(60), self.0 .0.reached.notified())
+            .await
+            .expect("no request reached the hold within a minute");
+    }
+
+    /// Lets the held check go on. Panics if it went on by itself after
+    /// [`HOLD_LIMIT`]: something the test did meanwhile waited on it.
+    pub fn release(self) {
+        let expired = self
+            .0
+             .0
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expired;
+        assert!(
+            !expired,
+            "the check was held {HOLD_LIMIT:?} and went on by itself: something waited on it"
+        );
+    }
+}
+
+impl Drop for HeldCheck {
+    fn drop(&mut self) {
+        let inner = &self.0 .0;
+        let mut st = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.catch_next = false;
+        st.released = true;
+        inner
+            .armed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        inner.released.notify_all();
     }
 }
 
@@ -236,6 +390,9 @@ impl Default for Config {
             timing: Timing::default(),
             protocol_max: socketchat_proto::PROTOCOL_VERSION,
             commit_check_delay: CheckDelay::default(),
+            commit_check_hold: CheckHold::default(),
+            new_room_check_hold: CheckHold::default(),
+            post_written_hold: CheckHold::default(),
         }
     }
 }

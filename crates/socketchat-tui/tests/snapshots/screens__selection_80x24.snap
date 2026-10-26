@@ -1,0 +1,31 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render_selection(&app, &vm, 80, 24)"
+---
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People 2 of 3 ✓ ─┐
+│# Book club       ││09:14:05 Ada: Who is bringing the book││✓ Ada* (you)      │
+│@ Bo             3││         list?                        ││✓ Bo              │
+│# Climbing Sat… 12││09:15:12 Bo: Me. Sending it now.      ││  Cy              │
+│                  ││09:15:40 · Bo sent books.pdf (84 KB)  ││                  │
+│                  ││09:16:58 Cy: Got it, thanks. Saturday ││                  │
+                                                  ^^^^^^^^
+│                  ││         still works for me, and I can││                  │
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+│                  ││         bring snacks for everyone.   ││                  │
+                              ^^^^^^^^^^^^
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+│                  ││                                      ││                  │
+└──────────────────┘└──────────────────────────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  What's on your mind? #Book club                               / for commands│
+└──────────────────────────────────────────────────────────────────────────────┘
+Drag to copy · PgUp/PgDn or Up/Down scroll · Tab move           socketchat 0.6.0

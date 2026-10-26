@@ -397,6 +397,11 @@ fn source(ip: IpAddr) -> IpAddr {
 pub struct IpSlot(Arc<State>, IpAddr);
 
 impl PerIp {
+    /// Connections holding a slot, over every address.
+    pub fn total(&self) -> usize {
+        relock(&self.inner).values().sum()
+    }
+
     /// A slot for a connection from `ip`, or None when that address holds
     /// `max` already.
     pub fn take(state: &Arc<State>, ip: IpAddr, max: usize) -> Option<IpSlot> {

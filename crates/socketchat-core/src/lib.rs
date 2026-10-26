@@ -3,6 +3,7 @@
 //! Tests drive several of these at once against a real server; the terminal
 //! app is one front end on top.
 
+pub mod add;
 pub mod appmsg;
 pub mod client;
 pub mod close;

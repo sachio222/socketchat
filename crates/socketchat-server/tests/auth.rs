@@ -215,7 +215,7 @@ async fn connection_limit_enforced() {
     );
     assert_eq!(c.recv().await, None);
     drop(a);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    common::connections_down_to(&h, 1).await;
     let mut d2 = Raw::connect(h.addr, h.cert_fpr).await;
     d2.hello().await;
 }

@@ -26,6 +26,7 @@ fn vm() -> ViewModel {
             notice: false,
             mine: true,
             topic: false,
+            command: None,
         }],
         members: vec![MemberLine {
             key: Key([1; 32]),
@@ -33,10 +34,13 @@ fn vm() -> ViewModel {
             verified: true,
             admin: false,
             me: true,
+            changed_key: false,
         }],
         connected: true,
         server: None,
         topic: None,
+        invite_names: vec![],
+        join_rooms: vec![],
     }
 }
 

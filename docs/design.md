@@ -83,24 +83,27 @@ socketchat                            # opens the chat screen
 - Others see that name by default. Anyone can rename a contact on their own screen; only they see the new name.
 - Names are not unique and cannot be searched.
 - Trust follows the key, not the name. A name change posts a notice in every shared chat. Someone new who calls themselves "Ana" does not inherit Ana's verified mark.
+- The app remembers each name a verified person showed under, with their identity key, after they or you leave the room. While someone shows under one of those names with a different identity key and is not verified, the People title reads "People ! check" and their row carries a `!`. When their name arrives in the room, the room also says once: "Ana joined with a different key from the Ana you verified. Treat them as someone new until you compare safety numbers: /verify Ana". Names match as `/verify` matches them, ignoring spacing, invisible characters and the case of ASCII letters; look-alike letters from other alphabets do not match. The mark clears once the person is verified or leaves. Weekly key refreshes keep the same identity key and say nothing.
 - Display names travel inside encrypted messages. The server never sees them.
 
 ### Verification
 
 - An invite link carries the fingerprint of the inviter's identity key. When the new member's app receives the Welcome, it checks the invite against that key. It marks the inviter verified once the inviter's app confirms the join from inside the group, and until then says it is waiting for them. A server that tries to insert itself fails this check and the app shows a red warning.
 - `/verify <name>` shows the safety number and a QR code for an in-person check.
-- The member list shows a mark beside each verified person.
+- The member list shows a mark beside each verified person, and its title counts the marks: "People 2 of 3 ✓" means two of the three people listed, you included, are verified. A narrow pane shortens it to "People 2/3 ✓" or "2/3 ✓".
 
 ### The chat screen
 
 A terminal interface with four areas:
 
 - Left: groups and direct messages, with unread counts.
-- Middle: messages, newest at the bottom, with time and sender. Under the room's name, the first line holds its topic, cut to the window.
-- Right: members of the current group, with verified marks.
+- Middle: messages, newest at the bottom, with time and sender. Under the room's name, the first line holds its topic, cut to the window. Each room shows one line in the notice color when it is made or joined: "End-to-end encrypted. Only the people in the People list can read this room. The server passes messages along but cannot read them. /details says what it can see." A direct chat says "Only the two of you can read this chat." While a join waits for its inviter, the middle sentence names who it waits for; after a failed invite check the red warning stays and the line leaves that sentence out. Rooms made before this line get it once, after their newest message, the first time they open. It is the app's own line, so no message can pass for it.
+- `/details` ends with an Encryption section read from the room's own MLS suite: whether messages and files have post-quantum key exchange, what the server cannot see and what it sees.
+- `/status` shows one box with a heading for each section and one fact a line, as IRC clients lay out server information and Element its session details. Connection: the open room's server (or, with no room open, the one new rooms go on), its port, whether the app is connected and since when, the protocol in use, the pinned certificate's fingerprint and the server's rule on inviting into rooms. You: your name, your half of each safety number and your rooms on that server. This room: its name, kind, members and how many are verified (as the People title counts them), admins, your role, its settings, whether it has a topic, and its encryption in the words `/details` uses, with the suite's name and number. App: version, update check, theme and mouse. A last line points to `/details` for what the server can see. The box reads what the app already holds and makes no new connection; over a connection that is up, it asks the server for its rule on inviting. `socketchat status [--group <name>]` syncs first, then prints the same lines. Servers do not tell apps their Socketchat version, only the protocol, so the box shows the protocol.
+- Right: members of the current group, with verified marks, under a title that counts them.
 - Bottom: the input line and a one-line help bar with the keys for the current area.
 
-Keys: Tab moves between areas, or completes a command that starts with `/`; Ctrl-K opens a quick switcher; Up and Down in the message box bring back the lines sent in the open room, kept in memory only; Page Up and Page Down scroll; Enter sends; Esc cancels. The mouse opens a room, moves between areas, scrolls and presses the buttons on boxes, until `/mouse off` gives it back to the terminal. Slash commands: `/invite`, `/invite --dm`, `/join <link>`, `/new <group name>`, `/dm <name>`, `/send <path>`, `/save <file> [dir]`, `/verify <name>`, `/rename <name> <new>`, `/name <new>`, `/kick <name>`, `/topic [text]`, `/topic --clear`, `/settings`, `/leave`, `/servers`, `/forget <number>`, `/theme`, `/mouse on|off`, `/help`, `/quit`.
+Keys: Tab moves between areas, or completes a command that starts with `/`, the room after `/switch`, the name after `/invite` and the invited room after `/join`, as Up and Down also do after those three; Ctrl-K opens a quick switcher; Up and Down in the message box bring back the lines sent in the open room, kept in memory only; Page Up and Page Down scroll; Enter sends; Esc cancels. The mouse opens a room, moves between areas, scrolls, presses the buttons on boxes and copies the text it drags over, until `/mouse off` gives it back to the terminal. Slash commands: `/invite`, `/invite --dm`, `/join <link>`, `/new <group name>`, `/dm <name>`, `/invite <name>`, `/join <room>`, `/send <path>`, `/save <file> [dir]`, `/verify <name>`, `/rename <name> <new>`, `/name <new>`, `/kick <name>`, `/topic [text]`, `/topic --clear`, `/settings`, `/status`, `/leave`, `/servers`, `/forget <number>`, `/theme`, `/mouse on|off`, `/help`, `/quit`.
 
 The screen stays readable at 80 by 24 characters and works over SSH.
 

@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: narrow
+---
+┌ Chats ───────────┐┌ Book… ───────────┐┌ People 1 of 1 ✓ ─┐
+│# Book club       ││09:10:00 ·        ││✓ Ada* (you)      │
+│@ Bo             3││End-to-end        ││                  │
+│# Climbing Sat… 12││encrypted. Only   ││                  │
+│                  ││the people in the ││                  │
+│                  ││People list can   ││                  │
+│                  ││read this room.   ││                  │
+│                  ││The server passes ││                  │
+│                  ││messages along but││                  │
+│                  ││cannot read them. ││                  │
+│                  ││/details says what││                  │
+│                  ││it can see.       ││                  │
+│                  ││                  ││                  │
+│                  ││                  ││                  │
+│                  ││                  ││                  │
+│                  ││                  ││                  │
+│                  ││                  ││                  │
+│                  ││                  ││                  │
+│                  ││                  ││                  │
+└──────────────────┘└──────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  What's on your mind? #Book club           / for commands│
+└──────────────────────────────────────────────────────────┘
+Enter send · /help commands · Tab move · Ctrl-K switch chat…

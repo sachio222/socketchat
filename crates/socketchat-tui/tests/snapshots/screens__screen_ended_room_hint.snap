@@ -2,7 +2,7 @@
 source: crates/socketchat-tui/tests/screens.rs
 expression: s
 ---
-┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People 2 of 3 ✓ ─┐
 │# Book… (removed) ││09:14:05 Ada: Who is bringing the book││✓ Ada* (you)      │
 │@ Bo             3││         list?                        ││✓ Bo              │
 │# Climbing Sat… 12││09:15:12 Bo: Me. Sending it now.      ││  Cy              │

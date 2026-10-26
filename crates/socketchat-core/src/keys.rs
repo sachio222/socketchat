@@ -174,6 +174,12 @@ pub fn safety_number(a: &Key, b: &Key) -> String {
     }
 }
 
+/// The thirty digits `key` adds to every safety number built from it, in
+/// six groups of five: the first or the last half of each one.
+pub fn safety_digits(key: &Key) -> String {
+    display_safety_number(&safety_half(key))
+}
+
 /// Splits a safety number into 12 groups of 5 digits for reading aloud.
 pub fn display_safety_number(n: &str) -> String {
     n.as_bytes()

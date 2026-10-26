@@ -2,7 +2,7 @@
 source: crates/socketchat-tui/tests/screens.rs
 expression: "render(&app, &crew(), 80, 24)"
 ---
-┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
+┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People 2 of 3 ✓ ─┐
 │# Book club       ││You joined, but the invite could not  ││✓ Ada* (you)      │
 │@ Bo             3││be checked: the invite was signed by  ││✓ Bo              │
 │# Climbing Sat… 12││someone other than the person in the  ││  Cy              │

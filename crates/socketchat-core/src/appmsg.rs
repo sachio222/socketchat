@@ -78,6 +78,40 @@ pub enum AppMsg {
     },
     /// The room's topic, or its removal.
     Topic(Topic),
+    /// Asks the member with key `to` in this room whether they want to be
+    /// added to another room. `ask` names the request, and `reply_key` is
+    /// the HPKE key their answer is sealed to. Nothing here says which
+    /// room: that comes sealed in `AddOffer`.
+    AddAsk {
+        to: Key,
+        ask: crate::add::AskId,
+        #[serde(with = "serde_bytes")]
+        reply_key: Vec<u8>,
+    },
+    /// The member invited gives the inviter, `to`, an HPKE key made for
+    /// invite `ask`. Their app sends it without asking the person, and
+    /// waits for the offer until `offer_by`, Unix seconds on its clock.
+    AddKey {
+        to: Key,
+        ask: crate::add::AskId,
+        #[serde(with = "serde_bytes")]
+        key: Vec<u8>,
+        offer_by: u64,
+    },
+    /// The room to join, its server and an invite token, sealed for the
+    /// member asked (see `crate::add::Offer`).
+    AddOffer {
+        to: Key,
+        ask: crate::add::AskId,
+        sealed: crate::add::Sealed,
+    },
+    /// The person's answer, sealed for the asker: a yes with KeyPackages
+    /// for the room, or a no (see `crate::add::Answer`).
+    AddAnswer {
+        to: Key,
+        ask: crate::add::AskId,
+        sealed: crate::add::Sealed,
+    },
 }
 
 /// A room's topic: one line, set by an admin, or by anyone when the room
@@ -201,6 +235,82 @@ mod tests {
         assert_eq!(AppMsg::decode(&b), Some(AppMsg::Topic(t)));
         assert_eq!(AppMsg::IsDm.encode(), [5]);
         assert_eq!(AppMsg::Closed { close_id: [0; 16] }.encode()[0], 12);
+    }
+
+    /// The steps for adding someone are variants 14 to 17, after every
+    /// variant an app up to 0.5.2 knows.
+    #[test]
+    fn the_add_steps_are_variants_14_to_17() {
+        let sealed = crate::add::Sealed {
+            enc: vec![1; 32],
+            ct: vec![2; 40],
+        };
+        let to = Key([3; 32]);
+        let ask = [4; 16];
+        let msgs = [
+            AppMsg::AddAsk {
+                to,
+                ask,
+                reply_key: vec![5; 32],
+            },
+            AppMsg::AddKey {
+                to,
+                ask,
+                key: vec![6; 32],
+                offer_by: 1,
+            },
+            AppMsg::AddOffer {
+                to,
+                ask,
+                sealed: sealed.clone(),
+            },
+            AppMsg::AddAnswer { to, ask, sealed },
+        ];
+        for (n, m) in msgs.iter().enumerate() {
+            let b = m.encode();
+            assert_eq!(b[0] as usize, 14 + n, "{m:?}");
+            assert_eq!(AppMsg::decode(&b).as_ref(), Some(m));
+        }
+    }
+
+    /// An app up to 0.5.2 knows variants 0 to 13, so it reads each step of
+    /// adding someone as no message at all and goes on.
+    #[test]
+    fn an_app_up_to_0_5_2_reads_the_add_steps_as_nothing() {
+        #[allow(dead_code)]
+        #[derive(Debug, Deserialize)]
+        enum Old {
+            V0,
+            V1,
+            V2,
+            V3,
+            V4,
+            V5,
+            V6,
+            V7,
+            V8,
+            V9,
+            V10,
+            V11,
+            V12,
+            V13,
+        }
+        let ask = AppMsg::AddAsk {
+            to: Key([3; 32]),
+            ask: [4; 16],
+            reply_key: vec![5; 32],
+        };
+        assert!(postcard::from_bytes::<Old>(&ask.encode()).is_err());
+        let answer = AppMsg::AddAnswer {
+            to: Key([3; 32]),
+            ask: [4; 16],
+            sealed: crate::add::Sealed {
+                enc: vec![1; 32],
+                ct: vec![2; 40],
+            },
+        };
+        assert!(postcard::from_bytes::<Old>(&answer.encode()).is_err());
+        assert!(postcard::from_bytes::<Old>(&AppMsg::IsDm.encode()).is_ok());
     }
 
     /// An app up to 0.5.1 knows variants 0 to 12. Postcard refuses a

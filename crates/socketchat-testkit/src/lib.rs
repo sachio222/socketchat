@@ -57,6 +57,27 @@ impl TestServer {
         make_server_invite(self.dir.path()).expect("invite")
     }
 
+    /// Waits until the server holds no more than `n` connections, looking
+    /// every 2 ms, and fails the test after 5 seconds.
+    pub async fn connections_down_to(&self, n: usize) {
+        until("the server's connections to end", || {
+            std::future::ready(self.handle.connections() <= n)
+        })
+        .await;
+    }
+
+    /// Stops the server, then waits until its port refuses connections and
+    /// every connection it held has ended.
+    pub async fn shut_down(&self) {
+        self.handle.shutdown();
+        let addr = self.addr();
+        until("the server's port to close", || async move {
+            tokio::net::TcpStream::connect(addr).await.is_err()
+        })
+        .await;
+        self.connections_down_to(0).await;
+    }
+
     /// Stops the server and starts a new one on the same port with fresh
     /// data and a new certificate, as an operator who set it up again would.
     pub async fn replace_with_fresh(self) -> TestServer {
@@ -271,6 +292,23 @@ impl Deref for TestClient {
 impl DerefMut for TestClient {
     fn deref_mut(&mut self) -> &mut Client {
         &mut self.client
+    }
+}
+
+/// Waits until `done` says yes, asking every 2 ms, and fails the test
+/// after 5 seconds.
+pub async fn until<F, Fut>(what: &str, mut done: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let started = std::time::Instant::now();
+    while !done().await {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "waited 5 seconds for {what}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
 }
 

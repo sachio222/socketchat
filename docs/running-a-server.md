@@ -65,7 +65,7 @@ sudo -u socketchat socketchat server init --data-dir /var/lib/socketchat --host 
 - `--listen` is the address and port to listen on. The default is `0.0.0.0:7444`, every IPv4 address on port 7444. Use `--listen [::]:7444` to listen on IPv6.
 - `--data-dir` is where the server keeps everything. Without it, the server uses a folder under the user's home, such as `~/.local/share/socketchat-server` on Linux.
 
-`init` writes `socketchat-server.toml`, makes a self-signed TLS certificate (it encrypts connections and lets apps recognize your server), creates an empty database, and prints the certificate's fingerprint. Invite links carry that fingerprint, and apps refuse any server whose certificate does not match it, so nobody copies certificates by hand. `init` refuses to run in a folder that already has a certificate.
+`init` writes `socketchat-server.toml`, makes a self-signed TLS certificate (it encrypts connections and lets apps recognize your server), creates an empty database, and prints the certificate's fingerprint. Invite links carry that fingerprint, and apps refuse any server whose certificate does not match it, so nobody copies certificates by hand. Members see the fingerprint their app trusts with `/status` in the chat screen or `socketchat status`, to compare with the one `init` printed. `init` refuses to run in a folder that already has a certificate.
 
 On macOS and Linux the server keeps its data directory for its own account: folders are 0700 and files 0600, the certificate and its key included. When it starts, it narrows anything an earlier release or a hand edit left wider, and says so in one line on standard error.
 

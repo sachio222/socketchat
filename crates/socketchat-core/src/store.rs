@@ -259,6 +259,55 @@ CREATE TABLE IF NOT EXISTS topics (
     group_id BLOB PRIMARY KEY,
     topic BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS adds_out (
+    ask BLOB PRIMARY KEY,
+    group_id BLOB NOT NULL,
+    to_key BLOB NOT NULL,
+    identity BLOB NOT NULL,
+    name TEXT NOT NULL,
+    via_name TEXT NOT NULL,
+    target BLOB NOT NULL,
+    token BLOB NOT NULL,
+    reply_pk BLOB NOT NULL,
+    reply_sk BLOB NOT NULL,
+    their_key BLOB,
+    offer_by INTEGER,
+    key_packages BLOB,
+    step INTEGER NOT NULL,
+    created_unix INTEGER NOT NULL,
+    expires_unix INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS adds_in (
+    group_id BLOB NOT NULL,
+    from_key BLOB NOT NULL,
+    ask BLOB NOT NULL,
+    identity BLOB NOT NULL,
+    reply_pk BLOB NOT NULL,
+    my_pk BLOB NOT NULL,
+    my_sk BLOB NOT NULL,
+    offer BLOB,
+    answer BLOB,
+    step INTEGER NOT NULL,
+    number INTEGER NOT NULL DEFAULT 0,
+    created_unix INTEGER NOT NULL,
+    expires_unix INTEGER NOT NULL,
+    line_seq INTEGER,
+    PRIMARY KEY (group_id, from_key, ask)
+);
+CREATE TABLE IF NOT EXISTS add_numbers (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    next INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS add_quiet (
+    identity BLOB PRIMARY KEY,
+    until_unix INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS add_joins (
+    group_id BLOB PRIMARY KEY,
+    room_name TEXT NOT NULL,
+    inviter TEXT NOT NULL,
+    expires_unix INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ended_rooms (
     group_id BLOB PRIMARY KEY,
     name TEXT NOT NULL,
@@ -266,6 +315,17 @@ CREATE TABLE IF NOT EXISTS ended_rooms (
     why INTEGER NOT NULL,
     ended_unix INTEGER NOT NULL,
     seen_seq INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS encryption_lines (
+    group_id BLOB PRIMARY KEY,
+    after_seq INTEGER NOT NULL,
+    at_unix INTEGER NOT NULL,
+    checked INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS verified_names (
+    identity BLOB NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (identity, name)
 );
 ";
 
@@ -283,6 +343,13 @@ pub const ROOM_STATE_TABLES: &[&str] = &[
     "owed_reposts",
     "held_profiles",
     "topics",
+    "encryption_lines",
+    // Invites by name to this person that travel through this room, and
+    // what an invite into this room said it was called. Invites this
+    // person sent through the room stay until the next sync cancels their
+    // links; invites into this room go with it (see `delete_state`).
+    "adds_in",
+    "add_joins",
     // Server links have no `group_id`, so ending a room leaves them be.
     "invites_made",
 ];
@@ -322,6 +389,7 @@ fn delete_state(tx: &rusqlite::Transaction, g: &GroupId, mls: &[u8]) -> Result<(
     for table in OPENMLS_GROUP_TABLES {
         tx.execute(&format!("DELETE FROM {table} WHERE group_id = ?1"), [mls])?;
     }
+    tx.execute("DELETE FROM adds_out WHERE target = ?1", [g.0.as_slice()])?;
     tx.execute("DELETE FROM groups WHERE id = ?1", [g.0.as_slice()])?;
     Ok(())
 }
@@ -434,7 +502,25 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     // The server an ended room was on, so forgetting that server finds
     // it. Rooms that ended before this column have none.
     ("ended_rooms", "server_id", "INTEGER"),
+    // Set once the room has said this member joined with a different key
+    // from someone verified under the same name.
+    ("members", "key_warned", "INTEGER NOT NULL DEFAULT 0"),
+    // Where an invite's line waits to move to the room the chat screen
+    // opens. Invites from before this column keep their line where it is.
+    ("adds_in", "line_seq", "INTEGER"),
 ];
+
+/// Adds the names of verified people that `members` rows matching
+/// `filter` (an SQL condition on `m`, with `?1` and `?2` bound to `args`)
+/// show, to `verified_names`.
+const REMEMBER_NAMES: &str = "INSERT OR IGNORE INTO verified_names (identity, name)
+     SELECT m.identity, n.name FROM members m
+     JOIN trusted t ON t.identity = m.identity
+     JOIN (SELECT group_id, group_key, display_name AS name FROM members
+           UNION ALL
+           SELECT group_id, group_key, local_name FROM members) n
+       ON n.group_id = m.group_id AND n.group_key = m.group_key
+     WHERE n.name IS NOT NULL AND n.name != ''";
 
 fn migrate(conn: &Connection) -> Result<(), CoreError> {
     conn.execute_batch(SCHEMA)?;
@@ -456,6 +542,9 @@ fn migrate(conn: &Connection) -> Result<(), CoreError> {
             tx.commit()?;
         }
     }
+    // Profiles from before `verified_names` learn the names their member
+    // lists show for verified people.
+    conn.execute(REMEMBER_NAMES, [])?;
     Ok(())
 }
 
@@ -937,6 +1026,111 @@ pub struct PendingJoin {
     pub key_package_refs: Vec<Vec<u8>>,
 }
 
+/// A request this person made to add someone to `target`, which travels
+/// through the room `via` they share.
+#[derive(Clone)]
+pub struct AddOut {
+    pub ask: crate::add::AskId,
+    pub via: GroupId,
+    /// The person's key in `via`.
+    pub to: Key,
+    pub identity: Key,
+    /// Their name as this app showed it when the invite was made.
+    pub name: String,
+    /// The name of `via` then.
+    pub via_name: String,
+    pub target: GroupId,
+    pub token: Token,
+    pub reply_pk: Vec<u8>,
+    pub reply_sk: Zeroizing<Vec<u8>>,
+    /// The key the person's app gave for the offer.
+    pub their_key: Option<Vec<u8>>,
+    /// Until when, on the person's clock, their app waits for the offer.
+    pub offer_by: Option<u64>,
+    /// The person's KeyPackages, once they said yes.
+    pub key_packages: Option<Vec<u8>>,
+    pub step: i64,
+    pub created_unix: u64,
+    pub expires_unix: u64,
+}
+
+/// A request from `from` in the room `via` to add this person to another
+/// room.
+#[derive(Clone)]
+pub struct AddIn {
+    pub via: GroupId,
+    pub from: Key,
+    pub ask: crate::add::AskId,
+    /// The asker's identity, from their profile in `via`.
+    pub identity: Key,
+    pub reply_pk: Vec<u8>,
+    pub my_pk: Vec<u8>,
+    pub my_sk: Zeroizing<Vec<u8>>,
+    pub offer: Option<crate::add::Offer>,
+    /// The sealed answer, while it waits to go.
+    pub answer: Option<crate::add::Sealed>,
+    pub step: i64,
+    /// The number `/join` takes for it, given in the order invites arrive;
+    /// 0 until the offer arrives.
+    pub number: u64,
+    pub created_unix: u64,
+    pub expires_unix: u64,
+    /// The invite's line arrived with no chat screen open, so it sits at
+    /// this place in `via` until a chat screen opens and it moves to the
+    /// room on screen. `None` once it is where it stays.
+    pub line_seq: Option<u64>,
+}
+
+fn blob16(b: Vec<u8>) -> [u8; 16] {
+    b.try_into().unwrap_or([0; 16])
+}
+
+fn add_out_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AddOut> {
+    Ok(AddOut {
+        ask: blob16(r.get(0)?),
+        via: GroupId(blob16(r.get(1)?)),
+        to: key_col(Some(r.get(2)?)).unwrap_or(Key([0; 32])),
+        identity: key_col(Some(r.get(3)?)).unwrap_or(Key([0; 32])),
+        name: r.get(4)?,
+        via_name: r.get(5)?,
+        target: GroupId(blob16(r.get(6)?)),
+        token: Token(blob16(r.get(7)?)),
+        reply_pk: r.get(8)?,
+        reply_sk: Zeroizing::new(r.get(9)?),
+        their_key: r.get(10)?,
+        offer_by: r.get::<_, Option<i64>>(11)?.map(|t| t as u64),
+        key_packages: r.get(12)?,
+        step: r.get(13)?,
+        created_unix: r.get::<_, i64>(14)? as u64,
+        expires_unix: r.get::<_, i64>(15)? as u64,
+    })
+}
+
+const ADD_OUT_COLS: &str = "ask, group_id, to_key, identity, name, via_name, target, token, reply_pk, reply_sk, their_key, offer_by, key_packages, step, created_unix, expires_unix";
+
+fn add_in_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AddIn> {
+    let offer: Option<Vec<u8>> = r.get(7)?;
+    let answer: Option<Vec<u8>> = r.get(8)?;
+    Ok(AddIn {
+        via: GroupId(blob16(r.get(0)?)),
+        from: key_col(Some(r.get(1)?)).unwrap_or(Key([0; 32])),
+        ask: blob16(r.get(2)?),
+        identity: key_col(Some(r.get(3)?)).unwrap_or(Key([0; 32])),
+        reply_pk: r.get(4)?,
+        my_pk: r.get(5)?,
+        my_sk: Zeroizing::new(r.get(6)?),
+        offer: offer.and_then(|b| postcard::from_bytes(&b).ok()),
+        answer: answer.and_then(|b| postcard::from_bytes(&b).ok()),
+        step: r.get(9)?,
+        number: r.get::<_, i64>(10)? as u64,
+        created_unix: r.get::<_, i64>(11)? as u64,
+        expires_unix: r.get::<_, i64>(12)? as u64,
+        line_seq: r.get::<_, Option<i64>>(13)?.map(|s| s as u64),
+    })
+}
+
+const ADD_IN_COLS: &str = "group_id, from_key, ask, identity, reply_pk, my_pk, my_sk, offer, answer, step, number, created_unix, expires_unix, line_seq";
+
 fn key_col(v: Option<Vec<u8>>) -> Option<Key> {
     v.and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
         .map(Key)
@@ -1042,12 +1236,134 @@ impl Store {
                 g.joined_unix as i64
             ],
         )?;
+        // The line saying the room is end-to-end encrypted goes above
+        // everything new; a room joined again keeps its old lines above it.
+        tx.execute(
+            "INSERT OR REPLACE INTO encryption_lines (group_id, after_seq, at_unix, checked)
+             VALUES (?1, COALESCE((SELECT max(seq) FROM messages WHERE group_id = ?1), 0), ?2, 1)",
+            params![g.id.0.as_slice(), g.joined_unix as i64],
+        )?;
         tx.execute(
             "DELETE FROM ended_rooms WHERE group_id = ?1",
             [g.id.0.as_slice()],
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Where a room's encryption line sits, after which stored line, when
+    /// it was placed, and whether the join's invite checked out.
+    pub fn encryption_line(&self, g: &GroupId) -> Result<Option<(u64, u64, bool)>, CoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT after_seq, at_unix, checked FROM encryption_lines WHERE group_id = ?1",
+                [g.0.as_slice()],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)? as u64,
+                        r.get::<_, i64>(1)? as u64,
+                        r.get(2)?,
+                    ))
+                },
+            )
+            .optional()?)
+    }
+
+    /// Places the encryption line of a room that has none, as one made
+    /// before the line existed: after its newest stored line, at `now`.
+    /// `checked` says whether its join checked out. A placed line stays.
+    pub fn place_encryption_line(
+        &self,
+        g: &GroupId,
+        now: u64,
+        checked: bool,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO encryption_lines (group_id, after_seq, at_unix, checked)
+             SELECT ?1, COALESCE((SELECT max(seq) FROM messages WHERE group_id = ?1), 0), ?2, ?3
+             WHERE EXISTS(SELECT 1 FROM groups WHERE id = ?1)",
+            params![g.0.as_slice(), now as i64, checked],
+        )?;
+        Ok(())
+    }
+
+    /// Notes that a room's join did not check out.
+    pub fn set_join_unchecked(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE encryption_lines SET checked = 0 WHERE group_id = ?1",
+            [g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Every name a verified person has shown under, with their identity
+    /// key.
+    pub fn verified_names(&self) -> Result<Vec<(Key, String)>, CoreError> {
+        let mut st = self
+            .conn
+            .prepare("SELECT identity, name FROM verified_names ORDER BY rowid")?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                key_col(Some(r.get(0)?)).unwrap_or(Key([0; 32])),
+                r.get::<_, String>(1)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Remembers the names the member lists show for `identity`, if it is
+    /// verified.
+    fn remember_names(&self, identity: &Key) -> Result<(), CoreError> {
+        self.conn.execute(
+            &format!("{REMEMBER_NAMES} AND m.identity = ?1"),
+            [identity.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the room already said that this member joined with a
+    /// different key from someone verified under the same name.
+    pub fn key_warned(&self, g: &GroupId, key: &Key) -> Result<bool, CoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT key_warned FROM members WHERE group_id = ?1 AND group_key = ?2",
+                params![g.0.as_slice(), key.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Notes that the room said so.
+    pub fn set_key_warned(&self, g: &GroupId, key: &Key) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE members SET key_warned = 1 WHERE group_id = ?1 AND group_key = ?2",
+            params![g.0.as_slice(), key.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a room's encryption line, as a room made before the line
+    /// existed has none. For tests.
+    #[cfg(feature = "test-hooks")]
+    pub fn test_forget_encryption_line(&self, g: &GroupId) {
+        self.conn
+            .execute(
+                "DELETE FROM encryption_lines WHERE group_id = ?1",
+                [g.0.as_slice()],
+            )
+            .expect("delete");
+    }
+
+    /// Forgets every remembered name of a verified person, as a profile
+    /// from before `verified_names` has none. For tests.
+    #[cfg(feature = "test-hooks")]
+    pub fn test_forget_verified_names(&self) {
+        self.conn
+            .execute("DELETE FROM verified_names", [])
+            .expect("delete");
     }
 
     pub fn groups(&self) -> Result<Vec<GroupRow>, CoreError> {
@@ -1256,7 +1572,7 @@ impl Store {
             "UPDATE members SET identity = ?1, display_name = ?2 WHERE group_id = ?3 AND group_key = ?4",
             params![identity.0.as_slice(), display_name, g.0.as_slice(), key.0.as_slice()],
         )?;
-        Ok(())
+        self.remember_names(identity)
     }
 
     pub fn set_local_name(
@@ -1269,7 +1585,19 @@ impl Store {
             "UPDATE members SET local_name = ?1 WHERE group_id = ?2 AND group_key = ?3",
             params![name, g.0.as_slice(), key.0.as_slice()],
         )?;
-        Ok(())
+        let identity: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT identity FROM members WHERE group_id = ?1 AND group_key = ?2",
+                params![g.0.as_slice(), key.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        match key_col(identity) {
+            Some(id) => self.remember_names(&id),
+            None => Ok(()),
+        }
     }
 
     pub fn remove_member(&self, g: &GroupId, key: &Key) -> Result<(), CoreError> {
@@ -1400,7 +1728,7 @@ impl Store {
             "INSERT OR IGNORE INTO trusted (identity) VALUES (?1)",
             [identity.0.as_slice()],
         )?;
-        Ok(())
+        self.remember_names(identity)
     }
 
     pub fn is_trusted(&self, identity: &Key) -> Result<bool, CoreError> {
@@ -2329,6 +2657,223 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Saves a request to add someone, replacing the one with its ID.
+    pub fn save_add_out(&self, a: &AddOut) -> Result<(), CoreError> {
+        self.conn.execute(
+            &format!("INSERT OR REPLACE INTO adds_out ({ADD_OUT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"),
+            params![
+                a.ask.as_slice(),
+                a.via.0.as_slice(),
+                a.to.0.as_slice(),
+                a.identity.0.as_slice(),
+                a.name,
+                a.via_name,
+                a.target.0.as_slice(),
+                a.token.0.as_slice(),
+                a.reply_pk,
+                a.reply_sk.as_slice(),
+                a.their_key,
+                a.offer_by.map(|t| t as i64),
+                a.key_packages,
+                a.step,
+                a.created_unix as i64,
+                a.expires_unix as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every request this person made to add someone, oldest first.
+    pub fn adds_out(&self) -> Result<Vec<AddOut>, CoreError> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {ADD_OUT_COLS} FROM adds_out ORDER BY created_unix, ask"
+        ))?;
+        let rows = st.query_map([], add_out_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn add_out(&self, ask: &crate::add::AskId) -> Result<Option<AddOut>, CoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {ADD_OUT_COLS} FROM adds_out WHERE ask = ?1"),
+                [ask.as_slice()],
+                add_out_row,
+            )
+            .optional()?)
+    }
+
+    pub fn delete_add_out(&self, ask: &crate::add::AskId) -> Result<(), CoreError> {
+        self.conn
+            .execute("DELETE FROM adds_out WHERE ask = ?1", [ask.as_slice()])?;
+        Ok(())
+    }
+
+    /// Saves a request to add this person, replacing the one with its
+    /// room, asker and ID.
+    pub fn save_add_in(&self, a: &AddIn) -> Result<(), CoreError> {
+        let offer = a.offer.as_ref().map(postcard::to_stdvec).transpose()?;
+        let answer = a.answer.as_ref().map(postcard::to_stdvec).transpose()?;
+        self.conn.execute(
+            &format!("INSERT OR REPLACE INTO adds_in ({ADD_IN_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
+            params![
+                a.via.0.as_slice(),
+                a.from.0.as_slice(),
+                a.ask.as_slice(),
+                a.identity.0.as_slice(),
+                a.reply_pk,
+                a.my_pk,
+                a.my_sk.as_slice(),
+                offer,
+                answer,
+                a.step,
+                a.number as i64,
+                a.created_unix as i64,
+                a.expires_unix as i64,
+                a.line_seq.map(|s| s as i64)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Removes the invite line at `seq` in room `g`, and only an invite
+    /// line, as it moves to another room.
+    pub fn delete_invite_line(&self, g: &GroupId, seq: u64) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM messages WHERE group_id = ?1 AND seq = ?2 AND kind = ?3",
+            params![g.0.as_slice(), seq as i64, crate::client::kind::INVITE],
+        )?;
+        Ok(())
+    }
+
+    /// Every request to add this person, oldest first.
+    pub fn adds_in(&self) -> Result<Vec<AddIn>, CoreError> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {ADD_IN_COLS} FROM adds_in ORDER BY created_unix, ask"
+        ))?;
+        let rows = st.query_map([], add_in_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn add_in(
+        &self,
+        via: &GroupId,
+        from: &Key,
+        ask: &crate::add::AskId,
+    ) -> Result<Option<AddIn>, CoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ADD_IN_COLS} FROM adds_in WHERE group_id = ?1 AND from_key = ?2 AND ask = ?3"
+                ),
+                params![via.0.as_slice(), from.0.as_slice(), ask.as_slice()],
+                add_in_row,
+            )
+            .optional()?)
+    }
+
+    pub fn delete_add_in(
+        &self,
+        via: &GroupId,
+        from: &Key,
+        ask: &crate::add::AskId,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM adds_in WHERE group_id = ?1 AND from_key = ?2 AND ask = ?3",
+            params![via.0.as_slice(), from.0.as_slice(), ask.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// The next number for an invite `/join` can name. Numbers grow while
+    /// any numbered invite is still here, so a number shown in a list
+    /// never comes to mean another invite while that list's invites wait,
+    /// and start again at 1 once none is left.
+    pub fn next_add_number(&self) -> Result<u64, CoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO add_numbers (id, next) VALUES (1, 1)",
+            [],
+        )?;
+        let numbered: i64 =
+            tx.query_row("SELECT COUNT(*) FROM adds_in WHERE number > 0", [], |r| {
+                r.get(0)
+            })?;
+        if numbered == 0 {
+            tx.execute("UPDATE add_numbers SET next = 1 WHERE id = 1", [])?;
+        }
+        let n: i64 = tx.query_row("SELECT next FROM add_numbers WHERE id = 1", [], |r| {
+            r.get(0)
+        })?;
+        tx.execute("UPDATE add_numbers SET next = next + 1 WHERE id = 1", [])?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+
+    /// Ignores invites from the person with `identity` until `until_unix`.
+    pub fn set_add_quiet(&self, identity: &Key, until_unix: u64) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO add_quiet (identity, until_unix) VALUES (?1, ?2)",
+            params![identity.0.as_slice(), until_unix as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Until when invites from `identity` are ignored; 0 for not. Rows
+    /// past `now` go.
+    pub fn add_quiet_until(&self, identity: &Key, now: u64) -> Result<u64, CoreError> {
+        self.conn
+            .execute("DELETE FROM add_quiet WHERE until_unix <= ?1", [now as i64])?;
+        let until: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT until_unix FROM add_quiet WHERE identity = ?1",
+                [identity.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(until.unwrap_or(0) as u64)
+    }
+
+    /// Remembers, for a room this person said they would join, the name
+    /// and inviter the invite named and when it runs out.
+    pub fn save_add_join(
+        &self,
+        g: &GroupId,
+        room_name: &str,
+        inviter: &str,
+        expires_unix: u64,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO add_joins (group_id, room_name, inviter, expires_unix) VALUES (?1, ?2, ?3, ?4)",
+            params![g.0.as_slice(), room_name, inviter, expires_unix as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The name and inviter an invite into `g` named, and its expiry.
+    pub fn add_join(&self, g: &GroupId) -> Result<Option<(String, String, u64)>, CoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT room_name, inviter, expires_unix FROM add_joins WHERE group_id = ?1",
+                [g.0.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64)),
+            )
+            .optional()?)
+    }
+
+    pub fn delete_add_join(&self, g: &GroupId) -> Result<(), CoreError> {
+        self.conn.execute(
+            "DELETE FROM add_joins WHERE group_id = ?1",
+            [g.0.as_slice()],
+        )?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2912,6 +3457,63 @@ mod tests {
         assert_eq!(seen, 7);
     }
 
+    /// A profile from 0.5.2 gains every table and column added since, in
+    /// one run, keeps its rows, and a second run changes nothing.
+    #[test]
+    fn a_0_5_2_profile_upgrades() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../tests/fixtures/schema_0_5_2.sql"))
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO servers (id, host, port, cert_fpr) VALUES (1, 'h', 1, x'00');
+             INSERT INTO groups (id, server_id, group_key, name, last_seq, joined_unix)
+                 VALUES (x'01', 1, x'00', 'Crew', 7, 1);
+             INSERT INTO members (group_id, group_key, identity, display_name)
+                 VALUES (x'01', x'02', x'03', 'Bo');
+             INSERT INTO trusted (identity) VALUES (x'03');",
+        )
+        .unwrap();
+        let tables = |conn: &Connection| -> Vec<String> {
+            let mut st = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before = tables(&conn);
+        migrate(&conn).unwrap();
+        let after = tables(&conn);
+        let added: Vec<&String> = after.iter().filter(|t| !before.contains(t)).collect();
+        assert_eq!(
+            added,
+            [
+                "add_joins",
+                "add_numbers",
+                "add_quiet",
+                "adds_in",
+                "adds_out",
+                "encryption_lines",
+                "verified_names"
+            ]
+        );
+        let warned: i64 = conn
+            .query_row("SELECT key_warned FROM members", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(warned, 0);
+        let name: String = conn
+            .query_row("SELECT name FROM verified_names", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "Bo", "a verified member's name is remembered");
+        let crew: String = conn
+            .query_row("SELECT name FROM groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(crew, "Crew");
+        migrate(&conn).unwrap();
+        assert_eq!(tables(&conn), after);
+    }
+
     /// A 0.4.0 groups table with one room whose log was read up to 7.
     fn old_groups_table() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -2984,5 +3586,34 @@ mod tests {
         assert_eq!(bodies, ["mine", "notice"]);
         // A log read further than any stored line still wins.
         assert_eq!(s.notice_seq(&g, 9).unwrap(), 10);
+    }
+
+    /// A profile from before `verified_names` learns, when it opens, the
+    /// names its member lists show for verified people, and only theirs.
+    #[test]
+    fn an_older_profile_learns_the_names_of_verified_people() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _p) = Store::create(d.path(), "k").unwrap();
+        let g = GroupId([1; 16]);
+        let (bo, cy) = (Key([2; 32]), Key([3; 32]));
+        s.set_member_profile(&g, &Key([4; 32]), &bo, "Bo").unwrap();
+        s.set_member_profile(&g, &Key([5; 32]), &cy, "Cy").unwrap();
+        s.trust(&bo).unwrap();
+        s.set_local_name(&g, &Key([4; 32]), Some("Bo from work"))
+            .unwrap();
+        s.conn.execute("DELETE FROM verified_names", []).unwrap();
+        assert!(s.verified_names().unwrap().is_empty());
+        migrate(&s.conn).unwrap();
+        let mut names: Vec<String> = s
+            .verified_names()
+            .unwrap()
+            .into_iter()
+            .map(|(id, n)| {
+                assert_eq!(id, bo);
+                n
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Bo", "Bo from work"]);
     }
 }

@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "render(&app, &vm, 60, 24)"
+---
+┌ Chats ───────────┐┌ Book… ───────────┐┌ People 2 of 3 ✓ ─┐
+│# Book club       ││The server passes ││✓ Ada* (you)      │
+│@ Bo             3││messages along but││✓ Bo              │
+│# Climbing Sat… 12││cannot read them. ││  Cy              │
+│                  ││/details says what││                  │
+│                  ││it can see.       ││                  │
+│                  ││09:14:05 Ada: Who ││                  │
+│                  ││is bringing the   ││                  │
+│                  ││book list?        ││                  │
+│                  ││09:15:12 Bo: Me.  ││                  │
+│                  ││Sending it now.   ││                  │
+│                  ││09:15:40 · Bo sent││                  │
+│                  ││books.pdf (84 KB) ││                  │
+│                  ││09:16:58 Cy: Got  ││                  │
+│                  ││it, thanks.       ││                  │
+│                  ││Saturday still    ││                  │
+│                  ││works for me, and ││                  │
+│                  ││I can bring snacks││                  │
+│                  ││for everyone.     ││                  │
+└──────────────────┘└──────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  What's on your mind? #Book club           / for commands│
+└──────────────────────────────────────────────────────────┘
+Enter send · /help commands · Tab move · Ctrl-K switch chat…

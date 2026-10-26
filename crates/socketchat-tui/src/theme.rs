@@ -80,6 +80,10 @@ pub struct Theme {
     pub dim: Style,
     /// File and notice lines.
     pub notice: Style,
+    /// The command to type in an invite line, such as `/join Climbing
+    /// Saturdays`: upright and bold in the accent color, so it stands out
+    /// from the notice around it.
+    pub command: Style,
     /// A room's topic, wherever it shows. Its own color, never a notice's,
     /// a warning's or the verified mark's, so a topic cannot pass for the
     /// app's own words.
@@ -128,6 +132,7 @@ impl Theme {
             check: Style::default(),
             dim: fg(Color::DarkGray),
             notice: fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            command: accent.add_modifier(Modifier::BOLD),
             topic: fg(Color::LightBlue),
             warn: fg(Color::Yellow),
             banner: Style::default().fg(Color::White).bg(Color::Red),
@@ -146,7 +151,7 @@ impl Theme {
     /// | border            | `#2d4a33` | 238 |
     /// | focused border    | `#4aa63e` | 71  |
     /// | times, you, check | `#7dff6a` | 119 |
-    /// | other names, room | `#8af0c6` | 122 |
+    /// | other names, room, command to type | `#8af0c6` | 122 |
     /// | dim, notices      | `#6b7c6e` | 242 |
     /// | topic             | `#87afd7` | 110 |
     /// | selected text     | `#031004` | 16  |
@@ -188,6 +193,7 @@ impl Theme {
             check: fg(green),
             dim: fg(dim),
             notice: fg(dim).add_modifier(Modifier::ITALIC),
+            command: fg(mint).add_modifier(Modifier::BOLD),
             topic: fg(sky),
             warn: fg(amber),
             banner: Style::default().fg(white).bg(red),

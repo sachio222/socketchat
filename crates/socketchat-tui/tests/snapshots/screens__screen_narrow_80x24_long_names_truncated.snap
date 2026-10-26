@@ -2,7 +2,7 @@
 source: crates/socketchat-tui/tests/screens.rs
 expression: s
 ---
-┌ Chats ───────────┐┌ An extremely long group n… ──────────┐┌ People ──────────┐
+┌ Chats ───────────┐┌ An extremely long group n… ──────────┐┌ People 2 of 3 ✓ ─┐
 │# An extremely lo…││09:14:05 Ada: Who is bringing the book││✓ Ada* (you)      │
 │@ Bo             3││         list?                        ││✓ Bo              │
 │# Climbing Sat… 12││09:15:12 Bo[31m: Me. Sending it now.  ││  Cyrus Alexander…│

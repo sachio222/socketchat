@@ -484,6 +484,12 @@ impl Conn {
         self.link.alive.store(false, Ordering::SeqCst);
     }
 
+    /// How many pushes have arrived and wait to be read.
+    #[cfg(feature = "test-hooks")]
+    pub fn test_pushes_waiting(&self) -> usize {
+        self.pushes.len()
+    }
+
     /// A push that already arrived, without waiting.
     pub fn try_push(&mut self) -> Option<Push> {
         self.pushes.try_recv().ok()

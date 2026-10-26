@@ -1179,3 +1179,151 @@ fn the_topic_through_binary() {
     let o = run(&ada, &["topic", "--group", "Crew", "--clear", "both"]);
     assert!(!o.status.success());
 }
+
+#[test]
+fn status_prints_the_same_facts_as_plain_lines() {
+    use socketchat_core::keys::fingerprint_text;
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let ada = home.path().join("Ada");
+    let raw = server_invite(&s);
+    let link: socketchat_proto::InviteLink = raw.parse().unwrap();
+    assert!(run(&ada, &["join", &raw]).status.success());
+    assert!(run(&ada, &["new", "Crew"]).status.success());
+
+    let o = run(&ada, &["status"]);
+    let said = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(o.status.success(), "{}", out(&o));
+    let lines: Vec<&str> = said.lines().collect();
+    for want in [
+        "Connection".to_string(),
+        "Server: 127.0.0.1".into(),
+        format!("Port: {}", link.port),
+        format!("Protocol: {}", socketchat_proto::PROTOCOL_VERSION),
+        format!(
+            "Certificate fingerprint: {}",
+            fingerprint_text(&link.cert_fpr)
+        ),
+        "Inviting into rooms: each room's setting decides".into(),
+        "You".into(),
+        "Name: Ada".into(),
+        "Rooms on this server: 1".into(),
+        "App".into(),
+        format!("Version: {}", env!("CARGO_PKG_VERSION")),
+        "Theme: phosphor".into(),
+        "Mouse: on".into(),
+        "/details lists what the server can and cannot see in each room.".into(),
+    ] {
+        assert!(lines.contains(&want.as_str()), "{want}:\n{said}");
+    }
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("State: connected since ")),
+        "{said}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("Update check: ")),
+        "{said}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("Your half of each safety number: ") && l.len() == 68),
+        "{said}"
+    );
+    assert!(
+        !lines.contains(&"This room"),
+        "no room without --group:\n{said}"
+    );
+    // Plain lines, no box.
+    assert!(!said.contains('│') && !said.contains('┌'), "{said}");
+
+    let o = run(&ada, &["status", "--group", "Crew"]);
+    let said = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(o.status.success(), "{}", out(&o));
+    let lines: Vec<&str> = said.lines().collect();
+    for want in [
+        "This room",
+        "Name: Crew",
+        "Kind: group chat",
+        "Members: 1, 1 verified",
+        "Admins: 1",
+        "Your role: admin",
+        "Who can invite: anyone in the room",
+        "Slow mode: off",
+        "Has a topic: no",
+        "Encryption: end-to-end, MLS (RFC 9420)",
+        "Suite: MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519 (0x004F)",
+    ] {
+        assert!(lines.contains(&want), "{want}:\n{said}");
+    }
+
+    let o = run(&ada, &["status", "--group", "Nope"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("You are not in a group called Nope."),
+        "{}",
+        out(&o)
+    );
+
+    // A server that is down still gets a status, saying why.
+    drop(s);
+    let o = run(&ada, &["status", "--group", "Crew"]);
+    let said = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(
+        said.lines()
+            .any(|l| l == "State: could not reach: connection refused"),
+        "{said}"
+    );
+    assert!(!said.lines().any(|l| l.starts_with("Protocol")), "{said}");
+    assert!(said.lines().any(|l| l == "Name: Crew"), "{said}");
+}
+
+#[test]
+fn invite_by_name_through_binary() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let (ada, bo) = (home.path().join("Ada"), home.path().join("Bo"));
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    assert!(run(&ada, &["new", "Crew"]).status.success());
+    let o = run(&ada, &["invite", "--group", "Crew"]);
+    let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    assert!(run(&bo, &["join", &link]).status.success());
+    assert!(run(&ada, &["sync"]).status.success());
+    assert!(run(&bo, &["sync"]).status.success());
+    assert!(run(&ada, &["new", "Climb"]).status.success());
+    let o = run(&ada, &["invite", "Bo"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("Name the room to invite them to with --group <name>."),
+        "{}",
+        out(&o)
+    );
+    let o = run(&ada, &["invite", "--group", "Climb", "Zed"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("Nobody called Zed shares a room with you."),
+        "{}",
+        out(&o)
+    );
+    let o = run(&ada, &["invite", "--group", "Climb", "Bo"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert_eq!(
+        out(&o).trim(),
+        "Invited Bo to Climb through Crew. Once Bo types /join Climb, socketchat sync or the chat screen adds them."
+    );
+    // Climb keeps a line that the invite went, for the chat screen later.
+    let o = run(&ada, &["log", "--group", "Climb"]);
+    assert!(out(&o).contains("Invite sent to Bo."), "{}", out(&o));
+    // Bo's app gives its key; Ada's sends the rest; Bo hears the invite.
+    assert!(run(&bo, &["sync"]).status.success());
+    assert!(run(&ada, &["sync"]).status.success());
+    let o = run(&bo, &["sync"]);
+    assert!(
+        out(&o).contains("[Crew] · Ada invites you to Climb. Type /join Climb to join."),
+        "{}",
+        out(&o)
+    );
+}

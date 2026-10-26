@@ -3,6 +3,7 @@
 pub mod app;
 pub mod commands;
 mod run;
+mod select;
 pub mod theme;
 pub mod ui;
 
