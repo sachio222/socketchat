@@ -11,7 +11,7 @@ Socketchat says when a newer release is out, and `socketchat update` prints the 
 Once a day Socketchat asks GitHub whether a newer release is out. When one is, the chat screen's bottom line and the output of commands such as `socketchat sync` say:
 
 ```text
-Socketchat 0.5.3 is out. Run socketchat update.
+Socketchat 0.6.1 is out. Run socketchat update.
 ```
 
 A copy that Homebrew installed says "Run brew upgrade socketchat." instead. The request carries nothing about you or your chats, and a check that fails says nothing; [What leaves your computer besides chat](/security/what-the-server-sees#what-leaves-your-computer-besides-chat) says what it sends.
@@ -81,6 +81,8 @@ A server that runs as a service needs one more step: copy the new program into p
 
 ## Mixing versions
 
-Apps and servers from different releases work together. A newer server serves older apps, and a newer app talks to an older server, so you can update the server before or after your members. When a feature needs a newer server, the app says so and the rest keeps working. Room settings and the posting pace need a 0.5.2 server; see [Room settings on your server](/hosting/server-settings#room-settings-on-your-server).
+Apps and servers from different releases work together. A newer server serves older apps, and a newer app talks to an older server, so you can update the server before or after your members. When a feature needs a newer server, the app says so and the rest keeps working. Room settings and the posting pace need a 0.5.2 server; see [Room settings on your server](/hosting/server-settings#room-settings-on-your-server). Invites by name need 0.6.0 on both people's apps and work on any server; see [Invite someone you share a room with](/use/rooms-and-invites#invite-someone-you-share-a-room-with).
+
+A profile from an earlier release upgrades in place the first time 0.6.0 opens it, and keeps every room, message and key.
 
 [What's new](/whats-new) lists what changed in each release, and [CHANGELOG.md](https://github.com/sachio222/socketchat/blob/main/CHANGELOG.md) on GitHub holds the same list.

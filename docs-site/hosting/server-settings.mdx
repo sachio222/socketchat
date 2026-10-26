@@ -46,7 +46,7 @@ The folder holds the database (`server.db` with its `-wal` and `-shm` files), th
 | `require_standard_suite` | `false` | When `true`, new rooms must use the standard MLS encryption suite, which has no post-quantum protection. |
 | `max_connections` | `1000` | Most connections served at once. |
 | `max_per_ip` | `256` | Most connections from one address at once. High by default, because a whole office or school can share one address. |
-| `max_accounts_from_room_links` | `100` | New accounts one account's room links may register every two days. People past it still join the room, but need a server invite to start rooms of their own. |
+| `max_accounts_from_room_links` | `100` | New accounts one account's room links may register every two days. People past it still join the room, but need a server invite to start rooms of their own. The link behind an invite by name counts here too, though nobody makes an account with it. |
 | `max_room_messages_mb` | `200` | Messages one room may hold while members have not fetched them. |
 | `max_room_files_mb` | `4000` | Files one room may hold. |
 | `max_member_files_mb` | `4000` | Files one member of a room may hold there. |

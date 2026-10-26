@@ -1,7 +1,7 @@
 ---
 title: "The chat screen"
-description: "Panels, keys, earlier lines, the mouse, Tab completion and colors."
-keywords: ["chat screen", "TUI", "keyboard shortcuts", "mouse", "theme", "phosphor", "Tab completion"]
+description: "Panels, keys, finding a command, earlier lines, the mouse, copying text and colors."
+keywords: ["chat screen", "TUI", "keyboard shortcuts", "mouse", "copy", "select text", "help", "theme", "phosphor", "Tab completion"]
 ---
 
 Run `socketchat` to open the chat screen. It asks for your passphrase, then shows your rooms. It works in any terminal window of 80 by 24 characters or larger, and over SSH.
@@ -15,11 +15,11 @@ Run `socketchat` to open the chat screen. It asks for your passphrase, then show
 | Panel | What it shows |
 |---|---|
 | **Chats** | Your rooms, marked `#`, and direct messages, marked `@`. A number shows new messages. |
-| **Messages** | The open room, with times and names. The panel title is the room's name and its server, as in `Book club · chat.example.com`. When the room has a topic, the first line under the title shows it, as in `Topic: Piranesi, chapters 1 to 5`, cut to one line; `/details` shows all of it. |
-| **People** | Everyone in the room. `✓` marks someone you verified, and `*` marks an admin. |
+| **Messages** | The open room, with times and names. The panel title is the room's name and its server, as in `Book club · chat.example.com`. When the room has a topic, the first line under the title shows it, as in `Topic: Piranesi, chapters 1 to 5`, cut to one line; `/details` shows all of it. Each room shows once that it is end-to-end encrypted; see [The encryption line](/security/encryption#what-the-chat-screen-shows). |
+| **People** | Everyone in the room. `✓` marks someone you verified, and `*` marks an admin. The title counts the verified marks, yours included, as in "People 2 of 3 ✓", shortened to "People 2/3 ✓" or "2/3 ✓" in a narrow window. It reads "People ! check", and a `!` marks the row, while someone shows under the name of a person you verified with a different key; see [Someone new under a verified name](/use/rooms-and-invites#someone-new-under-a-verified-name). |
 | **Message box** | Where you type messages and commands. The empty box reads "What's on your mind?" with the open room's name. |
 
-The bottom line shows the keys that work right now, and the Socketchat version when the window is wide enough. When a newer release is out, it says so, as in "Socketchat 0.5.3 is out. Run socketchat update."; see [Updating](/help/updating#the-update-notice).
+The bottom line shows the keys that work right now, and the Socketchat version when the window is wide enough. When a newer release is out, it says so, as in "Socketchat 0.6.1 is out. Run socketchat update."; see [Updating](/help/updating#the-update-notice).
 
 ## The room's server
 
@@ -31,18 +31,27 @@ New rooms from `/new` go on the open room's server, or on the newest server you 
 
 | Key | What it does |
 |---|---|
-| Enter | Send the message, or run the command. |
+| Enter | Send the message, or run the command. When only one command starts with what you typed, run it, so `/q` quits, or put it in the box to type the rest, so `/jo` gives `/join `. A lone `/` opens the list of commands. |
 | Tab, Shift-Tab | Move between panels. While you type a command, complete it instead. |
 | Ctrl-K | Open the room switcher. Type to filter, Enter to open. |
-| Up, Down | In the message box, bring back your earlier lines in this room. Elsewhere, pick a room in Chats or a person in People, or scroll the messages. |
+| Up, Down | In the message box, after `/` and a letter, step through the commands that start with those letters. Otherwise bring back your earlier lines in this room. Elsewhere, pick a room in Chats or a person in People, or scroll the messages. |
 | PgUp, PgDn | Scroll the messages. |
-| Esc | Close a box. |
+| Esc | Close a box, or clear a selection. |
 | Y, N | Answer a question, such as whether to send a video. Only Y as the first key pressed means yes. |
 | Ctrl-C | Quit. `/quit` does the same. |
 
-## Commands and Tab completion
+## Find a command
 
-Type `/` to start a command, and `/help` to see them all. Tab completes a command as you type it, and Tab or Shift-Tab steps through the matches when there are several. Matching commands show on the bottom line, and a grey suggestion after the cursor shows what Tab would add; Right arrow accepts it. `/switch` and Tab complete a room's name, and `/theme` and Tab cycle the color names.
+Type `/` and Enter, or `/help`, to open a list of every command in alphabetical order, with the first one highlighted.
+
+- Up and Down move the highlight and go round from the last command to the first. The mouse wheel moves it too, and PgUp and PgDn scroll a page.
+- Enter runs the highlighted command, or puts it in the message box with a space after it when it needs more, such as `/join`.
+- A click on a command highlights it, and a second click uses it.
+- Esc closes the list.
+
+To step through commands without the list, type `/` and a letter: Up and Down put each command that starts with those letters in the message box in turn, in alphabetical order, going round. Typing ends the run. With a lone `/`, an empty box or a message, Up and Down bring back earlier lines instead.
+
+Tab completes a command as you type it, and Tab or Shift-Tab steps through the matches, in alphabetical order, when there are several. Matching commands show on the bottom line, and a grey suggestion after the cursor shows what Tab would add; Right arrow accepts it. `/switch` and Tab complete a room's name, and `/theme` and Tab cycle the color names.
 
 See [Commands](/use/commands) for the full list.
 
@@ -64,10 +73,19 @@ A paste goes into the message box as text, with line breaks shown as `↵`. Noth
 The mouse is on by default:
 
 - Click a room in Chats to open it, and click a panel to move to it.
-- Scroll the messages, `/help`, `/invites` and `/details` with the wheel.
+- Scroll the messages, `/help`, `/invites`, `/details` and `/status` with the wheel.
 - Boxes have buttons along their bottom edge, such as Yes and No. A click answers only once the box is on screen.
 
-While the mouse is on, hold Shift as you drag to select text (Option or Fn on a Mac). To hand the mouse back to your terminal, type:
+### Select and copy
+
+Drag over messages to select them, and Socketchat copies the text when you let go. The bottom line says "Copied.", or that Socketchat asked your terminal to copy when no clipboard program could.
+
+- A message the screen wrapped copies as one line, and a message of several lines copies its lines without the indent the screen puts under the first.
+- Dragging past the top or bottom of the messages scrolls them a row at a time.
+- Text in the `/help`, `/details`, `/about`, `/status`, `/invites` and `/servers` boxes copies the same way.
+- Esc, typing, a new click or new messages clear the selection.
+
+To select the terminal's way instead, hold Shift as you drag (Option or Fn on a Mac). To hand the mouse back to your terminal, type:
 
 ```text
 /mouse off

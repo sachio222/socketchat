@@ -1,12 +1,12 @@
 ---
 title: "Commands"
 description: "Every slash command in the chat screen and every socketchat terminal command, with its flags."
-keywords: ["commands", "slash commands", "CLI", "reference", "socketchat join", "socketchat send", "socketchat update", "socketchat topic", "/settings"]
+keywords: ["commands", "slash commands", "CLI", "reference", "socketchat join", "socketchat send", "socketchat update", "socketchat topic", "socketchat status", "/settings", "/status", "/invite", "/join"]
 ---
 
 ## Slash commands
 
-Type these in the chat screen's message box. Tab completes a command as you type it.
+Type these in the chat screen's message box. Tab completes a command as you type it. `/help`, or `/` and Enter, lists every command in alphabetical order to pick from; see [Find a command](/use/chat-screen#find-a-command).
 
 ### Rooms and people
 
@@ -15,7 +15,10 @@ Type these in the chat screen's message box. Tab completes a command as you type
 | `/new <name>` | Start a new group chat on the open room's server, and say which server. |
 | `/invite` | Make a one-time link that brings someone into this chat, and copy an invite message. |
 | `/invite --dm` | Make a link that opens a new two-person chat. |
+| `/invite <name> [room]` | Invite someone you already share a room with to this room, or to the room you name. See [Invite someone you share a room with](/use/rooms-and-invites#invite-someone-you-share-a-room-with). |
 | `/join <link>` | Use an invite link someone sent you. |
+| `/join <room>` | Join a room someone invited you to by name. `/join` alone joins when one invite waits. |
+| `/join <number>` | Join one of several invites that fit, by the number `/join` listed. |
 | `/dm <name>` | Start a two-person chat with someone in this chat. |
 | `/switch [room]` | Open another room. Tab completes the name; with no name, opens the switcher. |
 | `/verify <name>` | Compare safety numbers with someone. |
@@ -23,7 +26,7 @@ Type these in the chat screen's message box. Tab completes a command as you type
 | `/rename <name> <new>` | Rename someone on your screen only. |
 | `/invites` | See your open invite links. |
 | `/cancel <number>` | Stop an invite link from the `/invites` list. |
-| `/details` | See this room's admins, size, age, server, topic and settings. |
+| `/details` | See this room's admins, size, age, server, topic, settings and encryption. |
 | `/topic [text]` | See the room's topic, or set it. `/topic --clear` removes it. Admins only, unless the room lets anyone set it. |
 | `/settings` | See who can invite, whether slow mode is on and who can set the topic. |
 | `/mute` | Hide this room's new-message count. |
@@ -69,13 +72,25 @@ New rooms go on the open room's server. With no room open, they go on the newest
 | Command | What it does |
 |---|---|
 | `/theme [name]` | See or change the colors: `phosphor` or `classic`. |
-| `/mouse [on\|off]` | Turn mouse clicks and scrolling on or off. |
+| `/mouse [on\|off]` | Turn mouse clicks, scrolling and drag to copy on or off. |
 | `/updates [on\|off]` | Turn the daily check for a new version on or off. See [Updating](/help/updating#the-update-notice). |
-| `/help` | List every command. |
-| `/about` | See the version and what Socketchat is. |
+| `/status` | See the open room's server and connection, you, the room and the app in one box. See [`/status`](#status). |
+| `/help` | List every command in alphabetical order, and pick one to use. |
+| `/about` | See the version, what Socketchat is and what the server still sees. |
 | `/quit` | Close Socketchat. |
 
-A name with spaces goes in quotes, as in `/save "beach day.jpg"`.
+A name with spaces goes in quotes, as in `/save "beach day.jpg"` or `/invite Bo "Climbing Saturdays"`.
+
+### `/status`
+
+`/status` opens one box with what Socketchat knows about the open room and its server:
+
+- **Server**: its address and port, whether Socketchat is connected and since when, the protocol in use, the certificate fingerprint your app trusts for that server, and the server's rule on inviting into rooms. Servers do not tell apps their Socketchat version, so the box shows the protocol instead.
+- **You**: your name, your half of each safety number, and how many of your rooms are on that server.
+- **Room**: its kind, members and how many of them you verified, admins, your role, settings, whether it has a topic, and its encryption with the suite's name and number.
+- **App**: the version, the update check and the newest release it last found, the theme and the mouse setting.
+
+A last line points to `/details` for what the server can see. The box scrolls, and dragging over its text copies it. To check that you reach the right server, compare the fingerprint with the one its operator's `socketchat server init` printed.
 
 ## Terminal commands
 
@@ -89,11 +104,13 @@ Run these in a terminal. `socketchat --help` and `socketchat <command> --help` p
 | `socketchat servers [--forget <number>] [--yes]` | List your servers and whether each can be reached, or forget one. `--yes` forgets without asking first. |
 | `socketchat invite --group <name>` | Print an invite link to a room, on one line. |
 | `socketchat invite --dm` | Print a link that opens a new two-person chat. |
+| `socketchat invite --group <room> <name>` | Invite someone you already share another room with into that room, by name. They take it with `/join` in the chat screen. |
 | `socketchat invites [--cancel <number>]` | List your open invite links, or cancel one. |
 | `socketchat send --group <name> <text>...` | Send a message to a room. When the room limits fast posting, waits until the message goes. |
 | `socketchat topic --group <name> [<text>...] [--clear]` | Print a room's topic, set it with text, or remove it with `--clear`. |
 | `socketchat log --group <name> [--limit <n>]` | Print a room's recent messages, 50 by default, and mark them read. When more are unread than the limit, prints the oldest unread first. |
-| `socketchat sync` | Fetch everything new and print what happened. |
+| `socketchat sync` | Fetch everything new and print what happened, including a line when someone invites you by name. |
+| `socketchat status [--group <name>]` | Print the server, the connection, your name and the app's settings, one fact a line, as `/status` shows them. `--group` adds a room. |
 | `socketchat server init [--host <address>] [--listen <ip:port>] [--data-dir <folder>]` | Set up a server. See [Server settings](/hosting/server-settings). |
 | `socketchat server run [--data-dir <folder>] [--config <file>]` | Run the server until Ctrl-C. |
 | `socketchat server invite [--data-dir <folder>]` | Print a one-time link that registers a new person on this server. |

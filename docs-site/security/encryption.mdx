@@ -1,7 +1,7 @@
 ---
 title: "Encryption"
 description: "How Socketchat locks messages, in plain words: MLS, OpenMLS and post-quantum protection."
-keywords: ["MLS", "OpenMLS", "RFC 9420", "post-quantum", "ML-KEM", "end-to-end encryption", "TLS"]
+keywords: ["MLS", "OpenMLS", "RFC 9420", "post-quantum", "ML-KEM", "end-to-end encryption", "TLS", "HPKE", "encryption line", "/details"]
 ---
 
 Socketchat builds its encryption from published standards and reviewed libraries. It has no home-made cryptography.
@@ -25,6 +25,25 @@ A large enough quantum computer could one day break the key exchange most encryp
 
 This post-quantum suite comes from an IETF draft that is not final yet. Socketchat keeps the choice of suite in one place, so rooms can move to the final version once it is published.
 
+## What the chat screen shows
+
+Each room you make or join shows one line in the color of Socketchat's notices:
+
+```text
+End-to-end encrypted. Only the people in the People list can read this room. The server passes messages along but cannot read them. /details says what it can see.
+```
+
+- A direct chat says "Only the two of you can read this chat." in place of the People list.
+- While a join waits for its inviter, the line says "Waiting for Ada to confirm your invite, so nobody here is verified yet."
+- After a failed invite check, the red warning stays and the line leaves out who can read the room.
+- Rooms made before 0.6.0 show the line once, after their newest message, the first time they open.
+
+A person's message always shows their name and a colon after the time, so no message can pass for this line.
+
+`/details` has an Encryption section. It says the room uses end-to-end encryption with MLS (RFC 9420), whether its messages and files have post-quantum key exchange, read from the room's own suite, what the server cannot see and what it sees. `/status` names the room's suite and its number.
+
+The People title counts the people you verified, as in "People 2 of 3 ✓", and reads "People ! check" while someone shows under the name of a person you verified with a different key; see [Someone new under a verified name](/use/rooms-and-invites#someone-new-under-a-verified-name).
+
 ## The connection to the server
 
 Apps reach the server over TLS 1.3, the same standard that protects websites. The server makes its own certificate at setup, and invite links carry that certificate's fingerprint. Your app checks the fingerprint every time it connects, so it can tell your server from an impostor without any certificate authority. Messages travel inside this connection already sealed by MLS.
@@ -36,6 +55,8 @@ Each file gets a fresh random key and travels in small locked pieces. The key, t
 ## Invites and verification
 
 An invite link carries a fingerprint of the inviter's identity key, the long-term key that proves who they are. When your friend joins, their app checks the invite against that fingerprint, so it can tell that the link came from you. Safety numbers let any two people check each other directly; see [Verify someone](/use/rooms-and-invites#verify-someone).
+
+An invite by name travels through a room you both share. The room it is for, its server, its invite token and the joiner's keys go sealed with HPKE (Hybrid Public Key Encryption, RFC 9180) under keys made for that invite alone, inside the shared room's own encryption, so its other members cannot read them. Each app takes each step only from the person it expects, and the joiner's app makes the keys that let anyone add them only when they type `/join`. See [Invite someone you share a room with](/use/rooms-and-invites#invite-someone-you-share-a-room-with).
 
 ## On your computer
 

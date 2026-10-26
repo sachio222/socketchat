@@ -1,10 +1,10 @@
 ---
 title: "Rooms and invites"
-description: "Make a room, invite people with a one-time link or a QR code, verify them, set a topic, and run the room as an admin."
-keywords: ["rooms", "invite", "invite link", "QR code", "join", "direct message", "verify", "safety number", "admin", "topic", "room settings", "slow mode"]
+description: "Make a room, invite people with a one-time link, a QR code or by name, verify them, set a topic, and run the room as an admin."
+keywords: ["rooms", "invite", "invite link", "invite by name", "/invite", "/join", "QR code", "join", "direct message", "verify", "safety number", "admin", "topic", "room settings", "slow mode"]
 ---
 
-A room is a group chat. Everyone in it holds the keys to read it, and nobody else does, the server included. People come in only through invite links.
+A room is a group chat. Everyone in it holds the keys to read it, and nobody else does, the server included. People come in only through invites: a link, or an invite by name to someone who already shares a room with you.
 
 ## Make a room
 
@@ -85,6 +85,48 @@ There are two kinds of link:
 
 Right after you join, the room may say "Waiting for (name) to confirm this invite." The person who invited you confirms it from inside the room, and their app does this by itself the next time it connects. Until then your name stays hidden from the room, and you cannot make invite links or start direct messages from it.
 
+## Invite someone you share a room with
+
+Someone who already shares a room with you needs no link. Open the room you want them in and type `/invite` with their name:
+
+```text
+/invite Bo
+```
+
+To invite them to a room that is not open, name that room too, in quotes when it has spaces:
+
+```text
+/invite Bo "Climbing Saturdays"
+```
+
+Bo's app writes a line into the room you share, and shows it on the status line:
+
+```text
+Ada invites you to Climbing Saturdays. Type /join Climbing Saturdays to join.
+```
+
+The line names the room's server when Bo has never used it, says when Bo has not verified you, and adds the start of your key, as `Ada#1a2b`, when someone else in that room has your name. To take the invite, Bo types:
+
+```text
+/join Climbing Saturdays
+```
+
+- `/join` alone joins when exactly one invite waits.
+- When more than one invite fits, nothing is joined and the app lists them by number, in the order they came: "More than one invite waits for Climbing Saturdays: 1. from Ada, 2. from Cy (on chat.example.org). Type /join 1 or /join 2." A number always means that invite, even next to a room called "2".
+- Nothing opens on its own, and no single key joins a room.
+
+There is nothing to decline. An invite nobody takes ends after 24 hours, and your room then shows "Bo didn't join Climbing Saturdays." It also ends when either of you leaves the room it travels through. A join shows "Bo accepted your invite and joined."
+
+- `/invite Ada Smith` means Ada into the room Smith. When someone called Ada Smith also shares a room with you, the app asks for quotes.
+- A name that two people share is refused with a tag for each, such as `Bo#1a2b`. Invite with the tag.
+- Room settings apply as for any invite. In an admins-only room, a member hears "In this room only admins can invite people."
+- The invite marks nobody verified. You see Bo verified in the new room only if you verified Bo before, and Bo counts the room verified only if Bo verified you.
+- Both apps need Socketchat 0.6.0 or later. For someone on an older app, `/invite` with their name says "Bo's app is too old for this kind of invite. Send them a link with /invite." The server needs no update.
+
+The other people in the room the invite travels through see that an invite went by and whether it was taken. They never see which room it is for, its server, its invite token or Bo's keys, which travel sealed for that one invite. Socketchat sends the invite through a direct chat with Bo when you have one, and otherwise through the smallest room you share.
+
+From a terminal, `socketchat invite --group "Climbing Saturdays" Bo` invites by name, and `socketchat sync` prints the line when someone invites you. Taking an invite needs `/join` in the chat screen.
+
 ## Direct messages
 
 A direct message is a room for two people.
@@ -103,6 +145,18 @@ The verified mark (`✓`) means your app checked who that person is. It comes fr
 Socketchat shows the number and a QR code. Compare them with Ada in person or on a call, and press Y if they match. A matching display name proves nothing on its own; check the number.
 
 <img src="/images/verify.png" alt="The chat screen with the Check Bo box open: a 60-digit safety number and its QR code." />
+
+The People title counts the verified marks the list shows, yours included, as in "People 2 of 3 ✓".
+
+### Someone new under a verified name
+
+Socketchat remembers the names of the people you verified, with their identity keys, even after they or you leave a room. While someone shows under one of those names with a different identity key, the People title reads "People ! check" and their row carries a `!`. When their name arrives in the room, the room says:
+
+```text
+Bo joined with a different key from the Bo you verified. Treat them as someone new until you compare safety numbers: /verify Bo
+```
+
+Verifying them, or their leaving, clears the mark. Names match ignoring spacing, invisible characters and the case of ASCII letters, as `/verify` matches them. The weekly key refresh keeps the same identity key and says nothing.
 
 ## Your invite links
 
@@ -204,6 +258,6 @@ Apps on 0.5.1 or older are held to the same pace on a 0.5.2 server. Over it, the
 
 Other room commands:
 
-- `/details` shows the room's admins, how many people are in it, when it was made, its server, its topic and its settings.
+- `/details` shows the room's admins, how many people are in it, when it was made, its server, its topic, its settings and its encryption.
 - `/mute` hides the room's new-message count on your computer, and `/unmute` shows it again. Nobody else sees that you muted it.
 - `/clear` deletes the room's messages and files list from this computer while you stay in it.

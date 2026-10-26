@@ -26,9 +26,13 @@ This holds whoever runs the server: you, a friend, or a company you rent it from
 - **Room settings**: whether only admins can invite, how long slow mode holds members between messages, and whether only admins can set the topic. The server reads the settings so it can enforce the first two, and it sees the third because it travels with them. They say nothing about what anyone writes; the topic itself travels encrypted.
 - **How fast each member posts** in each room. The server counts each member's posts in memory to limit fast posting, and keeps no record of the counts on disk.
 
+## Invites by name
+
+An invite by name uses the requests an invite link uses: the inviter's app asks the server for a room link, and the joiner's app uses it. Its other steps travel as sealed messages in the room you share, which the server passes along like any other message there and cannot read. Their timing, next to the link, can still suggest that an invite took place. The shared room's other members see that an invite went by and whether it was taken, never which room it is for; see [Invite someone you share a room with](/use/rooms-and-invites#invite-someone-you-share-a-room-with).
+
 ## What stays on your computer
 
-Your messages, keys and room list live in one profile on your computer, encrypted with your passphrase. See [Your passphrase](/security/passphrase).
+Your messages, keys and room list live in one profile on your computer, encrypted with your passphrase. The profile also keeps the identity key of each person you verified, and the names they used, after you or they leave a room, so Socketchat can warn when someone new uses one of those names. See [Your passphrase](/security/passphrase).
 
 When you leave a room, Socketchat deletes the room's keys from your computer at once, and its messages once you have read them. When a room closes or you are removed, the same happens as soon as your app learns of it. After 30 days, Socketchat deletes a finished room's messages even if they were never read. Deletion happens in each person's own app, so other members keep their own copies.
 
@@ -38,7 +42,7 @@ Apart from the servers you join, Socketchat contacts one place: GitHub, to learn
 
 - **When.** At most once a day, when the chat screen opens or when a command that opens your profile runs, such as `socketchat sync`.
 - **What it sends.** One HTTPS request to api.github.com for the latest release of sachio222/socketchat, with `socketchat` as its user agent and no cookie or token. It carries nothing about you, your profile, your servers or your chats. GitHub sees your IP address and the time, as it does for any web request.
-- **What it does with the answer.** When the release is newer than yours, the chat screen's bottom line and the output of commands such as `socketchat sync` say "Socketchat 0.5.3 is out. Run socketchat update." A copy that Homebrew installed says "Run brew upgrade socketchat." instead. Nothing is downloaded or installed. A check that fails says nothing, and the next one comes a day later.
+- **What it does with the answer.** When the release is newer than yours, the chat screen's bottom line and the output of commands such as `socketchat sync` say "Socketchat 0.6.1 is out. Run socketchat update." A copy that Homebrew installed says "Run brew upgrade socketchat." instead. Nothing is downloaded or installed. A check that fails says nothing, and the next one comes a day later.
 - **Turning it off.** Type `/updates off` in the chat screen, and your profile keeps the choice, or set `SOCKETCHAT_NO_UPDATE_CHECK=1` for one run. While the check is off, Socketchat makes no request to GitHub at all. `/about` says whether the check is on and when GitHub last answered, and `/updates on` turns it back on.
 
 See [Updating](/help/updating) for what `socketchat update` prints.
