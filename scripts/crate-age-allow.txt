@@ -2,3 +2,4 @@
 # One per line: name version reason. Each entry covers that exact version.
 openmls 0.9.1 required by socketchat-core, which pins openmls =0.9.1
 rustls-webpki 0.103.16 fixes RUSTSEC-2026-0382 (distrusted emSign intermediates), which reaches the update check; one-off exception approved by Jake 2026-10-24
+ctutils 0.4.4 fixes RUSTSEC-2026-0385 (non-constant-time masks) in code the encryption runs; published by RustCrypto's release workflow, source diff reviewed; one-off exception approved by Jake 2026-10-26

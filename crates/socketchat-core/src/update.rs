@@ -533,7 +533,6 @@ pub async fn fetch_latest() -> Option<Version> {
 mod tests {
     use super::*;
     use std::cmp::Ordering;
-    use std::path::PathBuf;
 
     fn v(s: &str) -> Version {
         Version::parse(s).unwrap_or_else(|| panic!("{s} should parse"))
@@ -704,16 +703,18 @@ mod tests {
         assert!(!installed_by_installer(&d.path().join("socketchat"), &dirs));
         // XDG_BIN_HOME first, then XDG_DATA_HOME/../bin, as the installer
         // looks for them.
+        // Built under the temp folder, so they are absolute on Windows too.
+        let x = d.path().join("x");
         let dirs = installer_dirs(
-            Some(Path::new("/x/bin")),
-            Some(Path::new("/x/share")),
+            Some(&x.join("bin")),
+            Some(&x.join("share")),
             std::slice::from_ref(&home),
         );
         assert_eq!(
             dirs,
             vec![
-                PathBuf::from("/x/bin"),
-                PathBuf::from("/x/share/../bin"),
+                x.join("bin"),
+                x.join("share").join("../bin"),
                 home.join(".local/bin")
             ]
         );
