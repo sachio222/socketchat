@@ -14,8 +14,11 @@ pub mod net;
 mod perms;
 pub mod provider;
 pub mod sanitize;
+pub mod settings;
 pub mod store;
 pub mod suite;
+pub mod topic;
+pub mod update;
 
 pub use error::CoreError;
 pub use socketchat_proto as proto;

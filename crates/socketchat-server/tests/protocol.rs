@@ -78,7 +78,7 @@ fn sorted(mut v: Vec<InviteInfo>) -> Vec<InviteInfo> {
 }
 
 #[tokio::test]
-async fn hello_1_and_2_are_both_served() {
+async fn hello_1_2_and_3_are_all_served() {
     let e = env().await;
     let mut c = e.raw().await;
     assert_eq!(
@@ -90,15 +90,20 @@ async fn hello_1_and_2_are_both_served() {
         c.hello_as(2).await,
         Some(ServerFrame::HelloOk { version: 2 })
     );
-}
-
-#[tokio::test]
-async fn hello_3_gets_mismatch_naming_2() {
-    let e = env().await;
     let mut c = e.raw().await;
     assert_eq!(
         c.hello_as(3).await,
-        Some(ServerFrame::VersionMismatch { server: 2 })
+        Some(ServerFrame::HelloOk { version: 3 })
+    );
+}
+
+#[tokio::test]
+async fn hello_4_gets_mismatch_naming_3() {
+    let e = env().await;
+    let mut c = e.raw().await;
+    assert_eq!(
+        c.hello_as(4).await,
+        Some(ServerFrame::VersionMismatch { server: 3 })
     );
     assert_eq!(c.recv().await, None);
 }

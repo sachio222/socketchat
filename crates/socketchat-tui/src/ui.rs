@@ -38,6 +38,8 @@ pub struct LineView {
     pub text: String,
     pub notice: bool,
     pub mine: bool,
+    /// A topic set or cleared, drawn in the topic's style. Also a notice.
+    pub topic: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,6 +61,8 @@ pub struct ViewModel {
     pub connected: bool,
     /// The open room's server, from `server_text`.
     pub server: Option<String>,
+    /// The open room's topic, cleaned, shown under its header.
+    pub topic: Option<String>,
 }
 
 const SIDE: u16 = 20;
@@ -163,6 +167,9 @@ fn help_line(app: &App, width: usize) -> &'static str {
     if app.switcher.is_some() {
         return "Type to filter · Enter open · Esc cancel";
     }
+    if app.focus == Focus::Input && app.recalling() {
+        return "Up/Down your earlier lines in this room · Enter send · Ctrl-C quit";
+    }
     // Tab completes only while a command is being typed, and the line says
     // so only when it fits.
     const COMPLETING: &str = "Enter run · Tab completes a command · /help lists them · Ctrl-C quit";
@@ -220,6 +227,8 @@ pub fn draw(f: &mut Frame, app: &App, vm: &ViewModel) {
     // seen without covering what the person types.
     let width = area.width as usize;
     let (text, style): (String, _) = match (&app.status, &app.hint) {
+        // The topic `/topic` put there is drawn as a topic, not a status.
+        (Some(st), _) if app.topic_status.as_ref() == Some(st) => (st.clone(), t.topic),
         (Some(st), _) => (st.clone(), t.warn),
         // Matching commands, as many as fit.
         (None, Some(cmds)) => {
@@ -236,7 +245,18 @@ pub fn draw(f: &mut Frame, app: &App, vm: &ViewModel) {
             }
             (s, t.dim)
         }
-        (None, None) => (help_line(app, width).to_string(), t.dim),
+        // A newer release takes the help line while nothing else needs
+        // it: no box, no switcher, no command being typed.
+        (None, None) => match &app.update_notice {
+            Some(n)
+                if app.modal.is_none()
+                    && app.switcher.is_none()
+                    && !(app.focus == Focus::Input && app.input.starts_with('/')) =>
+            {
+                (n.clone(), t.dim)
+            }
+            _ => (help_line(app, width).to_string(), t.dim),
+        },
     };
     let text = text.as_str();
     let mut help = vec![Span::styled(fit(text, width), style)];
@@ -524,6 +544,13 @@ fn draw_messages(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
     f.render_widget(block, r);
     let w = inner.width as usize;
     let mut rows: Vec<Line> = vec![];
+    // The topic, cut to one row; `/details` shows all of it.
+    if let Some(topic) = &vm.topic {
+        rows.push(Line::from(Span::styled(
+            fit(&format!("Topic: {topic}"), w),
+            t.topic,
+        )));
+    }
     if let Some(warn) = &app.warning {
         for l in wrap(warn, w) {
             rows.push(Line::from(Span::styled(l, t.banner)));
@@ -548,7 +575,11 @@ fn draw_messages(f: &mut Frame, app: &App, vm: &ViewModel, r: Rect) {
     let mut body: Vec<Line> = vec![];
     for l in &vm.lines[first_shown(&vm.lines, w, need)..] {
         let head = message_head(l);
-        let style = if l.notice { t.notice } else { Style::default() };
+        let style = match (l.topic, l.notice) {
+            (true, _) => t.topic,
+            (_, true) => t.notice,
+            _ => Style::default(),
+        };
         let pieces = message_rows(&head, l, w);
         for (i, piece) in pieces.into_iter().enumerate() {
             if i == 0 && !l.notice {
@@ -702,9 +733,22 @@ fn draw_switcher(f: &mut Frame, app: &App, vm: &ViewModel, area: Rect) {
     );
 }
 
-/// The QR code for `text` as rows of half-block characters.
-pub fn qr_rows(text: &str) -> Vec<String> {
-    match qrcode::QrCode::new(text.as_bytes()) {
+/// The QR codes the screen may show for `text`, as rows of half-block
+/// characters, best first: error correction level M, then level L, whose
+/// code is smaller for a long text such as an invite's web address and
+/// still reads well off a screen. A choice is empty when the text is too
+/// long for a QR code at that level.
+pub fn qr_choices(text: &str) -> Vec<Vec<String>> {
+    [qrcode::EcLevel::M, qrcode::EcLevel::L]
+        .into_iter()
+        .map(|ec| qr_rows(text, ec))
+        .collect()
+}
+
+/// The QR code for `text` at error correction level `ec`, as rows of
+/// half-block characters.
+fn qr_rows(text: &str, ec: qrcode::EcLevel) -> Vec<String> {
+    match qrcode::QrCode::with_error_correction_level(text.as_bytes(), ec) {
         Ok(code) => code
             .render::<qrcode::render::unicode::Dense1x2>()
             .quiet_zone(true)
@@ -719,6 +763,10 @@ pub fn qr_rows(text: &str) -> Vec<String> {
 /// Under the command list: how to select text while the mouse is on.
 const MOUSE_NOTE: &str = "To select text while the mouse is on, hold Shift as you drag (Option or Fn on a Mac), or type /mouse off.";
 
+/// The help box's row for Up and Down in the message box, under the
+/// commands.
+const EARLIER_HELP: (&str, &str) = ("Up/Down", "bring back your earlier lines in this room");
+
 /// Width of the command column in the help box: the longest command and
 /// one space.
 const HELP_COLUMN: usize = 22;
@@ -728,7 +776,7 @@ const HELP_COLUMN: usize = 22;
 fn help_rows(inner_w: usize, t: &Theme) -> Vec<Line<'static>> {
     let cyan = t.accent;
     let mut rows = vec![];
-    for (c, d) in HELP {
+    for (c, d) in HELP.iter().chain([&EARLIER_HELP]) {
         for (i, part) in wrap(d, inner_w.saturating_sub(HELP_COLUMN))
             .into_iter()
             .enumerate()
@@ -838,11 +886,21 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
             " Your servers ".into(),
             scroll_window(app, wrapped(rows, inner_w), *offset, max_h),
         ),
-        Modal::Details { lines, offset } => (
-            " Room details ".into(),
-            scroll_window(app, wrapped(lines, inner_w), *offset, max_h),
-        ),
-        Modal::About => (" About ".into(), wrapped(&about_lines(), inner_w)),
+        Modal::Details { lines, offset } => {
+            // The topic line keeps the topic's style.
+            let rows = lines
+                .iter()
+                .flat_map(|l| {
+                    let style = match l.starts_with("Topic: ") {
+                        true => app.theme.topic,
+                        false => Style::default(),
+                    };
+                    wrap(l, inner_w).into_iter().map(move |r| Line::from(Span::styled(r, style)))
+                })
+                .collect();
+            (" Room details ".into(), scroll_window(app, rows, *offset, max_h))
+        }
+        Modal::About => (" About ".into(), wrapped(&about_lines(&app.updates), inner_w)),
         Modal::Help { offset } => (
             " Commands ".into(),
             scroll_window(app, help_rows(inner_w, &app.theme), *offset, max_h),
@@ -869,7 +927,10 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
             let line = copy_line(app.copying, *copied, &app.theme);
             copy_row = Some((v.len(), line.width()));
             v.push(line);
-            (" Invite link ".into(), with_qr(v, link, area, inner_w, &app.theme))
+            // The code holds the web address, which a phone camera opens;
+            // the text above stays the link to paste into a terminal.
+            let web = socketchat_proto::to_web_link(link).unwrap_or_else(|| link.clone());
+            (" Invite link ".into(), with_qr(v, &web, max_h, inner_w, &app.theme))
         }
         Modal::NoInviteLink { why } => (" Invite link ".into(), wrapped(std::slice::from_ref(why), inner_w)),
         Modal::Verify { name, number, .. } => {
@@ -886,7 +947,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 v.push(Line::from(Span::styled(row.join("  "), Style::default().add_modifier(Modifier::BOLD))));
             }
             let digits: String = number.chars().filter(|c| c.is_ascii_digit()).collect();
-            (format!(" Check {} ", fit(name, 30)), with_qr(v, &digits, area, inner_w, &app.theme))
+            (format!(" Check {} ", fit(name, 30)), with_qr(v, &digits, max_h, inner_w, &app.theme))
         }
         Modal::ConfirmVideo { path, .. } => (
             " Send this video? ".into(),
@@ -986,20 +1047,26 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
     }
 }
 
-/// Adds a QR code under `lines` when the window has room, or a note saying
-/// how to make room.
+/// Adds a QR code under `lines` when the window has room for all of it,
+/// or a note saying how to make room. A code with rows cut off cannot be
+/// read, so the box shows the whole code or none.
 fn with_qr(
     mut lines: Vec<Line<'static>>,
     text: &str,
-    area: Rect,
+    max_h: usize,
     inner_w: usize,
     t: &Theme,
 ) -> Vec<Line<'static>> {
-    let qr = qr_rows(text);
-    let qr_w = qr.first().map(|l| l.chars().count()).unwrap_or(0);
-    let fits = qr_w <= inner_w && lines.len() + 1 + qr.len() + 2 <= area.height as usize;
+    let width = |qr: &[String]| qr.first().map(|l| l.chars().count()).unwrap_or(0);
+    // The box's frame takes two of its `max_h` rows, and a blank row sits
+    // above the code.
+    let fits = |qr: &Vec<String>| {
+        !qr.is_empty() && width(qr) <= inner_w && lines.len() + 1 + qr.len() + 2 <= max_h
+    };
+    let qr = qr_choices(text).into_iter().find(fits);
     lines.push(Line::from(""));
-    if fits {
+    if let Some(qr) = qr {
+        let qr_w = width(&qr);
         let pad = " ".repeat((inner_w - qr_w) / 2);
         // Exact RGB black on white: themes remap the named Black and White
         // (some to gray on gray), and cameras then fail to read the code.
@@ -1040,6 +1107,7 @@ mod tests {
             text,
             notice: false,
             mine: false,
+            topic: false,
         }
     }
 
@@ -1058,6 +1126,7 @@ mod tests {
             members: vec![],
             connected: true,
             server: None,
+            topic: None,
         }
     }
 

@@ -14,6 +14,7 @@ mod invites;
 mod perms;
 mod quota;
 mod retention;
+mod rules;
 pub mod tls;
 
 use std::net::SocketAddr;
@@ -198,6 +199,12 @@ pub(crate) struct State {
     pub pre_sign_in: Arc<conn::Budget>,
     /// The server's stored bytes as last counted.
     pub stored: Mutex<quota::Stored>,
+    /// Each room's admins and settings, as last read or merged.
+    pub rules: rules::Rules,
+    /// How fast each member has posted in each room.
+    pub limiter: rules::Limiter,
+    /// When the server started, for the pace limit's clock.
+    started: std::time::Instant,
 }
 
 /// Locks `m` even when a thread panicked while holding it. Requests that
@@ -215,6 +222,14 @@ impl State {
 
     pub fn now(&self) -> u64 {
         system_now() + self.clock_offset.load(Ordering::Relaxed)
+    }
+
+    /// Milliseconds since the server started, for the pace limit, plus
+    /// any time a test moved the clock on. It never runs backwards when
+    /// the system clock is set.
+    pub fn now_ms(&self) -> u64 {
+        let ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        ms + self.clock_offset.load(Ordering::Relaxed) * 1000
     }
 
     /// Today, as the Unix time of its first second. Account and mailbox
@@ -276,6 +291,9 @@ impl Server {
             refusals: Arc::new(tokio::sync::Semaphore::new(conn::MAX_REFUSALS)),
             pre_sign_in: Arc::new(conn::Budget::new(cfg_budget)),
             stored: Default::default(),
+            rules: Default::default(),
+            limiter: Default::default(),
+            started: std::time::Instant::now(),
         });
         let (stop, stop_rx) = watch::channel(false);
         let sweeper = state.clone();
@@ -287,6 +305,20 @@ impl Server {
                 tokio::select! {
                     _ = sweep_stop.changed() => break,
                     _ = every.tick() => retention::sweep(&sweeper),
+                }
+            }
+        });
+        // Buckets that hold no one back go every minute, off the post path.
+        let pruner = state.clone();
+        let mut prune_stop = stop_rx.clone();
+        tokio::spawn(async move {
+            let every_minute = rules::PRUNE_EVERY;
+            let mut every =
+                tokio::time::interval_at(tokio::time::Instant::now() + every_minute, every_minute);
+            loop {
+                tokio::select! {
+                    _ = prune_stop.changed() => break,
+                    _ = every.tick() => pruner.limiter.prune(pruner.now_ms()),
                 }
             }
         });

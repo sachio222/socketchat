@@ -18,20 +18,31 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use socketchat_core::client::{server_text, Client, Event, GroupSummary, Verification};
+use socketchat_core::client::{
+    server_text, Client, Event, GroupSummary, SendOutcome, UpdateCheck, Verification,
+};
 use socketchat_core::close::{close_needed, CloseOutcome};
 use socketchat_core::keys::{fingerprint_text, Key};
 use socketchat_core::sanitize::same_name;
+use socketchat_core::settings::{every, WhoCanInvite, WhoCanSetTopic};
+use socketchat_core::topic;
+
+use crate::app::local_date;
+use socketchat_core::update;
 use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
 use socketchat_proto::InviteLink;
 use tokio::sync::mpsc;
 
 use crate::app::{
-    details_lines, ended_hint, forget_question, forgot_text, invite_message, invite_row,
-    leave_step, sent_file_status, server_row, Action, App, LeaveStep, Modal,
+    details_lines, ended_hint, forget_question, forgot_text, held_line, invite_message, invite_row,
+    leave_step, sent_file_status, server_row, settings_lines, update_about, Action, App, LeaveStep,
+    Modal, HELD_LEAD, OLD_SERVER_SETTINGS,
 };
-use crate::commands::Command;
+
+/// Said when a held text was not sent because the room's members changed.
+const NOT_SENT: &str = "Not sent, because the people in this room changed while it waited. Send it again if you still want to.";
+use crate::commands::{Command, Setting};
 use crate::theme::{pick_theme, Theme, ThemeName, THEMES};
 use crate::ui::{draw, fit, GroupView, LineView, MemberLine, ViewModel};
 
@@ -76,6 +87,8 @@ struct Screen {
     ),
     /// Copies started that have not reported back yet.
     copies_running: usize,
+    /// The update check under way, if one is.
+    update_check: Option<UpdateCheck>,
 }
 
 /// A program that puts text on the clipboard, shared with the thread that
@@ -122,12 +135,12 @@ where
         .unwrap_or_default()
 }
 
-/// The local date `unix` falls on, as YYYY-MM-DD.
-fn local_date(unix: u64) -> String {
+/// The local date and time of `unix`, as "YYYY-MM-DD at HH:MM".
+fn local_date_time(unix: u64) -> String {
     chrono::DateTime::from_timestamp(unix as i64, 0)
         .map(|t| {
             t.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d")
+                .format("%Y-%m-%d at %H:%M")
                 .to_string()
         })
         .unwrap_or_default()
@@ -258,6 +271,9 @@ fn event_group(e: &Event) -> Option<GroupId> {
         | Event::Message { group, .. }
         | Event::MembersChanged { group }
         | Event::GroupRenamed { group }
+        | Event::SettingsChanged { group }
+        | Event::TopicChanged { group }
+        | Event::NotSent { group, .. }
         | Event::NameChanged { group, .. }
         | Event::Left { group, .. }
         | Event::FileOffered { group, .. }
@@ -283,7 +299,31 @@ impl Screen {
             terminal_copy: osc52_copy,
             copies: mpsc::unbounded_channel(),
             copies_running: 0,
+            update_check: None,
         }
+    }
+
+    /// Starts the update check when one is due.
+    fn start_update_check(&mut self) {
+        if self.update_check.is_none() {
+            self.update_check = self.client.start_update_check();
+        }
+        self.show_updates();
+    }
+
+    /// Keeps what the update check found and shows it.
+    fn update_checked(&mut self, found: Option<update::Version>) {
+        self.update_check = None;
+        self.client.finish_update_check(found);
+        self.show_updates();
+    }
+
+    /// Puts the update notice on the help line, or takes it off, and
+    /// writes what `/about` says about the check.
+    fn show_updates(&mut self) {
+        self.app.update_notice = self.client.update_notice(update::install_kind());
+        let state = self.client.update_state().unwrap_or_default();
+        self.app.updates = update_about(&state, update::off_by_env(), &local_date_time);
     }
 
     /// A room's name as the list shows it: a direct chat without a name
@@ -344,20 +384,43 @@ impl Screen {
             })
             .collect();
         let (lines, members) = match self.app.selected {
-            Some(g) => (
-                self.client
+            Some(g) => {
+                let members = self.client.members(g);
+                let lines = self
+                    .client
                     .messages(g, 300)
                     .into_iter()
-                    .map(|l| LineView {
-                        time: local_time(l.sent_unix),
-                        mine: l.sender_key.is_some() && l.sender_key == self.client.my_group_key(g),
-                        sender: l.sender,
-                        text: l.text,
-                        notice: l.notice,
+                    .map(|l| {
+                        let mine =
+                            l.sender_key.is_some() && l.sender_key == self.client.my_group_key(g);
+                        // A topic line names who set it, whether they are
+                        // verified, and the day.
+                        let text = match l.topic {
+                            true => {
+                                let verified = members
+                                    .iter()
+                                    .any(|m| Some(m.key) == l.sender_key && m.verified);
+                                topic::words(
+                                    &l.text,
+                                    &l.sender,
+                                    verified,
+                                    mine,
+                                    &local_date(l.sent_unix),
+                                )
+                            }
+                            false => l.text,
+                        };
+                        LineView {
+                            time: local_time(l.sent_unix),
+                            mine,
+                            sender: l.sender,
+                            text,
+                            notice: l.notice,
+                            topic: l.topic,
+                        }
                     })
-                    .collect(),
-                self.client
-                    .members(g)
+                    .collect();
+                let members = members
                     .into_iter()
                     .map(|m| MemberLine {
                         key: m.key,
@@ -366,8 +429,9 @@ impl Screen {
                         admin: m.admin,
                         me: m.me,
                     })
-                    .collect(),
-            ),
+                    .collect();
+                (lines, members)
+            }
             None => (vec![], vec![]),
         };
         ViewModel {
@@ -377,6 +441,11 @@ impl Screen {
             members,
             connected: self.client.connected(),
             server: self.app.selected.and_then(|g| self.client.room_server(g)),
+            topic: self
+                .app
+                .selected
+                .and_then(|g| self.client.topic(g))
+                .map(|t| t.text),
         }
     }
 
@@ -563,6 +632,14 @@ impl Screen {
             Event::NameChanged { old, new, .. } => {
                 self.app.status = Some(format!("{old} is now called {new}."));
             }
+            // A held text that waited past a change in who is in the room:
+            // the words come back to the box when it is empty.
+            Event::NotSent { group, text } => {
+                if Some(group) == self.app.selected && self.app.input.is_empty() {
+                    self.app.input = text;
+                }
+                self.app.status = Some(NOT_SENT.into());
+            }
             _ => {}
         }
         let groups = self.client.groups();
@@ -649,7 +726,12 @@ impl Screen {
                 Ok(())
             }
             Action::Send(g, text) => match self.client.send_text(g, &text).await {
-                Ok(()) => Ok(()),
+                Ok(SendOutcome::Sent) => Ok(()),
+                // Kept here and sent on its own once the room allows it.
+                Ok(SendOutcome::Held { wait_secs }) => {
+                    self.app.status = Some(held_line(wait_secs));
+                    Ok(())
+                }
                 Err(e) => {
                     // Nothing was sent: give the words back to edit or retry.
                     if self.app.input.is_empty() {
@@ -679,6 +761,7 @@ impl Screen {
                 let room = self.room_name(g);
                 match self.client.leave(g).await {
                     Ok(()) => {
+                        self.app.forget_earlier(g);
                         self.say_after_events(format!(
                             "You left {room}. Its messages are deleted from this computer."
                         ));
@@ -691,6 +774,7 @@ impl Screen {
                 let room = self.room_name(g);
                 match self.client.clear_history(g) {
                     Ok(()) => {
+                        self.app.forget_earlier(g);
                         self.app.scroll = 0;
                         // An ended room goes from the list with its messages.
                         if self.summary(g).is_none() {
@@ -754,6 +838,8 @@ impl Screen {
             return Err("That server is already forgotten.".into());
         };
         let rooms = self.client.forget_server(id).map_err(|e| e.to_string())?;
+        let left: Vec<GroupId> = self.client.groups().iter().map(|g| g.id).collect();
+        self.app.keep_earlier_of(&left);
         for slot in &mut self.app.server_ids {
             if *slot == Some(id) {
                 *slot = None;
@@ -792,9 +878,9 @@ impl Screen {
     /// Uses an invite link. A link with a new certificate for a server in
     /// use opens a box that asks first; `new_certificate` is the answer.
     async fn join(&mut self, link: &str, new_certificate: bool) -> Result<(), String> {
-        let parsed: InviteLink = link
-            .parse()
-            .map_err(|x: socketchat_proto::LinkError| x.to_string())?;
+        let parsed: InviteLink = link.parse().map_err(|x: socketchat_proto::LinkError| {
+            format!("That is not a Socketchat invite link: {x}.")
+        })?;
         let r = if new_certificate {
             self.client.join_new_certificate(&parsed).await
         } else {
@@ -835,7 +921,20 @@ impl Screen {
         let need = || live.clone();
         let e = |e: CoreError| e.to_string();
         match c {
-            Command::Quit => self.quit = true,
+            Command::Quit => match self.client.held_total() {
+                0 => self.quit = true,
+                n => {
+                    let what = if n == 1 {
+                        "A message is".to_string()
+                    } else {
+                        format!("{n} messages are")
+                    };
+                    self.app.modal = Some(Modal::Confirm {
+                        question: format!("{what} still waiting to send, because a room limits fast posting. Quit anyway and drop it? Press y to quit or n to stay."),
+                        yes: Box::new(Action::Quit),
+                    });
+                }
+            },
             Command::Help => self.app.modal = Some(Modal::Help { offset: 0 }),
             Command::About => self.app.modal = Some(Modal::About),
             Command::Theme(None) => {
@@ -864,6 +963,32 @@ impl Screen {
                     ));
                 }
             },
+            Command::Updates(None) => {
+                let on = self.client.update_state().map_err(e)?.on;
+                self.app.status = Some(match (on, update::off_by_env()) {
+                    (false, _) => "Update check off. Type /updates on to turn it back on.".into(),
+                    (true, true) => format!(
+                        "Update check on in your profile, but {} keeps it off for this run.",
+                        update::OFF_VAR
+                    ),
+                    (true, false) => "Update check on: once a day Socketchat asks GitHub whether a new version is out. Type /updates off to stop it.".into(),
+                });
+            }
+            Command::Updates(Some(on)) => {
+                self.client.set_update_check(on).map_err(e)?;
+                if on {
+                    self.start_update_check();
+                } else {
+                    // A check under way finishes, and what it finds is
+                    // kept but not shown.
+                    self.show_updates();
+                }
+                self.app.status = Some(if on {
+                    "Update check on. Once a day Socketchat asks GitHub whether a new version is out.".into()
+                } else {
+                    "Update check off. Socketchat no longer contacts GitHub. Type /updates on to turn it back on.".into()
+                });
+            }
             Command::Mouse(None) => {
                 self.app.status = Some(if self.app.mouse {
                     "Mouse on. To select text, hold Shift as you drag (Option or Fn on a Mac), or type /mouse off.".into()
@@ -1023,6 +1148,19 @@ impl Screen {
                 }
             }
             Command::Title(name) => self.client.rename_room(need()?, &name).await.map_err(e)?,
+            Command::Topic(None) => {
+                let g = need()?;
+                match self.client.topic(g) {
+                    Some(t) => {
+                        let said = t.words(&local_date(t.set_unix));
+                        self.app.status = Some(said.clone());
+                        self.app.topic_status = Some(said);
+                    }
+                    None => self.app.status = Some("This room has no topic.".into()),
+                }
+            }
+            Command::Topic(Some(text)) => self.client.set_topic(need()?, &text).await.map_err(e)?,
+            Command::ClearTopic => self.client.clear_topic(need()?).await.map_err(e)?,
             Command::Close => {
                 let g = need()?;
                 let room = self.room_name(g);
@@ -1125,11 +1263,56 @@ impl Screen {
                 self.pending = Some(Pending::Details(need()?));
                 self.app.status = Some(ASKING.into());
             }
+            Command::Settings(None) => {
+                let g = need()?;
+                let s = self.client.room_settings(g).unwrap_or_default();
+                let mut said = format!(
+                    "{}. Admins change these with /settings invite, /settings slow or /settings topic.",
+                    settings_lines(s.invite, s.slow_secs, s.topic).join(". ")
+                );
+                if self.client.protocol_for(g).is_some_and(|p| p < 3) {
+                    said = format!("{said} {OLD_SERVER_SETTINGS}");
+                }
+                self.app.status = Some(said);
+            }
+            Command::Settings(Some(Setting::Invite(who))) => {
+                let g = need()?;
+                self.client.set_who_can_invite(g, who).await.map_err(e)?;
+                self.app.status = Some(
+                    match who {
+                        WhoCanInvite::Admins => "Only admins can invite people to this room now.",
+                        WhoCanInvite::Anyone => "Anyone in this room can invite people now.",
+                    }
+                    .into(),
+                );
+            }
+            Command::Settings(Some(Setting::Topic(who))) => {
+                let g = need()?;
+                self.client.set_who_can_set_topic(g, who).await.map_err(e)?;
+                self.app.status = Some(
+                    match who {
+                        WhoCanSetTopic::Admins => "Only admins can set this room's topic now.",
+                        WhoCanSetTopic::Anyone => "Anyone in this room can set the topic now.",
+                    }
+                    .into(),
+                );
+            }
+            Command::Settings(Some(Setting::Slow(secs))) => {
+                let g = need()?;
+                self.client.set_slow_mode(g, secs).await.map_err(e)?;
+                self.app.status = Some(match secs {
+                    0 => "Slow mode is off.".into(),
+                    n => format!(
+                        "Slow mode is on: one message {} for each member who isn't an admin.",
+                        every(n)
+                    ),
+                });
+            }
             Command::Clear => {
                 let g = sel.ok_or("Open a chat first.")?;
                 let room = self.room_name(g);
                 self.app.modal = Some(Modal::Confirm {
-                    question: format!("Delete {room}'s messages from this computer? Other members keep theirs. Press y to delete or n to keep them."),
+                    question: format!("Delete {room}'s messages and topic from this computer? Other members keep theirs. Press y to delete or n to keep them."),
                     yes: Box::new(Action::ClearRoom(g)),
                 });
             }
@@ -1207,6 +1390,16 @@ impl Screen {
         }
         if let Err(e) = r {
             self.app.status = Some(e.to_string());
+        }
+        // Every held message went: the line saying one waits is done.
+        if self.client.held_total() == 0
+            && self
+                .app
+                .status
+                .as_deref()
+                .is_some_and(|s| s.starts_with(HELD_LEAD))
+        {
+            self.app.status = None;
         }
         for ev in self.client.take_events() {
             self.on_event(ev);
@@ -1531,6 +1724,7 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
         std::env::var("COLORTERM").ok().as_deref(),
     );
     s.app.mouse = s.client.mouse().ok().flatten().unwrap_or(true);
+    s.start_update_check();
     let mut capturing = false;
     s.select_first();
     let exit_after_draw = std::env::var_os("SOCKETCHAT_EXIT_AFTER_DRAW").is_some();
@@ -1604,6 +1798,13 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
                 return Ok(());
             }
             Some(c) = s.copies.1.recv() => s.copied(c),
+            // The update check answered, or failed, which shows nothing.
+            Some(done) = async {
+                match s.update_check.as_mut() {
+                    Some(check) => Some(check.await),
+                    None => std::future::pending().await,
+                }
+            } => s.update_checked(done.ok().flatten()),
             _ = s.client.wait(IDLE_SYNC) => s.sync().await,
         }
         if s.quit {
@@ -1618,7 +1819,7 @@ mod tests {
     use super::{clock_time, to_base64, Action, Screen};
     use crate::app::Modal;
     use crate::commands::Command;
-    use socketchat_core::client::{Client, Ended};
+    use socketchat_core::client::{Client, Ended, Event};
     use socketchat_proto::msg::GroupId;
 
     #[tokio::test]
@@ -1863,6 +2064,201 @@ mod tests {
         s.view().groups.into_iter().find(|x| x.id == g)
     }
 
+    /// A member asking to change a setting hears a plain no; `/settings`
+    /// shows the settings, and the admin's change reaches the member.
+    #[tokio::test]
+    async fn settings_command_shows_and_refuses_plainly() {
+        use crate::commands::Setting;
+        use socketchat_core::settings::WhoCanInvite;
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_bo(&srv).await;
+        bo.act(Action::Select(g)).await;
+        bo.act(Action::Command(Command::Settings(None))).await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("Who can invite: anyone in the room. Slow mode: off. Who can set the topic: admins only. Admins change these with /settings invite, /settings slow or /settings topic.")
+        );
+        bo.act(Action::Command(Command::Settings(Some(Setting::Invite(
+            WhoCanInvite::Admins,
+        )))))
+        .await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("Only admins can change this room's settings.")
+        );
+        a.set_slow_mode(g, 90).await.unwrap();
+        bo.sync().await;
+        bo.act(Action::Command(Command::Settings(None))).await;
+        assert!(
+            bo.app
+                .status
+                .as_deref()
+                .is_some_and(|s| s.contains("Slow mode: one message every 90 seconds")),
+            "{:?}",
+            bo.app.status
+        );
+    }
+
+    /// `/topic` sets, shows and clears the room's topic; a member in a room
+    /// where only admins set it hears a plain no; every place the topic
+    /// shows gets the cleaned text.
+    #[tokio::test]
+    async fn topic_command_sets_shows_and_refuses_plainly() {
+        use crate::commands::Setting;
+        use socketchat_core::settings::WhoCanSetTopic;
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_bo(&srv).await;
+        bo.act(Action::Select(g)).await;
+        bo.act(Action::Command(Command::Topic(None))).await;
+        assert_eq!(bo.app.status.as_deref(), Some("This room has no topic."));
+        bo.act(Action::Command(Command::Topic(Some("Mine".into()))))
+            .await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("Only admins can set this room's topic.")
+        );
+        a.set_topic(g, "Saturday\nat \x1b[31mnoon\u{202E}")
+            .await
+            .unwrap();
+        bo.sync().await;
+        assert_eq!(bo.view().topic.as_deref(), Some("Saturday at [31mnoon"));
+        let line = bo
+            .view()
+            .lines
+            .into_iter()
+            .find(|l| l.topic)
+            .expect("a topic line");
+        assert!(
+            line.text
+                .starts_with("Topic: Saturday at [31mnoon (set by Ada, verified, "),
+            "{}",
+            line.text
+        );
+        assert!(line.notice);
+        bo.act(Action::Command(Command::Topic(None))).await;
+        let said = bo.app.status.clone().unwrap();
+        assert!(
+            said.starts_with("Topic: Saturday at [31mnoon (set by Ada, verified, "),
+            "{said}"
+        );
+        assert_eq!(bo.app.topic_status.as_ref(), Some(&said));
+        // Ada lets anyone set it; Bo then can, and clears it.
+        a.set_who_can_set_topic(g, WhoCanSetTopic::Anyone)
+            .await
+            .unwrap();
+        bo.sync().await;
+        bo.act(Action::Command(Command::Settings(None))).await;
+        assert!(
+            bo.app
+                .status
+                .as_deref()
+                .is_some_and(|s| s.contains("Who can set the topic: anyone in the room.")),
+            "{:?}",
+            bo.app.status
+        );
+        bo.act(Action::Command(Command::ClearTopic)).await;
+        assert_eq!(bo.view().topic, None);
+        a.sync().await.unwrap();
+        assert_eq!(a.topic(g), None);
+        bo.act(Action::Command(Command::Settings(Some(Setting::Topic(
+            WhoCanSetTopic::Admins,
+        )))))
+        .await;
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("Only admins can change this room's settings.")
+        );
+    }
+
+    /// In slow mode, a member's second message waits: the box empties,
+    /// the status line says when it goes, and the line clears once it has.
+    #[tokio::test]
+    async fn a_held_message_says_when_it_goes() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_bo(&srv).await;
+        a.set_slow_mode(g, 30).await.unwrap();
+        srv.handle.advance_clock(31);
+        bo.client.advance_clock(31);
+        bo.sync().await;
+        bo.act(Action::Select(g)).await;
+        bo.act(Action::Send(g, "first".into())).await;
+        bo.act(Action::Send(g, "second".into())).await;
+        let status = bo.app.status.clone().unwrap_or_default();
+        assert!(
+            status.starts_with("This room limits fast posting; sending in "),
+            "{status}"
+        );
+        assert!(bo.app.input.is_empty(), "the words are not handed back");
+        srv.handle.advance_clock(30);
+        bo.client.advance_clock(30);
+        bo.sync().await;
+        assert_eq!(bo.client.held(g), 0);
+        assert_eq!(bo.app.status, None);
+        a.sync().await.unwrap();
+        let texts: Vec<String> = a.messages(g, 20).into_iter().map(|l| l.text).collect();
+        assert!(texts.contains(&"second".to_string()), "{texts:?}");
+    }
+
+    /// A held text the app did not send, because the people in the room
+    /// changed, comes back to the message box when it is empty, and the
+    /// status line says why.
+    #[tokio::test]
+    async fn a_text_not_sent_comes_back_to_the_box() {
+        let srv = TestServer::start().await;
+        let (g, _a, mut bo, _dir) = room_with_bo(&srv).await;
+        bo.act(Action::Select(g)).await;
+        bo.on_event(Event::NotSent {
+            group: g,
+            text: "only for Ada".into(),
+        });
+        assert_eq!(bo.app.input, "only for Ada");
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("Not sent, because the people in this room changed while it waited. Send it again if you still want to.")
+        );
+        // Words already in the box stay; the status line still says it.
+        bo.app.input = "typing".into();
+        bo.on_event(Event::NotSent {
+            group: g,
+            text: "another".into(),
+        });
+        assert_eq!(bo.app.input, "typing");
+    }
+
+    /// On a server from before 0.5.2, /settings says it cannot keep them.
+    #[tokio::test]
+    async fn settings_on_an_old_server_say_so() {
+        let srv = TestServer::start_with(|c| c.protocol_max = 2).await;
+        let (g, _a, mut bo, _dir) = room_with_bo(&srv).await;
+        bo.act(Action::Select(g)).await;
+        bo.act(Action::Command(Command::Settings(None))).await;
+        let s = bo.app.status.clone().unwrap_or_default();
+        assert!(
+            s.ends_with("This server runs an older version of Socketchat, so it can't enforce who can invite or slow mode."),
+            "{s}"
+        );
+    }
+
+    /// Quitting with a message still held asks first.
+    #[tokio::test]
+    async fn quitting_with_a_held_message_asks_first() {
+        let srv = TestServer::start().await;
+        let (g, mut a, mut bo, _dir) = room_with_bo(&srv).await;
+        a.set_slow_mode(g, 600).await.unwrap();
+        bo.sync().await;
+        bo.act(Action::Select(g)).await;
+        bo.act(Action::Send(g, "one".into())).await;
+        bo.act(Action::Send(g, "two".into())).await;
+        assert!(bo.client.held(g) > 0);
+        bo.act(Action::Command(Command::Quit)).await;
+        assert!(!bo.quit);
+        let Some(Modal::Confirm { question, yes }) = &bo.app.modal else {
+            panic!("{:?}", bo.app.modal)
+        };
+        assert!(question.contains("still waiting to send"), "{question}");
+        assert_eq!(**yes, Action::Quit);
+    }
+
     #[tokio::test]
     async fn a_closed_room_stays_listed_until_another_room_opens() {
         let srv = TestServer::start().await;
@@ -2071,6 +2467,81 @@ mod tests {
         assert_eq!(
             bo.app.status.as_deref(),
             Some("Mouse on. To select text, hold Shift as you drag (Option or Fn on a Mac).")
+        );
+    }
+
+    /// What a check finds reaches the help line and `/about`; a check that
+    /// fails changes neither.
+    #[tokio::test]
+    async fn a_finished_check_shows_the_newer_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::create_profile(dir.path(), "test passphrase", "Ada")
+            .await
+            .unwrap();
+        let mut s = Screen::new(client);
+        s.show_updates();
+        assert_eq!(s.app.update_notice, None);
+        assert_eq!(
+            s.app.updates,
+            "Update check: on, once a day. Not checked yet."
+        );
+        s.update_checked(socketchat_core::update::Version::parse("v99.0.0"));
+        assert_eq!(
+            s.app.update_notice.as_deref(),
+            Some("Socketchat 99.0.0 is out. Run socketchat update.")
+        );
+        assert!(
+            s.app
+                .updates
+                .starts_with("Update check: on, once a day. Last checked "),
+            "{}",
+            s.app.updates
+        );
+        let before = s.app.updates.clone();
+        s.update_checked(None);
+        assert_eq!(
+            s.app.update_notice.as_deref(),
+            Some("Socketchat 99.0.0 is out. Run socketchat update.")
+        );
+        assert_eq!(s.app.updates, before);
+    }
+
+    #[tokio::test]
+    async fn updates_off_is_saved_and_hides_the_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::create_profile(dir.path(), "test passphrase", "Ada")
+            .await
+            .unwrap();
+        let mut s = Screen::new(client);
+        s.app.update_notice = Some("Socketchat 9.0.0 is out. Run socketchat update.".into());
+        s.act(Action::Command(Command::Updates(Some(false)))).await;
+        assert!(!s.client.update_state().unwrap().on);
+        assert_eq!(s.app.update_notice, None);
+        assert_eq!(
+            s.app.status.as_deref(),
+            Some("Update check off. Socketchat no longer contacts GitHub. Type /updates on to turn it back on.")
+        );
+        assert_eq!(
+            s.app.updates,
+            "Update check: off. Type /updates on to turn it on."
+        );
+        s.act(Action::Command(Command::Updates(None))).await;
+        assert_eq!(
+            s.app.status.as_deref(),
+            Some("Update check off. Type /updates on to turn it back on.")
+        );
+        s.act(Action::Command(Command::Updates(Some(true)))).await;
+        assert!(s.client.update_state().unwrap().on);
+        assert_eq!(
+            s.app.status.as_deref(),
+            Some(
+                "Update check on. Once a day Socketchat asks GitHub whether a new version is out."
+            )
+        );
+        s.act(Action::Command(Command::Updates(None))).await;
+        assert_eq!(
+            s.app.status.as_deref(),
+            Some("Update check on: once a day Socketchat asks GitHub whether a new version is out. Type /updates off to stop it.")
         );
     }
 
@@ -2404,6 +2875,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_takes_the_web_form_of_a_link() {
+        let srv = TestServer::start().await;
+        let mut a = TestClient::new(&srv, "Ada").await;
+        let g = a.create_group("Book club").await.unwrap();
+        let link = a.invite(Some(g), false).await.unwrap().0.to_string();
+        let (mut cy, _dir) = screen(&srv, "Cy").await;
+        let web = socketchat_proto::to_web_link(&link).unwrap();
+        join_on(&mut cy, &web).await;
+        let status = cy.app.status.clone().unwrap_or_default();
+        assert!(status.starts_with("Asked to join. Waiting for"), "{status}");
+    }
+
+    #[tokio::test]
+    async fn join_refuses_any_other_web_address() {
+        let srv = TestServer::start().await;
+        let (mut cy, _dir) = screen(&srv, "Cy").await;
+        join_on(&mut cy, "https://example.com/join#socketchat://x").await;
+        assert_eq!(
+            cy.app.status.as_deref(),
+            Some("That is not a Socketchat invite link: the only web address that carries an invite is https://socketchat.org/join.")
+        );
+    }
+
+    /// Types `/join <link>` on screen `s`.
+    async fn join_on(s: &mut Screen, link: &str) {
+        s.act(Action::Command(Command::Join(link.into()))).await;
+    }
+
+    #[tokio::test]
     async fn details_show_after_the_server_answers() {
         let srv = TestServer::start().await;
         let (g, _a, mut bo, _dir) = room_with_bo(&srv).await;
@@ -2418,13 +2918,14 @@ mod tests {
         };
         assert_eq!(lines[0], "Name: Room");
         assert_eq!(lines[1], format!("Server: {}", srv.addr()));
-        assert_eq!(lines[2], "Admins: Ada");
-        assert_eq!(lines[3], "Members: 2");
+        assert_eq!(lines[2], "Topic: none");
+        assert_eq!(lines[3], "Admins: Ada");
+        assert_eq!(lines[4], "Members: 2");
         assert!(
-            lines[4].starts_with("Created: 20") && lines[4].len() == "Created: 2026-10-20".len(),
+            lines[5].starts_with("Created: 20") && lines[5].len() == "Created: 2026-10-20".len(),
             "{lines:?}"
         );
-        assert_eq!(lines[6], "Muted: no");
+        assert_eq!(lines[7], "Muted: no");
     }
 
     #[tokio::test]
@@ -2457,7 +2958,7 @@ mod tests {
         let Some(Modal::Confirm { question, yes }) = bo.app.modal.take() else {
             panic!("no question: {:?}", bo.app.status);
         };
-        assert_eq!(question, "Delete Room's messages from this computer? Other members keep theirs. Press y to delete or n to keep them.");
+        assert_eq!(question, "Delete Room's messages and topic from this computer? Other members keep theirs. Press y to delete or n to keep them.");
         bo.act(*yes).await;
         assert!(row(&bo, g).is_none(), "cleared: the ended room is gone");
         assert_eq!(
@@ -2863,5 +3364,123 @@ mod tests {
             ada.app.status.as_deref(),
             Some(format!("Made Fresh on {n2}.").as_str())
         );
+    }
+
+    // ---------- Up and Down: earlier lines ----------
+
+    fn press(s: &mut Screen, code: crossterm::event::KeyCode) -> Vec<Action> {
+        let vm = s.view();
+        let k = crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+        s.app.handle_key(k, &vm)
+    }
+
+    /// Types `text` in the message box and presses Enter, carrying out
+    /// what that asks for.
+    async fn enter_line(s: &mut Screen, text: &str) {
+        for c in text.chars() {
+            press(s, crossterm::event::KeyCode::Char(c));
+        }
+        for a in press(s, crossterm::event::KeyCode::Enter) {
+            s.act(a).await;
+        }
+    }
+
+    /// What one Up brings back into an emptied message box.
+    fn first_up(s: &mut Screen) -> String {
+        press(s, crossterm::event::KeyCode::Esc);
+        press(s, crossterm::event::KeyCode::Up);
+        std::mem::take(&mut s.app.input)
+    }
+
+    async fn answer_yes(s: &mut Screen) {
+        let Some(Modal::Confirm { yes, .. }) = s.app.modal.take() else {
+            panic!("no question: {:?}", s.app.status);
+        };
+        s.act(*yes).await;
+    }
+
+    #[tokio::test]
+    async fn clear_and_leave_drop_the_rooms_earlier_lines() {
+        let srv = TestServer::start().await;
+        let (g, _a, mut bo, _dir) = room_with_bo(&srv).await;
+        let other = bo.client.create_group("Other").await.unwrap();
+        bo.act(Action::Select(other)).await;
+        enter_line(&mut bo, "in the other room").await;
+        bo.act(Action::Select(g)).await;
+        enter_line(&mut bo, "hello").await;
+        assert_eq!(first_up(&mut bo), "hello");
+        enter_line(&mut bo, "/clear").await;
+        press(&mut bo, crossterm::event::KeyCode::Char('n'));
+        assert_eq!(first_up(&mut bo), "/clear", "a no keeps them");
+        enter_line(&mut bo, "/clear").await;
+        answer_yes(&mut bo).await;
+        assert_eq!(first_up(&mut bo), "", "/clear drops them");
+        enter_line(&mut bo, "hello again").await;
+        enter_line(&mut bo, "/leave").await;
+        answer_yes(&mut bo).await;
+        assert!(row(&bo, g).is_none(), "left: {:?}", bo.app.status);
+        bo.app.selected = Some(g);
+        assert_eq!(first_up(&mut bo), "", "/leave drops them");
+        bo.act(Action::Select(other)).await;
+        assert_eq!(first_up(&mut bo), "in the other room");
+    }
+
+    #[tokio::test]
+    async fn forget_drops_the_earlier_lines_of_the_servers_rooms() {
+        let srv = TestServer::start().await;
+        let (mut ada, _dir) = screen(&srv, "Ada").await;
+        let g = ada.client.create_group("Crew").await.unwrap();
+        ada.act(Action::Select(g)).await;
+        enter_line(&mut ada, "hello").await;
+        assert_eq!(first_up(&mut ada), "hello");
+        enter_line(&mut ada, "/servers").await;
+        ada.app.modal = None;
+        enter_line(&mut ada, "/forget 1").await;
+        answer_yes(&mut ada).await;
+        assert!(ada.view().groups.is_empty(), "{:?}", ada.app.status);
+        ada.app.selected = Some(g);
+        assert_eq!(first_up(&mut ada), "");
+    }
+
+    /// Every file under `dir`, in its folders too.
+    fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                out.extend(files_under(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn earlier_lines_never_reach_the_profile() {
+        let srv = TestServer::start().await;
+        let (mut ada, dir) = screen(&srv, "Ada").await;
+        let g = ada.client.create_group("Notes").await.unwrap();
+        ada.act(Action::Select(g)).await;
+        let marker = "zq-earlier-line-marker";
+        enter_line(&mut ada, &format!("a message {marker}")).await;
+        enter_line(&mut ada, &format!("/theme {marker}")).await;
+        assert_eq!(first_up(&mut ada), format!("/theme {marker}"));
+        drop(ada);
+        for f in files_under(dir.path()) {
+            let bytes = std::fs::read(&f).unwrap();
+            assert!(
+                !bytes.windows(marker.len()).any(|w| w == marker.as_bytes()),
+                "{} holds it",
+                f.display()
+            );
+        }
+        // The message is kept, as messages are; Up on a new screen for the
+        // same profile brings back nothing.
+        let client = Client::open(dir.path(), passphrase()).await.unwrap();
+        let mut again = Screen::new(client);
+        again.act(Action::Select(g)).await;
+        assert!(again.view().lines.iter().any(|l| l.text.contains(marker)));
+        assert_eq!(first_up(&mut again), "");
     }
 }

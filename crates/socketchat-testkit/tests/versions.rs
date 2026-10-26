@@ -108,5 +108,5 @@ async fn protocol_1_app_works_on_a_0_5_server() {
     assert_eq!(std::fs::read(saved).unwrap(), b"a small note from Bo");
 
     assert_eq!(b.protocol_for(g), Some(1));
-    assert_eq!(a.protocol_for(g), Some(2));
+    assert_eq!(a.protocol_for(g), Some(socketchat_proto::PROTOCOL_VERSION));
 }

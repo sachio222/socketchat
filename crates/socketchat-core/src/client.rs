@@ -14,9 +14,9 @@ use rand_core::{OsRng, RngCore};
 use socketchat_proto::msg::{Entry, Push, Request, Response, WelcomeIn, WelcomeOut};
 use socketchat_proto::{InviteLink, Token};
 
-use crate::appmsg::{AppMsg, Extension};
+use crate::appmsg::{AppMsg, Extension, Topic};
 use crate::close::{CloseOutcome, CloseView};
-use crate::invite::{join_sig, key_packages, pick_key_package};
+use crate::invite::{join_sig, key_packages_with, pick_key_package};
 use crate::keys::{
     fingerprint, invite_proof, invite_signing_key, join_request_ok, open_voucher, proof_matches,
     seal_voucher, sign_join_request, voucher_seal_key, Binding, GroupId, Key, KeyPair, Voucher,
@@ -24,12 +24,17 @@ use crate::keys::{
 };
 use crate::net::{Conn, NetError};
 use crate::provider::Provider;
+use crate::settings::{
+    every, room_settings, settings_in, RoomSettings, WhoCanInvite, WhoCanSetTopic, MAX_SLOW_SECS,
+};
 use crate::store::{
     Closing, GroupRow, MemberRow, MessageRow, PendingJoin, Profile, Store, StoredVoucher,
 };
 use crate::suite::{
-    admins_from, group_context_extensions, group_create_config, group_join_config, SUITE,
+    admins_from, capabilities, group_context_extensions, group_create_config, group_join_config,
+    load_group, takes_settings, SUITE,
 };
+use crate::topic::TopicView;
 use crate::CoreError;
 
 mod servers;
@@ -41,6 +46,9 @@ pub mod kind {
     pub const NOTICE: i64 = 1;
     pub const FILE: i64 = 2;
     pub const EXTENSION: i64 = 3;
+    /// A topic set or cleared: the body is the topic, the sender who set
+    /// it, the time when they set it.
+    pub const TOPIC: i64 = 4;
 }
 
 /// The app version this build announces to its rooms.
@@ -100,6 +108,9 @@ pub struct ChatLine {
     pub text: String,
     pub sent_unix: u64,
     pub notice: bool,
+    /// A topic set or cleared, by `sender_key` at `sent_unix`; `text` is the
+    /// topic, empty when it was cleared. Also a notice.
+    pub topic: bool,
 }
 
 /// A file offered in a room, with who sent it and when.
@@ -209,6 +220,44 @@ pub struct RoomDetails {
     /// The request to close this room, while one is open or was kept in
     /// the last seven days.
     pub close: Option<CloseView>,
+    /// Who can bring people into the room.
+    pub invite: WhoCanInvite,
+    /// Seconds each member who is not an admin waits between posts; 0 is
+    /// off.
+    pub slow_secs: u32,
+    /// Whether the room's server enforces these settings: `Some(false)`
+    /// for a server too old to (before protocol 3), where apps refuse to
+    /// set them; `None` when it could not be reached.
+    pub server_enforces: Option<bool>,
+    /// The server's own rule on members inviting into rooms: `Some(false)`
+    /// when its operator lets only admins invite, whatever the room's
+    /// setting; `None` when the server is too old to say or could not be
+    /// reached.
+    pub server_members_invite: Option<bool>,
+    /// Who can set the room's topic.
+    pub topic_who: WhoCanSetTopic,
+    /// The room's topic, if it has one.
+    pub topic: Option<TopicView>,
+}
+
+/// What became of a text sent with [`Client::send_text`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// It went out.
+    Sent,
+    /// The room limits fast posting: this app holds it and sends it, in
+    /// order, after about `wait_secs`, on a later sync.
+    Held { wait_secs: u64 },
+}
+
+/// A text the server said came too fast, waiting its turn.
+struct HeldText {
+    gid: GroupId,
+    text: String,
+    /// Who was in the room when it was typed. A text goes only to them.
+    members: Vec<Key>,
+    /// When to try again, on this client's clock.
+    due_unix: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,6 +284,21 @@ pub enum Event {
     },
     GroupRenamed {
         group: GroupId,
+    },
+    /// An admin changed the room's settings.
+    SettingsChanged {
+        group: GroupId,
+    },
+    /// The room's topic was set or cleared.
+    TopicChanged {
+        group: GroupId,
+    },
+    /// A text held back because the room limits fast posting was not sent,
+    /// because the people in the room changed while it waited. `text` is
+    /// what the person typed.
+    NotSent {
+        group: GroupId,
+        text: String,
     },
     NameChanged {
         group: GroupId,
@@ -304,11 +368,15 @@ const UNKNOWN_KEY: &str = "this server does not know that key";
 const JOIN_WAIT_SECS: u64 = 7 * 24 * 3600;
 
 /// Said when a join can no longer complete because its link's maker left.
-pub const LINK_MAKER_LEFT: &str = "This invite link stopped working because the person who made it left the room. Ask someone in the room for a new link.";
+pub const LINK_MAKER_LEFT: &str = "This invite link stopped working, because the person who made it left the room or the room now lets only admins invite. Ask someone in the room for a new link.";
 
 /// Said when nobody let a joiner in before the server stopped waiting.
 pub const JOIN_TIMED_OUT: &str =
     "Nobody let you in through this invite link in time. Ask someone in the room for a new link.";
+
+/// Longest topic text an app takes from the room, in bytes. An app sends
+/// at most 300 characters; anything far past that is ignored whole.
+const MAX_TOPIC_WIRE_BYTES: usize = 4096;
 
 /// Largest MLS message the server takes, in bytes: a frame of 1 MiB less
 /// room for the request around it.
@@ -334,12 +402,62 @@ fn connection_lost(e: &CoreError) -> bool {
     )
 }
 
+/// Said when an admin asks for a room setting on a server from before
+/// 0.5.2, which cannot keep it.
+pub const OLD_SERVER_KEEP: &str = "This server runs an older version of Socketchat, so it can't keep this setting. Ask the person who runs it to update.";
+
+/// Said when an admin asks to let anyone invite on a server whose operator
+/// lets only admins invite into rooms.
+pub const SERVER_ADMINS_ONLY: &str =
+    "This server lets only admins invite people into its rooms, so this room stays admins-only.";
+
+/// Whether a post was held back because the room limits fast posting.
+fn slowed(e: &CoreError) -> bool {
+    matches!(e, CoreError::Net(NetError::SlowDown { .. }))
+}
+
+/// The notices for a change in a room's settings made by `who` ("You" or
+/// a name).
+fn settings_notices(who: &str, old: &RoomSettings, new: &RoomSettings) -> Vec<String> {
+    let mut out = Vec::new();
+    if old.invite != new.invite {
+        out.push(match new.invite {
+            WhoCanInvite::Admins => format!("{who} let only admins invite people to this room."),
+            WhoCanInvite::Anyone => format!("{who} let anyone in the room invite people."),
+        });
+    }
+    if old.slow_secs != new.slow_secs {
+        out.push(match (old.slow_secs, new.slow_secs) {
+            (_, 0) => format!("{who} turned off slow mode."),
+            (0, n) => format!(
+                "{who} turned on slow mode: one message {} for each member who isn't an admin.",
+                every(n)
+            ),
+            (_, n) => format!(
+                "{who} changed slow mode to one message {} for each member who isn't an admin.",
+                every(n)
+            ),
+        });
+    }
+    if old.topic != new.topic {
+        out.push(match new.topic {
+            WhoCanSetTopic::Anyone => format!("{who} let anyone in the room set the topic."),
+            WhoCanSetTopic::Admins => format!("{who} let only admins set the topic."),
+        });
+    }
+    out
+}
+
 /// How often a member refreshes its own encryption keys in each group.
 pub const KEY_REFRESH_SECS: u64 = 7 * 24 * 3600;
 
 /// Said when a join ends unconfirmed and this member's profile stays out
 /// of the room.
 pub const HIDDEN_NAME: &str = "Your name stays hidden there until you mark someone verified.";
+
+/// An update check under way: its task gives the newest release GitHub
+/// named, or `None` when the check failed.
+pub type UpdateCheck = tokio::task::JoinHandle<Option<crate::update::Version>>;
 
 pub struct Client {
     store: Store,
@@ -390,6 +508,14 @@ pub struct Client {
     pushed: HashMap<GroupId, BTreeMap<u64, Vec<u8>>>,
     /// Why the last try to reach each server failed, until one works.
     last_error: HashMap<i64, String>,
+    /// Texts the server said came too fast, oldest first.
+    held: VecDeque<HeldText>,
+    /// Rooms that hold this member back from posting, with when they let
+    /// it post again, on this client's clock. Nothing is encrypted for a
+    /// room before then: every message encrypted moves this member's keys
+    /// on in the room, and one the server refuses would leave them ahead
+    /// of what everyone else can open.
+    slow_until: HashMap<GroupId, u64>,
     #[cfg(feature = "test-hooks")]
     hooks: Hooks,
 }
@@ -425,6 +551,9 @@ struct Hooks {
     fail_purge: bool,
     /// The next `leave` treats the room as having one member.
     alone_leave: bool,
+    /// KeyPackages and refreshed keys carry the capabilities of an app up
+    /// to 0.5.1, which knows no room settings.
+    old_capabilities: bool,
     /// The next ending of a room stops after `begin_end`.
     fail_ending: bool,
     /// The next close this app finishes stops right after posting
@@ -448,8 +577,14 @@ struct Hooks {
     /// The proposal kinds of every commit from someone else this app
     /// merged, by group, oldest first.
     merged: Vec<(GroupId, Vec<String>)>,
+    /// Application messages this app encrypted.
+    encrypted: usize,
+    /// This app reads application messages as one up to 0.5.1 does, which
+    /// knows no topics.
+    reads_like_0_5_1: bool,
 }
 
+#[derive(Clone)]
 enum DmTodo {
     Accept {
         shared: GroupId,
@@ -679,6 +814,8 @@ impl Client {
             commit_grace: HashSet::new(),
             pushed: HashMap::new(),
             last_error: HashMap::new(),
+            held: VecDeque::new(),
+            slow_until: HashMap::new(),
             #[cfg(feature = "test-hooks")]
             hooks: Hooks::default(),
         };
@@ -700,7 +837,7 @@ impl Client {
                     ))),
                 }
             } else if let Some(mls) =
-                MlsGroup::load(c.prov.storage(), &mls_gid(&row.id)).map_err(mls_err)?
+                load_group(c.prov.storage(), &mls_gid(&row.id)).map_err(mls_err)?
             {
                 c.groups.insert(row.id, Live { row, mls });
             }
@@ -781,6 +918,13 @@ impl Client {
     /// Waits up to `max` for a server to push something or drop. Safe to
     /// cancel: it only listens. Call [`Client::sync`] afterwards to act on it.
     pub async fn wait(&mut self, max: std::time::Duration) -> Wake {
+        // A held text that is due wakes the caller, whose sync sends it.
+        let max = match self.held.iter().map(|h| h.due_unix).min() {
+            Some(due) => max.min(std::time::Duration::from_secs(
+                due.saturating_sub(self.now()),
+            )),
+            None => max,
+        };
         if self.conns.is_empty() {
             tokio::time::sleep(max).await;
             return Wake::Timeout;
@@ -1087,7 +1231,7 @@ impl Client {
         // its public half, so they can check this request but not make one.
         let signer = signer.unwrap_or_else(|| invite_signing_key(&secret));
         let sig = sign_join_request(&signer, &link.token, &key.public());
-        let kps = key_packages(&self.prov, &key, Some(&sig))?;
+        let kps = key_packages_with(&self.prov, &key, Some(&sig), self.leaf_capabilities())?;
         let blob = kps.blob;
         self.store.save_pending_join(&PendingJoin {
             token: link.token,
@@ -1274,10 +1418,14 @@ impl Client {
         self.store.delete_pending_join(&pending.token)?;
         self.groups.insert(gid, Live { row, mls });
         self.joins.push((gid, verification));
-        // The profile is owed the same way until it goes out.
+        // The profile is owed the same way until it goes out, which in a
+        // room that limits fast posting may be a later sync.
         self.owe_repost(gid)?;
-        self.post_profile(gid).await?;
-        self.paid_repost(gid)?;
+        match self.post_profile(gid).await {
+            Ok(()) => self.paid_repost(gid)?,
+            Err(e) if slowed(&e) => return Ok(()),
+            Err(e) => return Err(e),
+        }
         self.send_owed_proofs(gid).await
     }
 
@@ -1358,9 +1506,15 @@ impl Client {
     /// Posts the invite proofs this member still owes in a group.
     async fn send_owed_proofs(&mut self, gid: GroupId) -> Result<(), CoreError> {
         for (token, proof) in self.store.owed_proofs(&gid)? {
-            self.send_app(gid, &AppMsg::InviteProof { token, proof })
-                .await?;
-            self.store.paid_proof(&gid, &token)?;
+            match self
+                .send_app(gid, &AppMsg::InviteProof { token, proof })
+                .await
+            {
+                Ok(_) => self.store.paid_proof(&gid, &token)?,
+                // Still owed; a later sync sends it.
+                Err(e) if slowed(&e) => return Ok(()),
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }
@@ -1467,6 +1621,15 @@ impl Client {
     /// Encrypts and posts an application message. Returns its log sequence.
     pub(crate) async fn send_app(&mut self, gid: GroupId, msg: &AppMsg) -> Result<u64, CoreError> {
         let server_id = self.server_of(&gid)?;
+        // A room that holds this member back gets nothing encrypted until
+        // it lets them post again.
+        let now = self.now();
+        if let Some(until) = self.slow_until.get(&gid).copied().filter(|u| *u > now) {
+            let ms = (until - now).saturating_mul(1000);
+            return Err(CoreError::Net(NetError::SlowDown {
+                retry_after_ms: u32::try_from(ms).unwrap_or(u32::MAX),
+            }));
+        }
         #[cfg(feature = "test-hooks")]
         {
             let kind: String = format!("{msg:?}")
@@ -1481,6 +1644,10 @@ impl Client {
                 .groups
                 .get_mut(&gid)
                 .ok_or_else(|| CoreError::Other("you are not in that group".into()))?;
+            #[cfg(feature = "test-hooks")]
+            {
+                self.hooks.encrypted += 1;
+            }
             let out = live
                 .mls
                 .create_message(&self.prov, &live.row.key, &msg.encode())
@@ -1512,7 +1679,12 @@ impl Client {
             {
                 Ok(Response::Posted { seq }) => {
                     self.note_own_entry(gid, seq);
+                    self.note_own_post(gid);
                     return Ok(seq);
+                }
+                Err(CoreError::Net(NetError::SlowDown { retry_after_ms })) => {
+                    self.hold_back(gid, retry_after_ms);
+                    return Err(CoreError::Net(NetError::SlowDown { retry_after_ms }));
                 }
                 Err(CoreError::Net(NetError::Refused(_))) if attempt == 0 => {
                     self.fetch_group(gid).await?;
@@ -1526,6 +1698,25 @@ impl Client {
         Err(CoreError::Other(
             "the server would not take the message".into(),
         ))
+    }
+
+    /// Notes that a room holds this member back for `retry_after_ms`.
+    fn hold_back(&mut self, gid: GroupId, retry_after_ms: u32) {
+        let until = self.now() + crate::net::wait_secs(retry_after_ms);
+        let at = self.slow_until.entry(gid).or_insert(0);
+        *at = (*at).max(until);
+    }
+
+    /// After this member's own post: a room in slow mode holds them back
+    /// for its period, unless they are an admin.
+    fn note_own_post(&mut self, gid: GroupId) {
+        let Some(slow) = self.room_settings(gid).map(|s| s.slow_secs) else {
+            return;
+        };
+        let me = self.my_group_key(gid);
+        if slow > 0 && !me.is_some_and(|k| self.current_admins(&gid).contains(&k)) {
+            self.hold_back(gid, slow.saturating_mul(1000));
+        }
     }
 
     /// Posts a commit the group has staged. On a lost race, catches up and
@@ -1602,6 +1793,9 @@ impl Client {
                 live.mls
                     .clear_pending_commit(self.prov.storage())
                     .map_err(mls_err)?;
+                if let CoreError::Net(NetError::SlowDown { retry_after_ms }) = e {
+                    self.hold_back(gid, retry_after_ms);
+                }
                 Err(e)
             }
         }
@@ -1620,10 +1814,12 @@ impl Client {
                 return Ok(());
             }
             admins.push(*member);
+            // The room's settings stay as they are.
+            let settings = room_settings(live.mls.extensions());
             let bundle = live
                 .mls
                 .commit_builder()
-                .propose_group_context_extensions(group_context_extensions(&admins))
+                .propose_group_context_extensions(group_context_extensions(&admins, &settings))
                 .map_err(mls_err)?
                 .load_psks(self.prov.storage())
                 .map_err(mls_err)?
@@ -1654,6 +1850,15 @@ impl Client {
         // A link's voucher carries this person's identity key.
         if let (Some(g), false) = (group, dm) {
             self.check_not_held(g)?;
+            let admin_only = self
+                .room_settings(g)
+                .is_some_and(|s| s.invite == WhoCanInvite::Admins);
+            let me = self.my_group_key(g);
+            if admin_only && !me.is_some_and(|k| self.current_admins(&g).contains(&k)) {
+                return Err(CoreError::Other(
+                    "In this room only admins can invite people.".into(),
+                ));
+            }
         }
         let server_id = match (group, dm) {
             (Some(g), false) => self.server_of(&g)?,
@@ -1725,15 +1930,28 @@ impl Client {
             // never the secret: they can check and complete the join, but
             // only the person holding the link can sign a request or prove
             // it to this client.
-            self.send_app(
-                gid,
-                &AppMsg::Voucher {
-                    voucher,
-                    request_key,
-                    seal_key,
-                },
-            )
-            .await?;
+            let posted = self
+                .send_app(
+                    gid,
+                    &AppMsg::Voucher {
+                        voucher,
+                        request_key,
+                        seal_key,
+                    },
+                )
+                .await;
+            if let Err(e) = posted {
+                // The room limits fast posting: the link goes again, so no
+                // link lingers that the room was never told about, and the
+                // person tries again after the wait.
+                if slowed(&e) {
+                    let _ = self
+                        .request(server_id, Request::CancelInvite { token })
+                        .await;
+                    self.store.forget_invite(&token)?;
+                }
+                return Err(e);
+            }
             link.inviter_fpr = Some(fingerprint(&self.profile.identity.public()));
             link.secret = Some(secret);
         }
@@ -1913,6 +2131,19 @@ impl Client {
         let Ok(voucher) = postcard::from_bytes::<Voucher>(&stored.voucher) else {
             return Ok(());
         };
+        // A member's link completes only while the server lets members
+        // bring people into rooms; an operator may have stopped that since
+        // the link was made.
+        let members_link = self
+            .groups
+            .get(&gid)
+            .is_some_and(|l| !admins_from(l.mls.extensions()).contains(&voucher.inviter_group_key));
+        if members_link {
+            let server_id = self.server_of(&gid)?;
+            if self.server_lets_members_invite(server_id).await == Some(false) {
+                return Ok(());
+            }
+        }
         // The verified mark for the joiner comes later, from their proof
         // that they hold the link itself (see `AppMsg::InviteProof`).
         let mine = stored.secret.is_some();
@@ -1925,7 +2156,24 @@ impl Client {
             let my_key = live.row.key.public();
             let admins = admins_from(live.mls.extensions());
             let is_admin = admins.contains(&my_key);
-            if !is_admin && !mine {
+            let settings = room_settings(live.mls.extensions());
+            let admins_only = settings.invite == WhoCanInvite::Admins;
+            if !is_admin && (!mine || admins_only) {
+                return Ok(());
+            }
+            // In a room that lets only admins invite, a link a member made
+            // before then no longer brings anyone in.
+            if admins_only && !admins.contains(&voucher.inviter_group_key) {
+                return Ok(());
+            }
+            // A room with settings takes only apps that know them.
+            if !settings.is_default() && !takes_settings(kp.leaf_node().capabilities()) {
+                if mine && self.refused_adds.insert(token) {
+                    let room = room_label(&live.row.name, live.row.is_dm);
+                    self.emit(Event::Warning(format!(
+                        "Someone who used your invite link to {room} has a Socketchat too old for this room's settings. They need Socketchat 0.5.2 or later."
+                    )));
+                }
                 return Ok(());
             }
             if live.mls.members().any(|m| m.signature_key == joiner.0) {
@@ -1957,11 +2205,14 @@ impl Client {
                 Ok(Some(seq)) => {
                     self.store.upsert_member(&gid, &joiner, Some(seq))?;
                     self.store.set_voucher_joiner(&gid, &token, &joiner)?;
-                    // Owed from here on: if sharing fails, a later sync
-                    // sends it.
+                    // Owed from here on: if sharing fails, or the room
+                    // limits fast posting, a later sync sends it.
                     self.owe_repost(gid)?;
-                    self.after_add(gid).await?;
-                    self.paid_repost(gid)?;
+                    match self.after_add(gid).await {
+                        Ok(()) => self.paid_repost(gid)?,
+                        Err(e) if slowed(&e) => {}
+                        Err(e) => return Err(e),
+                    }
                     self.emit(Event::JoinRequestHandled { group: gid });
                     self.emit(Event::MembersChanged { group: gid });
                     return Ok(());
@@ -2008,6 +2259,16 @@ impl Client {
         let name = self.groups[&gid].row.name.clone();
         if !name.is_empty() {
             self.send_app(gid, &AppMsg::GroupName { name }).await?;
+        }
+        // The topic, from an admin, signed by whoever set it.
+        let me = self.groups[&gid].row.key.public();
+        if self.current_admins(&gid).contains(&me) {
+            if let Some(t) = self.store.topic(&gid)? {
+                if !crate::sanitize::clean_topic(&t.text).is_empty() {
+                    let t = Topic { repost: true, ..t };
+                    self.send_app(gid, &AppMsg::Topic(t)).await?;
+                }
+            }
         }
         if let Some(v) = self.version_to_announce() {
             self.send_app(gid, &AppMsg::AppInfo { app_version: v })
@@ -2062,6 +2323,8 @@ impl Client {
                     self.store.set_member_app_version(&gid, &me, &version)?;
                 }
                 Err(e) if connection_lost(&e) => return Err(e),
+                // The room limits fast posting; the next sync tries again.
+                Err(e) if slowed(&e) => {}
                 Err(e) => {
                     if self.version_unshared.insert(gid) {
                         let what =
@@ -2122,9 +2385,13 @@ impl Client {
 
     /// Passes on a dropped connection, and turns any other error from one
     /// group's step into a warning so the other groups carry on.
+    /// A room that limits fast posting holds back what this app sends on
+    /// its own; every such step is owed and comes again on a later sync, so
+    /// that says nothing.
     fn group_step(&mut self, r: Result<(), CoreError>, what: &str) -> Result<(), CoreError> {
         match r {
             Err(e) if connection_lost(&e) => Err(e),
+            Err(e) if slowed(&e) => Ok(()),
             Err(e) => {
                 self.emit(Event::Warning(format!("{what}: {e}")));
                 Ok(())
@@ -2200,6 +2467,9 @@ impl Client {
                 self.group_step(r, &what)?;
             }
         }
+        // Texts held back for posting too fast go before anything this app
+        // sends on its own.
+        self.send_held(Some(server_id), None).await?;
         // Closes this member agreed to and that have enough votes, and any
         // this app started and did not finish.
         for gid in &gids {
@@ -2211,6 +2481,7 @@ impl Client {
         }
         let todo: Vec<DmTodo> = std::mem::take(&mut self.dm_todo);
         for t in todo {
+            let again = t.clone();
             let r = match t {
                 DmTodo::Accept {
                     shared,
@@ -2225,6 +2496,11 @@ impl Client {
                     key_packages,
                 } => self.complete_dm(group, token, key_packages).await,
             };
+            // Held back by a room's pace: try again next sync.
+            if r.as_ref().is_err_and(slowed) {
+                self.dm_todo.push(again);
+                continue;
+            }
             self.group_step(r, "Could not open the direct message")?;
         }
         let leaving: Vec<GroupId> = self.leaves.drain().collect();
@@ -2240,11 +2516,21 @@ impl Client {
             }
         }
         let now = self.now();
+        // Keys due for their weekly refresh, and this member's place in
+        // rooms joined with an app that knew no room settings: refreshing
+        // it with this app's capabilities lets the room's admins change
+        // its settings.
+        let caps = self.leaf_capabilities();
         let stale: Vec<GroupId> = self
             .groups
             .values()
             .filter(|g| g.row.server_id == server_id)
-            .filter(|g| now.saturating_sub(g.row.last_update_unix) > KEY_REFRESH_SECS)
+            .filter(|g| {
+                now.saturating_sub(g.row.last_update_unix) > KEY_REFRESH_SECS
+                    || g.mls
+                        .own_leaf_node()
+                        .is_some_and(|l| takes_settings(&caps) && !takes_settings(l.capabilities()))
+            })
             .filter(|g| g.mls.pending_commit().is_none())
             .map(|g| g.row.id)
             .collect();
@@ -2525,6 +2811,12 @@ impl Client {
             _ => None,
         };
         let from_member = matches!(processed.sender(), Sender::Member(_));
+        // MLS names a sender by their place in the group. A message from an
+        // earlier epoch can name a place that someone else holds now; the
+        // credential MLS checked it against, from that epoch, says whose it
+        // is, and it counts only as theirs.
+        let signed_by_sender = BasicCredential::try_from(processed.credential().clone())
+            .is_ok_and(|c| sender.is_some_and(|k| c.identity() == k.0.as_slice()));
         let changes_room = matches!(
             processed.content(),
             ProcessedMessageContent::ProposalMessage(_)
@@ -2536,7 +2828,12 @@ impl Client {
         }
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(am) => {
-                if let (Some(sender), Some(msg)) = (sender, AppMsg::decode(&am.into_bytes())) {
+                let msg = AppMsg::decode(&am.into_bytes());
+                // An app up to 0.5.1 cannot read a topic at all.
+                #[cfg(feature = "test-hooks")]
+                let msg =
+                    msg.filter(|m| !(self.hooks.reads_like_0_5_1 && matches!(m, AppMsg::Topic(_))));
+                if let (Some(sender), Some(msg), true) = (sender, msg, signed_by_sender) {
                     self.apply_app(gid, e.seq, sender, msg).await?;
                 }
             }
@@ -2634,11 +2931,13 @@ impl Client {
     }
 
     /// Whether a member's commit keeps to the rules the server enforces:
-    /// removing someone else or changing the admin list needs an admin,
-    /// any member may add someone (the server's own setting decides that),
-    /// and at least one admin stays. When the last admin leaves, anyone
-    /// may send the commit, and it must make one remaining member the
-    /// admin: one this app's own record says has been in the room longest.
+    /// removing someone else, or changing the admin list or the room's
+    /// settings, needs an admin; any member may add someone unless the
+    /// room lets only admins invite; and at least one admin stays. When
+    /// the last admin leaves, anyone may send the commit, and it must make
+    /// one remaining member the admin, one this app's own record says has
+    /// been in the room longest, and leave the settings as they are. Each
+    /// rule reads the room as it stood before the commit.
     fn commit_allowed(
         &self,
         gid: &GroupId,
@@ -2648,12 +2947,19 @@ impl Client {
         let live = &self.groups[gid];
         let admins = self.current_admins(gid);
         let is_admin = admins.contains(committer);
+        let old_settings = room_settings(live.mls.extensions());
+        let Some(new_settings) = settings_in(sc.group_context().extensions()) else {
+            return Ok(false);
+        };
         let mut departed = HashSet::new();
         let mut added = Vec::new();
         let mut has_gce = false;
         for q in sc.queued_proposals() {
             match q.proposal() {
                 Proposal::Add(a) => {
+                    if !is_admin && old_settings.invite == WhoCanInvite::Admins {
+                        return Ok(false);
+                    }
                     if let Some(k) = key_of(a.key_package().leaf_node().signature_key().as_slice())
                     {
                         added.push(k);
@@ -2689,7 +2995,9 @@ impl Client {
             let [heir] = new_admins.as_slice() else {
                 return Ok(false);
             };
-            return Ok(has_gce && self.successors(gid, &remaining)?.contains(heir));
+            return Ok(has_gce
+                && new_settings == old_settings
+                && self.successors(gid, &remaining)?.contains(heir));
         }
         if has_gce {
             if !is_admin {
@@ -2787,9 +3095,22 @@ impl Client {
         }
         let (added, removed) = commit_changes(&live.mls, &sc);
         note_joiners(&self.store, &gid, &sc)?;
+        let old_settings = room_settings(live.mls.extensions());
         live.mls
             .merge_staged_commit(&self.prov, sc)
             .map_err(mls_err)?;
+        let new_settings = room_settings(live.mls.extensions());
+        if new_settings != old_settings {
+            let who = committer
+                .map(|k| self.name_for(&gid, &k))
+                .unwrap_or_else(|| "Someone".into());
+            let now = self.now();
+            for text in settings_notices(&who, &old_settings, &new_settings) {
+                self.store
+                    .add_message(&gid, seq, None, kind::NOTICE, &text, now)?;
+            }
+            self.emit(Event::SettingsChanged { group: gid });
+        }
         // The room changed and stayed open: a `Closed` this app only
         // remembers did not lead to a close.
         let me = self.my_group_key(gid);
@@ -3086,6 +3407,7 @@ impl Client {
                     self.emit(Event::CloseVote { group: gid, view });
                 }
             }
+            AppMsg::Topic(t) => self.take_topic(gid, seq, sender, t)?,
             AppMsg::Closed { close_id } => {
                 if !self.current_admins(&gid).contains(&sender) {
                     return Ok(());
@@ -3120,6 +3442,60 @@ impl Client {
             }
         }
         Ok(())
+    }
+
+    /// Takes a topic from `sender`, judged by the room as it stands at this
+    /// point in its log: `sender` must be in the room and allowed to set
+    /// the topic now, and `set_by` must have signed it. A new topic must be
+    /// the sender's own. One passed on for a newcomer counts only in an
+    /// app that never learned the room's topic, so it never replaces a
+    /// newer one. Anything else is ignored.
+    fn take_topic(
+        &mut self,
+        gid: GroupId,
+        seq: u64,
+        sender: Key,
+        t: Topic,
+    ) -> Result<(), CoreError> {
+        if t.text.len() > MAX_TOPIC_WIRE_BYTES
+            || !self.may_set_topic(&gid, &sender)
+            || !t.verify(&gid)
+        {
+            return Ok(());
+        }
+        let text = crate::sanitize::clean_topic(&t.text);
+        let held = self.store.topic(&gid)?;
+        if t.repost {
+            if held.is_some() || text.is_empty() {
+                return Ok(());
+            }
+        } else {
+            let same = held.as_ref().is_some_and(|h| {
+                h.set_by == t.set_by && h.set_unix == t.set_unix && h.text == t.text
+            });
+            if t.set_by != sender || same {
+                return Ok(());
+            }
+        }
+        let kept = Topic { repost: false, ..t };
+        self.store.set_topic(&gid, &kept)?;
+        let at = kept.set_unix.min(self.now());
+        self.store
+            .add_message(&gid, seq, Some(&kept.set_by), kind::TOPIC, &text, at)?;
+        self.emit(Event::TopicChanged { group: gid });
+        Ok(())
+    }
+
+    /// Whether `who` is in the room and may set its topic now: an admin,
+    /// or anyone while the room lets anyone set it.
+    fn may_set_topic(&self, gid: &GroupId, who: &Key) -> bool {
+        let Some(live) = self.groups.get(gid) else {
+            return false;
+        };
+        let present = live.mls.members().any(|m| m.signature_key == who.0);
+        present
+            && (self.current_admins(gid).contains(who)
+                || room_settings(live.mls.extensions()).topic == WhoCanSetTopic::Anyone)
     }
 
     // ---------- views ----------
@@ -3166,6 +3542,7 @@ impl Client {
             text,
             sent_unix,
             notice,
+            topic: false,
         }
     }
 
@@ -3324,6 +3701,71 @@ impl Client {
         self.store.set_mouse(on)
     }
 
+    /// What this profile remembers about the update check.
+    pub fn update_state(&self) -> Result<crate::update::UpdateState, CoreError> {
+        self.store.update_state()
+    }
+
+    /// Turns the update check on or off for this profile.
+    pub fn set_update_check(&self, on: bool) -> Result<(), CoreError> {
+        self.store.set_update_check(on)
+    }
+
+    /// Starts asking GitHub for the newest release when a check is due (see
+    /// [`crate::update::due`]), and notes the time first, so the app asks
+    /// at most once a day even when the question fails. The request runs
+    /// on its own task; hand its result to [`Client::finish_update_check`].
+    /// `None` when no check is due, and then no request is made.
+    pub fn start_update_check(&self) -> Option<UpdateCheck> {
+        self.start_update_check_with(
+            crate::update::off_by_env(),
+            crate::now_unix(),
+            crate::update::fetch_latest,
+        )
+    }
+
+    /// [`Client::start_update_check`] with the environment, the time and the
+    /// request given.
+    pub(crate) fn start_update_check_with<F, Fut>(
+        &self,
+        env_off: bool,
+        now: u64,
+        fetch: F,
+    ) -> Option<UpdateCheck>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Option<crate::update::Version>> + Send + 'static,
+    {
+        let s = self.store.update_state().ok()?;
+        if !crate::update::due(&s, env_off, now) {
+            return None;
+        }
+        self.store.set_update_asked(now).ok()?;
+        Some(tokio::spawn(fetch()))
+    }
+
+    /// Keeps what a check found: the newest release, or nothing when it
+    /// failed, which changes nothing.
+    pub fn finish_update_check(&self, found: Option<crate::update::Version>) {
+        if let Some(v) = found {
+            let _ = self
+                .store
+                .set_update_answer(crate::now_unix(), &v.to_string());
+        }
+    }
+
+    /// "Socketchat 0.5.2 is out. Run socketchat update." when the last
+    /// check found a release newer than this app and the check is still on.
+    pub fn update_notice(&self, install: crate::update::Install) -> Option<String> {
+        let s = self.store.update_state().ok()?;
+        crate::update::notice(
+            &s,
+            crate::update::off_by_env(),
+            env!("CARGO_PKG_VERSION"),
+            install,
+        )
+    }
+
     /// Renames a room for everyone. Needs an admin.
     pub async fn rename_room(&mut self, gid: GroupId, name: &str) -> Result<(), CoreError> {
         let live = self
@@ -3358,16 +3800,108 @@ impl Client {
         Ok(())
     }
 
+    /// The room's topic, if it has one.
+    pub fn topic(&self, gid: GroupId) -> Option<TopicView> {
+        let t = self.store.topic(&gid).ok()??;
+        let text = crate::sanitize::clean_topic(&t.text);
+        if text.is_empty() {
+            return None;
+        }
+        let verified = self
+            .members(gid)
+            .iter()
+            .any(|m| m.key == t.set_by && m.verified);
+        Some(TopicView {
+            text,
+            by: self.name_for(&gid, &t.set_by),
+            by_key: t.set_by,
+            verified,
+            mine: self.my_group_key(gid) == Some(t.set_by),
+            set_unix: t.set_unix.min(self.now()),
+        })
+    }
+
+    /// Sets the room's topic for everyone. Needs an admin, or anyone while
+    /// the room lets anyone set it. The text is cleaned as every app
+    /// cleans it, and refused when it would show nothing or run past
+    /// [`MAX_TOPIC_CHARS`](crate::sanitize::MAX_TOPIC_CHARS).
+    pub async fn set_topic(&mut self, gid: GroupId, text: &str) -> Result<(), CoreError> {
+        self.check_topic_setter(gid)?;
+        let n = crate::sanitize::topic_chars(text);
+        if n == 0 {
+            return Err(CoreError::Other(
+                "A topic needs at least one character you can see. To remove the topic, use /topic --clear.".into(),
+            ));
+        }
+        if n > crate::sanitize::MAX_TOPIC_CHARS {
+            return Err(CoreError::Other(format!(
+                "A topic can be at most {} characters. This one has {n}.",
+                crate::sanitize::MAX_TOPIC_CHARS
+            )));
+        }
+        self.post_topic(gid, &crate::sanitize::clean_topic(text))
+            .await
+    }
+
+    /// Removes the room's topic for everyone, with the same rule as
+    /// [`Client::set_topic`].
+    pub async fn clear_topic(&mut self, gid: GroupId) -> Result<(), CoreError> {
+        self.check_topic_setter(gid)?;
+        if self.topic(gid).is_none() {
+            return Err(CoreError::Other("This room has no topic.".into()));
+        }
+        self.post_topic(gid, "").await
+    }
+
+    /// Refuses a member who may not set the room's topic.
+    fn check_topic_setter(&self, gid: GroupId) -> Result<(), CoreError> {
+        let me = self
+            .my_group_key(gid)
+            .ok_or_else(|| CoreError::Other("you are not in that group".into()))?;
+        if !self.may_set_topic(&gid, &me) {
+            return Err(CoreError::Other(
+                "Only admins can set this room's topic.".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Signs and posts a topic, empty to clear it, and keeps it here.
+    /// Nothing is encrypted while the room holds this member back.
+    async fn post_topic(&mut self, gid: GroupId, text: &str) -> Result<(), CoreError> {
+        if self.holds_commit(&gid) {
+            self.resolve_pending(gid).await?;
+            // The commit that landed may have changed who can set it.
+            self.check_topic_setter(gid)?;
+        }
+        let key = self.groups[&gid].row.key.clone();
+        let t = Topic::new(&key, gid, text, self.now());
+        let seq = self.send_app(gid, &AppMsg::Topic(t.clone())).await?;
+        self.store.set_topic(&gid, &t)?;
+        let now = self.now();
+        self.store
+            .add_message(&gid, seq, Some(&key.public()), kind::TOPIC, text, now)?;
+        self.store.set_seen_seq(&gid, seq)?;
+        self.emit(Event::TopicChanged { group: gid });
+        Ok(())
+    }
+
     /// Who runs a room, how big it is and when it was made.
     pub async fn details(&mut self, gid: GroupId) -> Result<RoomDetails, CoreError> {
         let server_id = self.server_of(&gid)?;
         let members = self.members(gid);
         let row = self.groups[&gid].row.clone();
+        let settings = self.room_settings(gid).unwrap_or_default();
+        let reached = self.conn(server_id).await.is_ok();
+        // A server on protocol 3 or later enforces the room's settings.
+        let server_enforces = if reached {
+            self.protocol_for(gid).map(|p| p >= 3)
+        } else {
+            None
+        };
         // Only a server that speaks protocol 2 knows the date; an older or
         // unreachable one just leaves it out.
-        let created_unix = if self.conn(server_id).await.is_ok()
-            && self.protocol_for(gid).is_some_and(|p| p >= 2)
-        {
+        let created_unix = if reached && self.protocol_for(gid).is_some_and(|p| p >= 2) {
             match self
                 .request(server_id, Request::GroupCreated { group: gid })
                 .await
@@ -3391,6 +3925,16 @@ impl Client {
             joined_unix: row.joined_unix,
             muted: self.store.is_muted(&gid).unwrap_or(false),
             close: self.close_state(gid),
+            invite: settings.invite,
+            slow_secs: settings.slow_secs,
+            server_enforces,
+            server_members_invite: if reached {
+                self.server_lets_members_invite(server_id).await
+            } else {
+                None
+            },
+            topic_who: settings.topic,
+            topic: self.topic(gid),
         })
     }
 
@@ -3463,14 +4007,21 @@ impl Client {
     }
 
     fn chat_line(&self, gid: &GroupId, m: MessageRow) -> ChatLine {
-        self.line(
+        let topic = m.kind == kind::TOPIC;
+        let text = match topic {
+            true => crate::sanitize::clean_topic(&m.body),
+            false => m.body,
+        };
+        let mut line = self.line(
             gid,
             m.seq,
             m.sender,
-            m.body,
+            text,
             m.sent_unix,
-            matches!(m.kind, kind::NOTICE | kind::FILE),
-        )
+            topic || matches!(m.kind, kind::NOTICE | kind::FILE),
+        );
+        line.topic = topic;
+        line
     }
 
     /// This client's own key in a group.
@@ -3480,12 +4031,149 @@ impl Client {
 
     // ---------- chatting ----------
 
-    /// Sends a text message to a group.
-    pub async fn send_text(&mut self, gid: GroupId, text: &str) -> Result<(), CoreError> {
+    /// Sends a text message to a group. When the room limits fast posting,
+    /// the text waits here and goes, after any texts already waiting in
+    /// that room, on a later sync once the server allows it.
+    pub async fn send_text(&mut self, gid: GroupId, text: &str) -> Result<SendOutcome, CoreError> {
         let text = crate::sanitize::clean_text(text);
         if text.trim().is_empty() {
-            return Ok(());
+            return Ok(SendOutcome::Sent);
         }
+        let server_id = self.server_of(&gid)?;
+        if self.held.iter().any(|h| h.gid == gid) {
+            self.send_held(Some(server_id), Some(gid)).await?;
+        }
+        let members = self.member_keys(gid);
+        if let Some(due) = self
+            .held
+            .iter()
+            .filter(|h| h.gid == gid)
+            .map(|h| h.due_unix)
+            .max()
+        {
+            let now = self.now();
+            self.held.push_back(HeldText {
+                gid,
+                text,
+                members,
+                due_unix: due,
+            });
+            return Ok(SendOutcome::Held {
+                wait_secs: due.saturating_sub(now).max(1),
+            });
+        }
+        match self.post_text(gid, &text).await {
+            Ok(()) => Ok(SendOutcome::Sent),
+            Err(CoreError::Net(NetError::SlowDown { retry_after_ms })) => {
+                let wait_secs = crate::net::wait_secs(retry_after_ms);
+                let due_unix = self.now() + wait_secs;
+                self.held.push_back(HeldText {
+                    gid,
+                    text,
+                    members,
+                    due_unix,
+                });
+                Ok(SendOutcome::Held { wait_secs })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The keys of everyone in a room, sorted.
+    fn member_keys(&self, gid: GroupId) -> Vec<Key> {
+        let mut keys: Vec<Key> = self
+            .groups
+            .get(&gid)
+            .map(|l| {
+                l.mls
+                    .members()
+                    .filter_map(|m| key_of(&m.signature_key))
+                    .collect()
+            })
+            .unwrap_or_default();
+        keys.sort_by_key(|k| k.0);
+        keys
+    }
+
+    /// Texts waiting in a room because it limits fast posting.
+    pub fn held(&self, gid: GroupId) -> usize {
+        self.held.iter().filter(|h| h.gid == gid).count()
+    }
+
+    /// Texts waiting in every room.
+    pub fn held_total(&self) -> usize {
+        self.held.len()
+    }
+
+    /// Sends the held texts that are due, oldest first, on `server_id`
+    /// (every server with `None`), in `only` or in every room. A text the
+    /// server holds back again keeps its place, and so does every later one
+    /// in its room. One refused for another reason is dropped and the
+    /// person hears so; a room that ended takes its texts with it.
+    async fn send_held(
+        &mut self,
+        server_id: Option<i64>,
+        only: Option<GroupId>,
+    ) -> Result<(), CoreError> {
+        let now = self.now();
+        let mut waiting: HashSet<GroupId> = HashSet::new();
+        let mut i = 0;
+        while i < self.held.len() {
+            let gid = self.held[i].gid;
+            let here = self.groups.get(&gid).map(|l| l.row.server_id);
+            if here.is_none() {
+                self.held.remove(i);
+                continue;
+            }
+            let skip = only.is_some_and(|g| g != gid)
+                || server_id.is_some_and(|s| Some(s) != here)
+                || waiting.contains(&gid)
+                || self.held[i].due_unix > now;
+            if skip {
+                waiting.insert(gid);
+                i += 1;
+                continue;
+            }
+            let text = self.held[i].text.clone();
+            // It goes only to the people it was typed for.
+            if self.held[i].members != self.member_keys(gid) {
+                self.held.remove(i);
+                self.emit(Event::NotSent { group: gid, text });
+                continue;
+            }
+            match self.post_text(gid, &text).await {
+                Ok(()) => {
+                    self.held.remove(i);
+                }
+                Err(CoreError::Net(NetError::SlowDown { retry_after_ms })) => {
+                    self.held[i].due_unix = now + crate::net::wait_secs(retry_after_ms);
+                    waiting.insert(gid);
+                    i += 1;
+                }
+                Err(e) if connection_lost(&e) => {
+                    // Tried again a little later, not in a tight loop.
+                    for h in self.held.iter_mut() {
+                        h.due_unix = h.due_unix.max(now + 5);
+                    }
+                    return Err(e);
+                }
+                Err(e) => {
+                    self.held.remove(i);
+                    let short: String = text.chars().take(40).collect();
+                    let more = if text.chars().count() > 40 { "..." } else { "" };
+                    self.emit(Event::Warning(format!(
+                        "Could not send your message \"{short}{more}\" in {}: {e}",
+                        self.label(&gid)
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Posts a text and records it as sent.
+    async fn post_text(&mut self, gid: GroupId, text: &str) -> Result<(), CoreError> {
+        let text = text.to_string();
         // A message can go out while a commit waits to be confirmed.
         if self.holds_commit(&gid) {
             self.resolve_pending(gid).await?;
@@ -3499,6 +4187,166 @@ impl Client {
             .add_message(&gid, seq, me.as_ref(), kind::TEXT, &text, now)?;
         self.store.set_seen_seq(&gid, seq)?;
         Ok(())
+    }
+
+    // ---------- room settings ----------
+
+    /// A room's settings, as its group context holds them.
+    pub fn room_settings(&self, gid: GroupId) -> Option<RoomSettings> {
+        self.groups
+            .get(&gid)
+            .map(|l| room_settings(l.mls.extensions()))
+    }
+
+    /// Lets only admins, or anyone in the room, bring people in. Needs an
+    /// admin.
+    pub async fn set_who_can_invite(
+        &mut self,
+        gid: GroupId,
+        who: WhoCanInvite,
+    ) -> Result<(), CoreError> {
+        // The server's own rule wins over the room's: letting anyone invite
+        // would change nothing there, so say so instead.
+        if who == WhoCanInvite::Anyone {
+            let server_id = self.server_of(&gid)?;
+            if self.server_lets_members_invite(server_id).await == Some(false) {
+                return Err(CoreError::Other(SERVER_ADMINS_ONLY.into()));
+            }
+        }
+        self.change_settings(gid, |s| s.invite = who).await
+    }
+
+    /// The server's own rule on members inviting into rooms, from servers
+    /// on protocol 3 or later; `None` from an older or unreachable one.
+    async fn server_lets_members_invite(&mut self, server_id: i64) -> Option<bool> {
+        let protocol = self.conn(server_id).await.ok()?.protocol();
+        if protocol < 3 {
+            return None;
+        }
+        match self.request(server_id, Request::ServerRules).await {
+            Ok(Response::ServerRules {
+                members_can_invite_to_rooms,
+            }) => Some(members_can_invite_to_rooms),
+            _ => None,
+        }
+    }
+
+    /// Lets only admins, or anyone in the room, set its topic. Needs an
+    /// admin.
+    pub async fn set_who_can_set_topic(
+        &mut self,
+        gid: GroupId,
+        who: WhoCanSetTopic,
+    ) -> Result<(), CoreError> {
+        self.change_settings(gid, |s| s.topic = who).await
+    }
+
+    /// Holds each member who is not an admin to one message every `secs`
+    /// seconds; 0 turns slow mode off. Needs an admin.
+    pub async fn set_slow_mode(&mut self, gid: GroupId, secs: u32) -> Result<(), CoreError> {
+        if secs > MAX_SLOW_SECS {
+            return Err(CoreError::Other(format!(
+                "Slow mode can be at most {MAX_SLOW_SECS} seconds (6 hours)."
+            )));
+        }
+        self.change_settings(gid, |s| s.slow_secs = secs).await
+    }
+
+    /// Members whose app cannot be in a room with settings, by name.
+    fn members_without_settings(&self, gid: &GroupId) -> Vec<String> {
+        let Some(live) = self.groups.get(gid) else {
+            return vec![];
+        };
+        live.mls
+            .members()
+            .filter(|m| {
+                !live
+                    .mls
+                    .public_group()
+                    .leaf(m.index)
+                    .is_some_and(|l| takes_settings(l.capabilities()))
+            })
+            .filter_map(|m| key_of(&m.signature_key))
+            .map(|k| self.name_for(gid, &k))
+            .collect()
+    }
+
+    /// Commits a change to a room's settings, keeping its admins.
+    async fn change_settings(
+        &mut self,
+        gid: GroupId,
+        change: impl Fn(&mut RoomSettings),
+    ) -> Result<(), CoreError> {
+        self.settle_sent(gid).await?;
+        for _ in 0..3 {
+            let me = self
+                .my_group_key(gid)
+                .ok_or_else(|| CoreError::Other("you are not in that group".into()))?;
+            if !self.current_admins(&gid).contains(&me) {
+                return Err(CoreError::Other(
+                    "Only admins can change this room's settings.".into(),
+                ));
+            }
+            let live = &self.groups[&gid];
+            let old = room_settings(live.mls.extensions());
+            let mut new = old.clone();
+            change(&mut new);
+            if new == old {
+                return Ok(());
+            }
+            if !new.is_default() {
+                // A server from before 0.5.2 cannot keep room settings.
+                let server_id = self.server_of(&gid)?;
+                if self.conn(server_id).await?.protocol() < 3 {
+                    return Err(CoreError::Other(OLD_SERVER_KEEP.into()));
+                }
+                let waiting = self.members_without_settings(&gid);
+                if !waiting.is_empty() {
+                    return Err(CoreError::Other(format!(
+                        "Everyone here needs Socketchat 0.5.2 or later, opened once since updating, before this setting can change. Not ready yet: {}.",
+                        waiting.join(", ")
+                    )));
+                }
+            }
+            let live = self.groups.get_mut(&gid).expect("checked above");
+            let admins = admins_from(live.mls.extensions());
+            let bundle = live
+                .mls
+                .commit_builder()
+                .propose_group_context_extensions(group_context_extensions(&admins, &new))
+                .map_err(mls_err)?
+                .load_psks(self.prov.storage())
+                .map_err(mls_err)?
+                .build(self.prov.rand(), self.prov.crypto(), &live.row.key, |_| {
+                    true
+                })
+                .map_err(mls_err)?
+                .stage_commit(&self.prov)
+                .map_err(mls_err)?;
+            let (commit, _, _) = bundle.into_messages();
+            if let Some(seq) = self.post_commit(gid, commit, None).await? {
+                let now = self.now();
+                for text in settings_notices("You", &old, &new) {
+                    self.store
+                        .add_message(&gid, seq, None, kind::NOTICE, &text, now)?;
+                }
+                self.store.set_seen_seq(&gid, seq)?;
+                self.emit(Event::SettingsChanged { group: gid });
+                return Ok(());
+            }
+        }
+        Err(CoreError::Other(
+            "the group kept changing; try again".into(),
+        ))
+    }
+
+    /// The capabilities this app's KeyPackages and refreshed keys carry.
+    fn leaf_capabilities(&self) -> Capabilities {
+        #[cfg(feature = "test-hooks")]
+        if self.hooks.old_capabilities {
+            return crate::suite::capabilities_0_5_1();
+        }
+        capabilities()
     }
 
     /// Sends a message for an add-on to a group. Returns its sequence.
@@ -3650,14 +4498,18 @@ impl Client {
     /// Refreshes this member's own encryption keys in a group.
     pub async fn update_keys(&mut self, gid: GroupId) -> Result<(), CoreError> {
         self.settle_sent(gid).await?;
+        let caps = self.leaf_capabilities();
         for _ in 0..3 {
             let live = self
                 .groups
                 .get_mut(&gid)
                 .ok_or_else(|| CoreError::Other("no such group".into()))?;
+            let params = LeafNodeParameters::builder()
+                .with_capabilities(caps.clone())
+                .build();
             let (commit, _, _) = live
                 .mls
-                .self_update(&self.prov, &live.row.key, LeafNodeParameters::default())
+                .self_update(&self.prov, &live.row.key, params)
                 .map_err(mls_err)?
                 .into_messages();
             if self.post_commit(gid, commit, None).await?.is_some() {
@@ -3876,10 +4728,13 @@ impl Client {
                 }
             };
             let live = self.groups.get_mut(&gid).expect("checked above");
+            // The room's settings stay as they are: the hand-over only
+            // names the next admin.
+            let settings = room_settings(live.mls.extensions());
             let mut builder = live.mls.commit_builder().consume_proposal_store(true);
             if let Some(p) = promote {
                 builder = builder
-                    .propose_group_context_extensions(group_context_extensions(&[p]))
+                    .propose_group_context_extensions(group_context_extensions(&[p], &settings))
                     .map_err(mls_err)?;
             }
             // Only requests to leave, and this app's own admin change.
@@ -4472,7 +5327,7 @@ impl Client {
             .await?
             .register_mailbox(Some(token), &key)
             .await?;
-        let kps = key_packages(&self.prov, &key, None)?;
+        let kps = key_packages_with(&self.prov, &key, None, self.leaf_capabilities())?;
         let key_packages = kps.blob;
         self.store.save_pending_join(&PendingJoin {
             token,
@@ -4838,6 +5693,20 @@ impl Client {
             .expect("room name");
     }
 
+    /// Gives a room the MLS settings every app up to 0.5.1 stored, with no
+    /// padding, as a room made before padding came in has.
+    pub fn test_store_unpadded(&mut self, gid: GroupId) {
+        let old = MlsGroupJoinConfig::builder()
+            .wire_format_policy(MIXED_PLAINTEXT_WIRE_FORMAT_POLICY)
+            .max_past_epochs(crate::suite::MAX_PAST_EPOCHS)
+            .use_ratchet_tree_extension(true)
+            .build();
+        let live = self.groups.get_mut(&gid).expect("room");
+        live.mls
+            .set_configuration(self.prov.storage(), &old)
+            .expect("settings");
+    }
+
     /// Stores a server's address exactly as given, as an app that took
     /// any address in a link may have kept it.
     pub fn test_store_server_host(&self, server_id: i64, host: &str) {
@@ -5017,6 +5886,26 @@ impl Client {
     /// `v` stops announcing, as an app on 0.4.0 would.
     pub fn test_announce_version(&mut self, v: &str) {
         self.hooks.announce_version = Some(v.to_string());
+    }
+
+    /// Encrypts an application message as this member would send it, and
+    /// returns its bytes for a test to put in the log; nothing is posted.
+    pub fn test_encrypt_app(&mut self, gid: GroupId, msg: &AppMsg) -> Result<Vec<u8>, CoreError> {
+        let live = self
+            .groups
+            .get_mut(&gid)
+            .ok_or_else(|| CoreError::Other("no such group".into()))?;
+        let out = live
+            .mls
+            .create_message(&self.prov, &live.row.key, &msg.encode())
+            .map_err(mls_err)?;
+        ser(&out)
+    }
+
+    /// Reads application messages as an app up to 0.5.1 does, which knows
+    /// no topics, or as this app does again.
+    pub fn test_reads_like_0_5_1(&mut self, on: bool) {
+        self.hooks.reads_like_0_5_1 = on;
     }
 
     /// Posts any application message, as a hostile member could.
@@ -5203,6 +6092,64 @@ impl Client {
             .ok_or_else(|| CoreError::Other("the group moved on".into()))?;
         Ok(())
     }
+    /// Makes this app's KeyPackages and refreshed keys carry the
+    /// capabilities of an app up to 0.5.1, or this app's own again.
+    pub fn test_old_capabilities(&mut self, on: bool) {
+        self.hooks.old_capabilities = on;
+    }
+
+    /// Builds a commit that sets the room's settings, keeping its admins,
+    /// without asking the server. It stays staged here; its bytes come back
+    /// for a test to put in the log.
+    pub fn test_unchecked_settings(
+        &mut self,
+        gid: GroupId,
+        settings: &RoomSettings,
+    ) -> Result<Vec<u8>, CoreError> {
+        let live = self
+            .groups
+            .get_mut(&gid)
+            .ok_or_else(|| CoreError::Other("no such group".into()))?;
+        let admins = admins_from(live.mls.extensions());
+        let bundle = live
+            .mls
+            .commit_builder()
+            .propose_group_context_extensions(group_context_extensions(&admins, settings))
+            .map_err(mls_err)?
+            .load_psks(self.prov.storage())
+            .map_err(mls_err)?
+            .build(self.prov.rand(), self.prov.crypto(), &live.row.key, |_| {
+                true
+            })
+            .map_err(mls_err)?
+            .stage_commit(&self.prov)
+            .map_err(mls_err)?;
+        ser(&bundle.into_messages().0)
+    }
+
+    /// Builds a commit that adds the owner of a KeyPackage blob, without
+    /// asking the server. It stays staged here; its bytes come back for a
+    /// test to put in the log.
+    pub fn test_unchecked_add(&mut self, gid: GroupId, blob: &[u8]) -> Result<Vec<u8>, CoreError> {
+        let live = self
+            .groups
+            .get_mut(&gid)
+            .ok_or_else(|| CoreError::Other("no such group".into()))?;
+        let kp = pick_key_package(&self.prov, blob, live.mls.ciphersuite())
+            .ok_or_else(|| CoreError::Other("no usable KeyPackage".into()))?;
+        let (commit, _, _) = live
+            .mls
+            .add_members(&self.prov, &live.row.key, &[kp])
+            .map_err(mls_err)?;
+        ser(&commit)
+    }
+
+    /// How many application messages this app has encrypted, in every
+    /// room, since it opened.
+    pub fn test_encrypted(&self) -> usize {
+        self.hooks.encrypted
+    }
+
     /// The kinds of application message this app tried to post in `gid`,
     /// oldest first.
     pub fn test_sent_kinds(&self, gid: GroupId) -> Vec<String> {
@@ -5234,6 +6181,7 @@ impl Client {
             .filter(|m| remove.iter().any(|k| m.signature_key == k.0))
             .map(|m| m.index)
             .collect();
+        let settings = room_settings(live.mls.extensions());
         let mut builder = live
             .mls
             .commit_builder()
@@ -5241,7 +6189,7 @@ impl Client {
             .propose_removals(idx);
         if let Some(a) = admins {
             builder = builder
-                .propose_group_context_extensions(group_context_extensions(a))
+                .propose_group_context_extensions(group_context_extensions(a, &settings))
                 .map_err(mls_err)?;
         }
         let bundle = builder
@@ -5287,7 +6235,7 @@ impl Client {
             .mls
             .propose_group_context_extensions(
                 &self.prov,
-                group_context_extensions(admins),
+                group_context_extensions(admins, &room_settings(live.mls.extensions())),
                 &live.row.key,
             )
             .map_err(mls_err)?;

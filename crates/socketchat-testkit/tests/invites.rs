@@ -288,8 +288,8 @@ fn rusqlite_conn(s: &TestServer) -> socketchat_testkit::Db {
 }
 
 #[tokio::test]
-async fn members_cannot_invite_when_disabled() {
-    let s = TestServer::start_with(|c| c.members_can_invite = false).await;
+async fn members_cannot_invite_in_an_admins_only_room() {
+    let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
     let mut b = TestClient::new(&s, "Bo").await;
@@ -298,7 +298,33 @@ async fn members_cannot_invite_when_disabled() {
         .unwrap();
     settle(&mut [&mut a, &mut b]).await;
     assert_eq!(b.members(g).len(), 2);
+    a.set_who_can_invite(g, socketchat_core::settings::WhoCanInvite::Admins)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut b]).await;
     let err = b.invite(Some(g), false).await.unwrap_err();
+    assert!(matches!(err, CoreError::Other(_)), "{err:?}");
+}
+
+/// The server setting for accounts no longer stops members inviting into
+/// a room: a member's link still brings someone in, who gets no account.
+#[tokio::test]
+async fn members_still_invite_into_rooms_when_they_make_no_accounts() {
+    let s = TestServer::start_with(|c| c.members_make_accounts = false).await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let mut b = TestClient::new(&s, "Bo").await;
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    let mut c = TestClient::profile_only("Cy").await;
+    c.join(&b.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    assert_eq!(a.members(g).len(), 3);
+    let err = b.invite(None, false).await.unwrap_err();
     assert!(
         matches!(err, CoreError::Net(NetError::Refused(_))),
         "{err:?}"
@@ -473,7 +499,7 @@ async fn removed_admins_key_is_not_added_back() {
     assert!(back.groups().is_empty());
 }
 
-const LINK_MAKER_LEFT: &str = "This invite link stopped working because the person who made it left the room. Ask someone in the room for a new link.";
+const LINK_MAKER_LEFT: &str = "This invite link stopped working, because the person who made it left the room or the room now lets only admins invite. Ask someone in the room for a new link.";
 
 /// Bo asked to join through Cy's link, then Cy was removed. Bo's app says
 /// why the link stopped working and stops waiting.
@@ -718,4 +744,36 @@ async fn warnings_show_a_long_host_in_full() {
         })
         .collect();
     assert!(said.iter().any(|w| w.contains(&link.host)), "{said:?}");
+}
+
+#[tokio::test]
+async fn a_web_link_registers_like_the_raw_link() {
+    let s = TestServer::start().await;
+    let raw = s.server_invite();
+    let web = socketchat_proto::to_web_link(&raw.to_string()).unwrap();
+    assert!(web.starts_with("https://socketchat.org/join#socketchat://"));
+    let parsed: socketchat_proto::InviteLink = web.parse().unwrap();
+    assert_eq!(parsed, raw);
+    let mut a = TestClient::profile_only("Ada").await;
+    assert_eq!(a.join(&parsed).await.unwrap(), JoinStatus::Registered);
+    a.create_group("Book club").await.unwrap();
+}
+
+#[tokio::test]
+async fn a_web_group_link_lets_the_joiner_in_like_the_raw_link() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Book club").await.unwrap();
+    let raw = a.invite(Some(g), false).await.unwrap().0;
+    let web = socketchat_proto::to_web_link(&raw.to_string()).unwrap();
+    let parsed: socketchat_proto::InviteLink = web.parse().unwrap();
+    assert_eq!(parsed, raw);
+    let mut b = TestClient::profile_only("Bo").await;
+    assert!(matches!(
+        b.join(&parsed).await.unwrap(),
+        JoinStatus::Waiting { .. }
+    ));
+    settle(&mut [&mut a, &mut b]).await;
+    let ev = drain(&mut b).await;
+    assert_eq!(joined(&ev), Some(&Verification::Verified), "{ev:?}");
 }

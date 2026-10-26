@@ -2,7 +2,7 @@
 //! redeemed, and the group's online members hear about it.
 
 use openmls::prelude::tls_codec::Deserialize as _;
-use openmls::prelude::KeyPackageIn;
+use openmls::prelude::{KeyPackageIn, ProtocolVersion};
 use rusqlite::params;
 use socketchat_proto::msg::{
     from_body, to_frame, GroupId as Gid, JoinRequest, Key, Push, Response, ServerFrame,
@@ -47,6 +47,26 @@ fn key_packages_ok(blob: &[u8], mailbox: &Key) -> bool {
     })
 }
 
+/// Whether every KeyPackage in a lodged blob says its app knows room
+/// settings. Run after [`key_packages_ok`].
+fn takes_settings_all(blob: &[u8]) -> bool {
+    let Ok(kps) = from_body::<Vec<Vec<u8>>>(blob) else {
+        return false;
+    };
+    kps.iter().all(|b| {
+        KeyPackageIn::tls_deserialize_exact(b)
+            .ok()
+            .and_then(|kp| {
+                kp.validate(
+                    &openmls_rust_crypto::RustCrypto::default(),
+                    ProtocolVersion::Mls10,
+                )
+                .ok()
+            })
+            .is_some_and(|kp| socketchat_core::suite::takes_settings(kp.leaf_node().capabilities()))
+    })
+}
+
 pub fn redeem(
     state: &State,
     cs: &ConnState,
@@ -78,8 +98,30 @@ pub fn redeem(
     if !cs.proven.contains(&mailbox) {
         return Response::Refused("sign in with the mailbox that redeemed this invite".into());
     }
+    let maker: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT maker FROM invites WHERE token = ?1",
+            [token.0.as_slice()],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    if !crate::groups::maker_may_invite(state, &db, &group, maker.as_deref()) {
+        return Response::Refused(crate::groups::MAKER_CANNOT_INVITE.into());
+    }
     if !key_packages_ok(&key_package, &mailbox) {
         return Response::Refused("that is not a key package for your mailbox".into());
+    }
+    // A room with settings takes only apps that know them; an older app
+    // hears so now rather than waiting for an add that cannot happen.
+    let has_settings = state
+        .rules
+        .get(&db, &group)
+        .is_some_and(|r| !r.settings.is_default());
+    if has_settings && !takes_settings_all(&key_package) {
+        return Response::Refused(
+            "this room needs Socketchat 0.5.2 or later; update Socketchat, then ask for a new invite link".into(),
+        );
     }
     if db
         .execute(

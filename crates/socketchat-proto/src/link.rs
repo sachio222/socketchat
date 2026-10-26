@@ -16,7 +16,9 @@ use thiserror::Error;
 const SCHEME: &str = "socketchat://";
 
 /// Join page that shows a friend how to install socketchat. The invite
-/// goes after `#`, which browsers never send to the web server.
+/// goes after `#`, which browsers never send to the web server. The QR
+/// code in the invite box holds this form, since a phone camera opens web
+/// addresses and has no app for `socketchat://`.
 pub const WEB_JOIN_URL: &str = "https://socketchat.org/join";
 
 /// The web form of a `socketchat://` link, or `None` for anything else.
@@ -31,19 +33,42 @@ pub const SITE_URL: &str = "https://socketchat.org";
 
 /// What the invite box copies: a line about Socketchat, where to install
 /// it and the command that uses `link`, ready to paste into a terminal.
-/// The quotes keep the link whole in every shell.
+/// The quotes keep the link whole in every shell. It names the computer
+/// because the message is often read on a phone, where Socketchat does
+/// not run.
 pub fn invite_message(link: &str) -> String {
     format!(
-        "Join me on Socketchat, an encrypted chat.\n1. Install it from {SITE_URL}\n2. Then run: socketchat join \"{}\"",
+        "Join me on Socketchat, an encrypted chat.\n1. Install it on your computer from {SITE_URL}\n2. Then run: socketchat join \"{}\"",
         link.trim()
     )
 }
 
 /// The `socketchat://` link inside a web link, or `None` when the text is
-/// not a web link made by [`to_web_link`].
+/// not a web link made by [`to_web_link`]. The address a browser shows
+/// after the page's redirect to `/join/` counts too.
 pub fn from_web_link(web: &str) -> Option<&str> {
-    let bare = web.trim().strip_prefix(WEB_JOIN_URL)?.strip_prefix('#')?;
-    bare.starts_with(SCHEME).then_some(bare)
+    join_page_fragment(web).filter(|bare| bare.starts_with(SCHEME))
+}
+
+/// The part after `#` of an address of the join page, empty when it has
+/// none, or `None` for any other text. Only the exact address counts:
+/// `https`, `socketchat.org` in lower case, path `/join` or `/join/`, and
+/// nothing between the path and `#`.
+fn join_page_fragment(web: &str) -> Option<&str> {
+    let rest = web.trim().strip_prefix(WEB_JOIN_URL)?;
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    if rest.is_empty() {
+        return Some(rest);
+    }
+    rest.strip_prefix('#')
+}
+
+/// Whether `text` is a web address, in any mix of upper and lower case.
+fn is_web_address(text: &str) -> bool {
+    let t = text.trim().as_bytes();
+    [b"http://".as_slice(), b"https://"]
+        .iter()
+        .any(|p| t.len() >= p.len() && t[..p.len()].eq_ignore_ascii_case(p))
 }
 
 /// Random invite token the server stores.
@@ -75,6 +100,9 @@ pub enum LinkError {
     Token,
     #[error("the part after # is cut short or changed; ask for a fresh link")]
     Fragment,
+    /// A web address other than the join page.
+    #[error("the only web address that carries an invite is https://socketchat.org/join")]
+    Web,
 }
 
 /// Longest host name DNS allows, in characters.
@@ -155,8 +183,16 @@ impl FromStr for InviteLink {
     type Err = LinkError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = from_web_link(s).unwrap_or(s);
-        let rest = s.trim().strip_prefix(SCHEME).ok_or(LinkError::Scheme)?;
+        // A link is only ever read here, never opened: nothing in it,
+        // the part after `#` least of all, goes to a web server.
+        let s = s.trim();
+        let s = match join_page_fragment(s) {
+            Some(bare) if bare.starts_with(SCHEME) => bare,
+            Some(_) => return Err(LinkError::Fragment),
+            None if is_web_address(s) => return Err(LinkError::Web),
+            None => s,
+        };
+        let rest = s.strip_prefix(SCHEME).ok_or(LinkError::Scheme)?;
         let (addr, rest) = rest.split_once("/j/").ok_or(LinkError::Token)?;
         let (token, fragment) = rest.split_once('#').ok_or(LinkError::Fragment)?;
         let (host, port) = host_and_port(addr)?;
@@ -222,9 +258,7 @@ mod tests {
 
     #[test]
     fn link_rejects_wrong_scheme() {
-        let s = group_link()
-            .to_string()
-            .replace("socketchat://", "https://");
+        let s = group_link().to_string().replace("socketchat://", "chat://");
         assert_eq!(s.parse::<InviteLink>(), Err(LinkError::Scheme));
     }
 
@@ -335,7 +369,7 @@ mod tests {
         assert_eq!(
             invite_message(&format!(" {bare}\n")),
             format!(
-                "Join me on Socketchat, an encrypted chat.\n1. Install it from https://socketchat.org\n2. Then run: socketchat join \"{bare}\""
+                "Join me on Socketchat, an encrypted chat.\n1. Install it on your computer from https://socketchat.org\n2. Then run: socketchat join \"{bare}\""
             )
         );
     }
@@ -357,14 +391,81 @@ mod tests {
         let bare = group_link().to_string();
         let web = format!("https://example.com/join#{bare}");
         assert_eq!(from_web_link(&web), None);
-        assert_eq!(web.parse::<InviteLink>(), Err(LinkError::Scheme));
+        assert_eq!(web.parse::<InviteLink>(), Err(LinkError::Web));
     }
 
     #[test]
     fn web_link_empty_fragment_is_a_bad_link() {
-        let web = format!("{WEB_JOIN_URL}#");
-        assert_eq!(web.parse::<InviteLink>(), Err(LinkError::Scheme));
-        let junk = format!("{WEB_JOIN_URL}#nonsense");
-        assert_eq!(junk.parse::<InviteLink>(), Err(LinkError::Scheme));
+        for web in [
+            WEB_JOIN_URL.to_string(),
+            format!("{WEB_JOIN_URL}/"),
+            format!("{WEB_JOIN_URL}#"),
+            format!("{WEB_JOIN_URL}/#"),
+            format!("{WEB_JOIN_URL}#nonsense"),
+            format!("{WEB_JOIN_URL}#https://example.com"),
+        ] {
+            assert_eq!(web.parse::<InviteLink>(), Err(LinkError::Fragment), "{web}");
+        }
+    }
+
+    #[test]
+    fn web_link_roundtrip_server_invite() {
+        let l = InviteLink {
+            inviter_fpr: None,
+            secret: None,
+            ..group_link()
+        };
+        let bare = l.to_string();
+        let web = to_web_link(&bare).unwrap();
+        assert_eq!(from_web_link(&web), Some(bare.as_str()));
+        assert_eq!(web.parse::<InviteLink>().unwrap(), l);
+    }
+
+    #[test]
+    fn web_link_with_a_slash_before_the_hash_is_one() {
+        // The join page lives at /join/, and a browser that followed the
+        // redirect shows that address.
+        let bare = group_link().to_string();
+        let web = format!("https://socketchat.org/join/#{bare}");
+        assert_eq!(from_web_link(&web), Some(bare.as_str()));
+        assert_eq!(web.parse::<InviteLink>().unwrap(), group_link());
+    }
+
+    #[test]
+    fn other_web_addresses_are_refused_plainly() {
+        let bare = group_link().to_string();
+        for web in [
+            "https://example.com/nope".to_string(),
+            format!("https://example.com/join#{bare}"),
+            format!("http://socketchat.org/join#{bare}"),
+            format!("https://www.socketchat.org/join#{bare}"),
+            format!("https://socketchat.org/joinme#{bare}"),
+            format!("https://socketchat.org/join?x=1#{bare}"),
+            format!("https://socketchat.org.example.com/join#{bare}"),
+            format!("https://socketchat.org@example.com/join#{bare}"),
+            format!("HTTPS://SOCKETCHAT.ORG/JOIN#{bare}"),
+            format!("https://socketchat.org/join#https://socketchat.org/join#{bare}"),
+        ] {
+            assert_eq!(from_web_link(&web), None, "{web}");
+            let e = web.parse::<InviteLink>().unwrap_err();
+            assert!(
+                matches!(e, LinkError::Web | LinkError::Fragment),
+                "{web}: {e:?}"
+            );
+        }
+        assert_eq!(
+            LinkError::Web.to_string(),
+            "the only web address that carries an invite is https://socketchat.org/join"
+        );
+    }
+
+    #[test]
+    fn a_web_link_is_checked_as_strictly_as_the_raw_link() {
+        // The link inside goes through the same host check.
+        let bad = group_link()
+            .to_string()
+            .replace("chat.example.com", "evil\u{1b}[2J.example.com");
+        let web = format!("{WEB_JOIN_URL}#{bad}");
+        assert_eq!(web.parse::<InviteLink>(), Err(LinkError::Host));
     }
 }

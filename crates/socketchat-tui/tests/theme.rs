@@ -25,6 +25,7 @@ fn vm() -> ViewModel {
             text: "Finished Piranesi last night.".into(),
             notice: false,
             mine: true,
+            topic: false,
         }],
         members: vec![MemberLine {
             key: Key([1; 32]),
@@ -35,6 +36,7 @@ fn vm() -> ViewModel {
         }],
         connected: true,
         server: None,
+        topic: None,
     }
 }
 

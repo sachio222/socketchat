@@ -10,6 +10,13 @@
 #     ask for a write permission, in any form (block, { flow } or write-all);
 #   - the repository token appears only in a step's env inside "host", never
 #     in a job-wide env, so build steps and build scripts never see it;
+#   - HOMEBREW_TAP_TOKEN, a token for the Homebrew tap repository alone,
+#     appears only in a step inside "publish-homebrew-formula", never in a
+#     job-wide env (that job, like every job but "host", may only read this
+#     repository); no other secret appears, and nothing hands over every
+#     secret at once;
+#   - every checkout sets persist-credentials: false, so no token stays in
+#     the checkout for the steps after it;
 #   - a release.yml runs scripts/release-binary-check.sh after `dist build`
 #     in its build-local-artifacts job;
 #   - a release.yml sets a top-level concurrency group on github.ref with
@@ -140,6 +147,32 @@ for file in "$@"; do
                 where = (job == "") ? "outside a job" : "in job " job
                 problem("the repository token is set " where "; give it only to the step in host that needs it")
             }
+        }
+
+        # The Homebrew tap token: only in a step in publish-homebrew-formula.
+        if (line ~ /secrets\.HOMEBREW_TAP_TOKEN/) {
+            if (!(injobs && job == "publish-homebrew-formula" && ind >= 10)) {
+                where = (job == "") ? "outside a job" : "in job " job
+                problem("the Homebrew tap token is set " where "; give it only to the step in publish-homebrew-formula that pushes the formula")
+            }
+        }
+
+        # No other secret, and never all of them at once.
+        rest = line
+        while (match(rest, /secrets\.[A-Za-z0-9_-]+/)) {
+            name = substr(rest, RSTART + 8, RLENGTH - 8)
+            if (name != "GITHUB_TOKEN" && name != "HOMEBREW_TAP_TOKEN") {
+                problem("the secret " name " is not allowed; only GITHUB_TOKEN in host and HOMEBREW_TAP_TOKEN in publish-homebrew-formula are")
+            }
+            rest = substr(rest, RSTART + RLENGTH)
+        }
+        if (line ~ /secrets\[|[(][ ]*secrets[ ]*[)]|secrets:[ ]*inherit/) {
+            problem("the workflow hands over every secret; name the one a step needs")
+        }
+
+        # A checkout must not leave its token behind.
+        if (line ~ /^[ -]*persist-credentials:[ ]*["]?true/) {
+            problem("a checkout keeps its token for the steps after it; set persist-credentials: false")
         }
 
         # Actions pinned by full commit with the tag in a comment; docker

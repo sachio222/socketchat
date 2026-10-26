@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use socketchat_proto::Token;
 
-use crate::keys::{Binding, GroupId, Key, Voucher};
+use crate::keys::{verify, Binding, GroupId, Key, KeyPair, Sig, Voucher, CTX_TOPIC};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AppMsg {
@@ -76,6 +76,58 @@ pub enum AppMsg {
     Closed {
         close_id: [u8; 16],
     },
+    /// The room's topic, or its removal.
+    Topic(Topic),
+}
+
+/// A room's topic: one line, set by an admin, or by anyone when the room
+/// allows it. Empty text removes the topic.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Topic {
+    pub text: String,
+    /// The group key of the member who set it.
+    pub set_by: Key,
+    /// When they set it, on their clock.
+    pub set_unix: u64,
+    /// `set_by` over the room, the time and the text, so whoever passes
+    /// the topic on cannot change who set it, or what it says.
+    pub sig: Sig,
+    /// Passed on for someone who joined: an app takes it only while it
+    /// has no topic for the room.
+    pub repost: bool,
+}
+
+impl Topic {
+    /// A topic `signer`, a member's key in `group`, sets now.
+    pub fn new(signer: &KeyPair, group: GroupId, text: &str, set_unix: u64) -> Topic {
+        Topic {
+            text: text.to_string(),
+            set_by: signer.public(),
+            set_unix,
+            sig: signer.sign(CTX_TOPIC, &topic_msg(&group, set_unix, text)),
+            repost: false,
+        }
+    }
+
+    /// Whether `set_by` signed this topic for `group`.
+    pub fn verify(&self, group: &GroupId) -> bool {
+        verify(
+            &self.set_by,
+            CTX_TOPIC,
+            &topic_msg(group, self.set_unix, &self.text),
+            &self.sig,
+        )
+    }
+}
+
+/// What a topic's signature covers: group ID (16) || set time as
+/// big-endian u64 (8) || the text.
+fn topic_msg(group: &GroupId, set_unix: u64, text: &str) -> Vec<u8> {
+    let mut m = Vec::with_capacity(24 + text.len());
+    m.extend_from_slice(&group.0);
+    m.extend_from_slice(&set_unix.to_be_bytes());
+    m.extend_from_slice(text.as_bytes());
+    m
 }
 
 /// Longest summary of an extension message, in characters.
@@ -134,6 +186,73 @@ mod tests {
             body: Vec::new(),
             summary: None,
         }
+    }
+
+    use crate::keys::KeyPair;
+
+    /// The topic is variant 13, after every variant an app up to 0.5.1
+    /// knows, so the numbers of the others stay as they were.
+    #[test]
+    fn a_topic_is_variant_13() {
+        let k = KeyPair::generate();
+        let t = Topic::new(&k, GroupId([1; 16]), "Saturday at noon", 1_700_000_000);
+        let b = AppMsg::Topic(t.clone()).encode();
+        assert_eq!(b[0], 13);
+        assert_eq!(AppMsg::decode(&b), Some(AppMsg::Topic(t)));
+        assert_eq!(AppMsg::IsDm.encode(), [5]);
+        assert_eq!(AppMsg::Closed { close_id: [0; 16] }.encode()[0], 12);
+    }
+
+    /// An app up to 0.5.1 knows variants 0 to 12. Postcard refuses a
+    /// variant number past the last one, so such an app reads a topic as
+    /// no message at all and goes on.
+    #[test]
+    fn an_app_up_to_0_5_1_reads_a_topic_as_nothing() {
+        #[allow(dead_code)]
+        #[derive(Debug, Deserialize)]
+        enum Old {
+            V0,
+            V1,
+            V2,
+            V3,
+            V4,
+            V5,
+            V6,
+            V7,
+            V8,
+            V9,
+            V10,
+            V11,
+            V12,
+        }
+        let k = KeyPair::generate();
+        let b = AppMsg::Topic(Topic::new(&k, GroupId([1; 16]), "hi", 1)).encode();
+        assert!(postcard::from_bytes::<Old>(&b).is_err());
+        assert!(postcard::from_bytes::<Old>(&AppMsg::IsDm.encode()).is_ok());
+    }
+
+    #[test]
+    fn a_topic_signature_covers_room_time_and_text() {
+        let k = KeyPair::generate();
+        let g = GroupId([7; 16]);
+        let t = Topic::new(&k, g, "Book club: Piranesi", 100);
+        assert_eq!(t.set_by, k.public());
+        assert!(t.verify(&g));
+        assert!(!t.verify(&GroupId([8; 16])), "another room");
+        let mut x = t.clone();
+        x.text.push('!');
+        assert!(!x.verify(&g), "other text");
+        let mut x = t.clone();
+        x.set_unix = 101;
+        assert!(!x.verify(&g), "another time");
+        let mut x = t.clone();
+        x.set_by = KeyPair::generate().public();
+        assert!(!x.verify(&g), "another setter");
+        let mut x = t.clone();
+        x.repost = true;
+        assert!(x.verify(&g), "passing it on keeps the signature");
+        let cleared = Topic::new(&k, g, "", 200);
+        assert!(cleared.verify(&g));
     }
 
     #[test]

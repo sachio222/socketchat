@@ -14,7 +14,9 @@ pub use link::{
 };
 
 /// Newest protocol number: sent in the first frame of every connection.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// Protocol 3 adds `Response::SlowDown`; the server also enforces each
+/// room's settings for connections on any protocol.
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Oldest protocol number a server still serves.
 pub const MIN_PROTOCOL_VERSION: u16 = 1;

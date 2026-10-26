@@ -29,7 +29,7 @@ fn init_writes_config_and_cert_and_prints_aup() {
     assert_eq!(cfg.retention_days, 30);
     assert_eq!(cfg.max_file_mb, 100);
     assert_eq!(cfg.invite_ttl_hours, 24);
-    assert!(cfg.members_can_invite);
+    assert!(cfg.members_make_accounts);
     assert!(!cfg.require_standard_suite);
     assert_eq!(cfg.max_connections, 1000);
     assert_eq!(cfg.listen.port(), 7444);
@@ -54,7 +54,9 @@ async fn hello_version_mismatch_closes() {
     c.send(&ClientFrame::Hello { version: 99 }).await;
     assert_eq!(
         c.recv().await,
-        Some(ServerFrame::VersionMismatch { server: 2 })
+        Some(ServerFrame::VersionMismatch {
+            server: socketchat_proto::PROTOCOL_VERSION
+        })
     );
     assert_eq!(c.recv().await, None);
 }

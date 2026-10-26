@@ -74,7 +74,7 @@ socketchat                            # opens the chat screen
 
 1. The person who runs the server sends an invite link by text or in person.
 2. The new person runs `socketchat join <link>`, picks a display name and a passphrase for their local data, and is in.
-3. To bring a friend into a group, a member types `/invite`. The app shows a link and a QR code.
+3. To bring a friend into a group, a member types `/invite`. The app shows a link and a QR code. A phone that scans the code opens the join page on socketchat.org.
 4. The friend runs `socketchat join <link>` and lands in that group.
 
 ### Names
@@ -96,11 +96,11 @@ socketchat                            # opens the chat screen
 A terminal interface with four areas:
 
 - Left: groups and direct messages, with unread counts.
-- Middle: messages, newest at the bottom, with time and sender.
+- Middle: messages, newest at the bottom, with time and sender. Under the room's name, the first line holds its topic, cut to the window.
 - Right: members of the current group, with verified marks.
 - Bottom: the input line and a one-line help bar with the keys for the current area.
 
-Keys: Tab moves between areas, or completes a command that starts with `/`; Ctrl-K opens a quick switcher; Page Up and Page Down scroll; Enter sends; Esc cancels. The mouse opens a room, moves between areas, scrolls and presses the buttons on boxes, until `/mouse off` gives it back to the terminal. Slash commands: `/invite`, `/invite --dm`, `/join <link>`, `/new <group name>`, `/dm <name>`, `/send <path>`, `/save <file> [dir]`, `/verify <name>`, `/rename <name> <new>`, `/name <new>`, `/kick <name>`, `/leave`, `/servers`, `/forget <number>`, `/theme`, `/mouse on|off`, `/help`, `/quit`.
+Keys: Tab moves between areas, or completes a command that starts with `/`; Ctrl-K opens a quick switcher; Up and Down in the message box bring back the lines sent in the open room, kept in memory only; Page Up and Page Down scroll; Enter sends; Esc cancels. The mouse opens a room, moves between areas, scrolls and presses the buttons on boxes, until `/mouse off` gives it back to the terminal. Slash commands: `/invite`, `/invite --dm`, `/join <link>`, `/new <group name>`, `/dm <name>`, `/send <path>`, `/save <file> [dir]`, `/verify <name>`, `/rename <name> <new>`, `/name <new>`, `/kick <name>`, `/topic [text]`, `/topic --clear`, `/settings`, `/leave`, `/servers`, `/forget <number>`, `/theme`, `/mouse on|off`, `/help`, `/quit`.
 
 The screen stays readable at 80 by 24 characters and works over SSH.
 
@@ -131,12 +131,12 @@ Files stream through memory one chunk at a time, so a large video never loads wh
 
 - For each group, the members' group keys and mailbox IDs. A person gets a fresh group key and mailbox in every group they join, so the server's records cannot link one person across two groups.
 - The signed membership changes and the admin list for each group.
-- Sizes and timing of encrypted messages and files.
+- The size of each encrypted message, rounded up to a whole number of 256-byte blocks (apps on 0.5.1 and older send exact sizes), the size of each encrypted file, and when each message and file moves.
 - IP addresses of connected clients. An operator who watches live traffic can link one person's mailboxes through their IP address and connection, even though the stored records cannot.
 
 ### What the server never sees
 
-- Message text, file contents, display names, group names.
+- Message text, file contents, display names, group names, room topics.
 - Any key that can decrypt messages or files.
 - Anyone's identity key, the key contacts use to verify each other.
 
@@ -231,6 +231,8 @@ socketchat://chat.example.com:7444/j/<token>#<server-cert-fpr>.<inviter-key-fpr>
 
 The token is random and stored on the server with its group, creator, expiry and remaining uses. Everything after `#` is the link fragment, which clients never send to the server. The invite secret lives only there, so a server cannot forge a join request even if someone has taken it over.
 
+The QR code in the invite box holds the web form of the link, `https://socketchat.org/join#socketchat://...`, because a phone camera opens web addresses and has no app for `socketchat://`. Browsers never send the part after `#` to the web server, so the join page reads the invite in the browser and shows how to install Socketchat on a computer and the command that joins. `socketchat join` and `/join` take either form.
+
 When the inviter creates the link, their client also signs a **voucher**: the token, a hash of the invite secret, the group ID, the inviter's group key and an expiry, signed with the inviter's identity key. The voucher goes to the group inside an encrypted MLS message, together with the public half of a signing key derived from the invite secret, which checks the joiner's request, and a key derived from the secret that seals the voucher for the joiner. Every member's client holds these and the server never sees them. The secret itself stays with the inviter and the joiner. A member's client keeps a voucher only when the member who posted it is the inviter it names, signed by the identity that member proved in the group, and never lets a later voucher replace it.
 
 Redeeming an invite:
@@ -251,23 +253,64 @@ The 24-hour expiry covers redeeming the link. Once a join request is lodged, it 
 
 To start a direct message with someone you already share a group with, use `/dm <name>`. The two apps exchange the new chat's KeyPackage and mailbox inside the shared group's encrypted messages, so the server's records do not link the two chats. The request names the asker's key in the new chat, and the other person's app marks the direct message verified only when that key added them to that chat and they had already verified the asker. For anyone else, `/invite --dm` makes a link that opens a new two-person chat.
 
-A server invite from `socketchat server invite` registers a server account key with no group, so the person can then create groups. When the operator allows members to invite, a group invite also registers a server account key for the joiner, so they can start their own groups and direct messages. The server does not record which invite created which account or mailbox. The operator can turn off members' ability to bring new people onto the server (`members_can_invite = false`).
+A server invite from `socketchat server invite` registers a server account key with no group, so the person can then create groups. When the operator allows members to make accounts, a group invite also registers a server account key for the joiner, so they can start their own groups and direct messages. The server does not record which invite created which account or mailbox. The operator can turn off members' ability to bring new people onto the server (`members_make_accounts = false`). Who can bring people into a room is the room's own setting (see "Room settings"), unless the operator lets only admins invite into every room (`members_can_invite_to_rooms = false`).
 
 ### Roles
 
-Each group has admins and members. The creator is the first admin. Admins can invite, remove members and make others admins. Members can send messages and files. When the operator allows it, members can also invite.
+Each group has admins and members. The creator is the first admin. Admins can invite, remove members, make others admins and change the room's settings. Members can send messages and files, and invite people unless the room's admins let only admins invite.
 
 MLS has no built-in roles, so v4 keeps them in group state that every member and the server can check:
 
 - The admin list lives in a GroupContext extension: a list of admin group keys that every member agrees on through MLS.
 - Commits and Proposals travel as MLS PublicMessages, which are signed but not encrypted. Application messages (chat text, files, profiles, vouchers) stay encrypted as PrivateMessages.
-- The server checks each Commit's signature, its epoch, and that an admin sent it whenever it adds, removes or changes the admin list. A Commit that fails is refused before any member sees it. The server cannot check a Commit's encrypted parts, so a member whose app cannot apply one falls out of step; the app says so, and an admin can remove and invite them again.
+- The server checks each Commit's signature, its epoch, and that an admin sent it whenever it removes someone else, changes the admin list or the room's settings, or adds someone to a room that lets only admins invite. A Commit that fails is refused before any member sees it. The server cannot check a Commit's encrypted parts, so a member whose app cannot apply one falls out of step; the app says so, and an admin can remove and invite them again.
 - The same PublicMessages tell the server who is in each group, which it needs for routing, deleting acknowledged entries and expiring files.
 - Leaving: `/leave` sends a Remove proposal for yourself, and the next online member's client commits it on its own.
 - If the last admin leaves, their leave Commit must promote the longest-standing member, and the server refuses it otherwise.
 - Each app also checks these rules before it applies a change, refuses any change that no member signed, and judges the longest-standing member from its own record of who joined when.
 
 This choice is a tradeoff: the server learns each group's membership changes and admin list, as per-group keys and mailbox IDs. It still never sees names, text or files. "Group membership and the server" above explains the limits and the roadmap.
+
+### Room settings
+
+Each room has three settings, and its admins change them:
+
+- **Who can invite:** anyone in the room, the default, or admins only. It covers making the room's invite links and adding the people who use them.
+- **Slow mode:** off, the default, or a number of seconds, up to 6 hours, that each member who is not an admin waits between messages. Admins are not held, as Discord does it.
+- **Who can set the topic:** admins only, the default, as the `+t` mode of IRC (Internet Relay Chat) works, or anyone in the room. Apps enforce it, since the topic itself is encrypted (see "Room topic").
+
+The operator can also let only admins invite into every room on the server (`members_can_invite_to_rooms = false`). That rule is stricter than any room's, and the server applies it whatever the room says; apps ask for it with `ServerRules` and show it in `/details`.
+
+The settings live in a second GroupContext extension, type `0xff02`, beside the admin list. Only a Commit changes them, so MLS authenticates every change and every member holds the same settings in each epoch. Commits travel as signed PublicMessages, so the server reads the settings from the group state it already keeps for the admin list and enforces them: in an admins-only room it refuses a member's room link and a member's add, and it holds members to the slow mode. The server checks that an admin signed every Commit that changes a setting, and every app checks the same, each against the admins as they stood before that Commit. A change from anyone else, a member removed before it arrived included, is refused by the server and by every app, and the room keeps its settings. When the last admin leaves, the member who hands on the role cannot change the settings in the same Commit. Apps also check each add against the setting, so in an admins-only room a member's add that reached them would be refused there too.
+
+The room name and topic travel the other way, as encrypted application messages, so the server never sees them. The settings could travel that way too, but then the server could not enforce them. They say who may bring people in, how often members post and who may set the topic, nothing about what anyone writes, so the server reading them reveals little; `SECURITY.md` lists them under what the server sees.
+
+MLS lets a room hold an extension only while every member's app lists it among its capabilities, so the settings come with two rules:
+
+- A room on the defaults holds no settings extension. It looks exactly as rooms did before settings existed, and apps up to 0.5.1 join and chat in it as before.
+- An admin can change a setting only once everyone in the room runs Socketchat 0.5.2 or later. An app that updates refreshes its keys in each of its rooms on its own, which tells the room it knows settings; until then the admin's app names who it waits for. While a room has settings, an app up to 0.5.1 cannot join it, and the server tells its owner to update when they use a link. Setting all three back to the defaults removes the extension again.
+
+The extension holds entries, each a type, a length and a value, in order of type. Later settings fit beside these, and an app keeps the entries it does not know when it changes one it does. A new setting type must stay opaque to older apps: an app never refuses a change because of the contents of a type it does not know, or a room would split between app versions. Because every member's app must take the extension, one member whose app lacks the capability blocks every settings change until they update or an admin removes them.
+
+A server from before 0.5.2 does not know room settings and cannot keep them, so apps refuse to set them there.
+
+### Room topic
+
+A room's topic is one line that every member sees under the room's name, as IRC's `/topic` sets it. `/topic <text>` sets it, `/topic` shows it with who set it and when, and `/topic --clear` removes it; `socketchat topic --group <name> [text]` and `--clear` do the same from a terminal. The room shows a notice such as "Topic: Piranesi, chapters 1 to 5 (set by Ada, verified, 2026-10-25)" each time it changes, and a newcomer sees the same notice on joining. `/details` shows the whole topic.
+
+The topic travels as an encrypted application message, `AppMsg::Topic`, the way the room name does, so the server never sees it, and it is padded like every message. It carries the text, the group key of the member who set it, the time they set it, and that key's signature over the room, the time and the text (context `socketchat/v1/topic`). An empty text removes the topic.
+
+Every app judges a topic by the room at the point it arrives in the log, as it judges changes to the settings: the sender must be in the room, and be an admin, or any member while the room lets anyone set the topic. A new topic must name its sender as its setter. A topic from anyone else, or from a member removed before it arrived, changes nothing. When someone joins, each admin's app passes the topic on, marked as passed on and still signed by whoever set it; an app takes a topic passed on only while it has none for the room, so it never replaces a newer one, and the signature keeps the app that passes it on from changing the text or naming another setter.
+
+Before an app keeps or shows a topic, it cleans it with the strict filter that names get (`clean_topic` in `sanitize.rs`): no control characters or escape codes, no direction controls or isolates, no invisible characters or Hangul fillers, line breaks and other whitespace folded to single spaces, and at most 300 characters. The setter's app refuses a longer topic, every other app cuts it, and one over 4,096 bytes is ignored whole. Every place the topic shows starts it with `Topic:` and draws it in its own color, never in the colors of notices, warnings or the verified mark. It is plain text, so a link shows as its full address.
+
+A topic counts toward the posting pace like any message, and the app encrypts nothing for it while the room holds the member back. Leaving, `/clear`, `/forget` and a room's ending delete the topic from the computer with the room's other state. Apps up to 0.5.1 do not know the message and ignore it.
+
+### Posting pace
+
+The server limits how fast each member posts in each room, so one member cannot flood a room before an admin removes them. It keeps a token bucket for each member key in each room, counting messages and bytes: a member starts with a burst, then gets one message back every few seconds. A room's slow mode adds a second limit for members who are not admins, and a post must pass both, so the stricter one holds. Admins are never held by slow mode, and get ten times a member's pace rather than none, so one account that makes its own room still meets a limit. Commits that only take people out never count. A request to leave never counts either, and the server takes one per member per epoch, at the size apps send it. The buckets live in the server's memory, from the mailbox each connection posts with, which the server already knows; a restart gives everyone a full burst again.
+
+Over the limit, the server stores nothing and answers `SlowDown` with the time to wait. It never removes or bans anyone for posting fast. The app then encrypts nothing for that room until the wait is over, and it also counts out a room's slow mode after its own posts: every message an app encrypts moves its sender's keys on in the room, so a stream of refused ones would leave them further ahead than other members can follow. The app keeps a held text and sends it once the server allows, after any texts already waiting in that room, and the chat screen says "This room limits fast posting; sending in 4 seconds." A held text goes only to the people who were in the room when it was typed; if anyone joined or left meanwhile, the app hands it back unsent. Messages the app sends on its own, such as a member's name after someone joins, wait the same way and go on a later sync. An app on 0.5.1 or older hears the wait in words, as a refusal.
 
 ### Server storage
 
@@ -282,7 +325,8 @@ SQLite in WAL mode, one file. Tables for accounts, mailboxes, groups, group memb
 - `retention_days` (default 30)
 - `max_file_mb` (default 100)
 - `invite_ttl_hours` (default 24)
-- `members_can_invite` (default true)
+- `members_make_accounts` (default true)
+- `members_can_invite_to_rooms` (default true; files from before 0.5.2 had one key, `members_can_invite`, for both, which the server still reads)
 - `require_standard_suite` (default false)
 - `max_connections` (default 1,000)
 - `max_per_ip` (default 256)
@@ -294,6 +338,10 @@ SQLite in WAL mode, one file. Tables for accounts, mailboxes, groups, group memb
 - `max_member_files_mb` (default 4,000)
 - `max_room_welcomes` (default 100)
 - `max_stored_mb` (default 8,000)
+- `rate_burst_messages` (default 30)
+- `rate_seconds_per_message` (default 5)
+- `rate_burst_kb` (default 2,000)
+- `rate_kb_per_second` (default 10)
 
 ### Performance targets
 
@@ -349,6 +397,8 @@ SQLite in WAL mode, one file. Tables for accounts, mailboxes, groups, group memb
 - Weekly refresh covers encryption keys only. Resetting your signing key is a separate, visible action.
 - Suite 0x004F through openmls_rust_crypto's experimental path, with the audit's coverage stated honestly.
 - A fresh group key and mailbox per group, with the identity key kept off the server, so stored server data cannot link one person across groups. Full membership hiding goes first on the roadmap and in a "help wanted" issue.
+- Room settings in the signed group context, next to the admin list, so the server and every app enforce them and no one but an admin can change them. The server reads who may invite and the slow mode; changing a setting needs every member on 0.5.2 or later.
+- A pace limit per member per room that refuses with a wait and never removes anyone, as Matrix and Discord do; the app holds the message and sends it later.
 
 A proof of concept on 2026-10-19 showed that suite 0x004F, server checks of signed Commits with no group secrets, admin refusal, `welcome_sender`, self-leave, SQLCipher storage, and a native Linux aarch64 build all work with the crate versions above.
 

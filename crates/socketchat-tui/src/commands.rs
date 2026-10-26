@@ -1,6 +1,19 @@
 //! Slash commands typed in the input line.
 
 use socketchat_core::sanitize;
+use socketchat_core::settings::{WhoCanInvite, WhoCanSetTopic};
+
+/// A room setting `/settings` changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Setting {
+    /// Who can bring people into the room.
+    Invite(WhoCanInvite),
+    /// Seconds each member who is not an admin waits between messages; 0
+    /// turns slow mode off.
+    Slow(u32),
+    /// Who can set the room's topic.
+    Topic(WhoCanSetTopic),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -28,6 +41,10 @@ pub enum Command {
     Switch(Option<String>),
     /// Rename this room for everyone.
     Title(String),
+    /// Show the room's topic, or set it for everyone.
+    Topic(Option<String>),
+    /// Remove the room's topic for everyone.
+    ClearTopic,
     Close,
     /// Vote to keep this room open.
     Keep,
@@ -40,6 +57,8 @@ pub enum Command {
     Mute,
     Unmute,
     Details,
+    /// Show this room's settings, or change one.
+    Settings(Option<Setting>),
     Clear,
     /// The version, what socketchat is and where to find it.
     About,
@@ -48,6 +67,9 @@ pub enum Command {
     /// Say whether clicks and the scroll wheel work, or turn them on or
     /// off.
     Mouse(Option<bool>),
+    /// Say whether the daily check for a new version is on, or turn it on
+    /// or off.
+    Updates(Option<bool>),
     Help,
     Quit,
 }
@@ -81,6 +103,10 @@ pub const HELP: &[(&str, &str)] = &[
         "open another room; Tab completes the name",
     ),
     ("/title <name>", "rename this room for everyone (admins)"),
+    (
+        "/topic [text]",
+        "see or set the topic; /topic --clear removes it",
+    ),
     ("/close", "close this room for everyone (admins agree)"),
     ("/keep", "say no to closing this room (admins)"),
     ("/invites", "see your open invite links"),
@@ -93,6 +119,19 @@ pub const HELP: &[(&str, &str)] = &[
     ("/mute", "hide this room's new-message count"),
     ("/unmute", "show this room's new-message count again"),
     ("/details", "see this room's admins, size and age"),
+    ("/settings", "see this room's settings"),
+    (
+        "/settings invite",
+        "admins or anyone: who can bring people in (admins)",
+    ),
+    (
+        "/settings slow",
+        "seconds or off: how long members wait between messages (admins)",
+    ),
+    (
+        "/settings topic",
+        "admins or anyone: who can set the topic (admins)",
+    ),
     ("/clear", "delete this room's messages from this computer"),
     (
         "/theme [name]",
@@ -101,6 +140,10 @@ pub const HELP: &[(&str, &str)] = &[
     (
         "/mouse [on|off]",
         "turn mouse clicks and scrolling on or off",
+    ),
+    (
+        "/updates [on|off]",
+        "turn the daily check for a new version on or off",
     ),
     ("/about", "see the version and what Socketchat is"),
     ("/quit", "close Socketchat"),
@@ -188,6 +231,11 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         "/leave" => Command::Leave,
         "/switch" => Command::Switch((!rest.is_empty()).then(|| rest.to_string())),
         "/title" => Command::Title(need("/title <name>")?),
+        "/topic" => match rest {
+            "" => Command::Topic(None),
+            "--clear" => Command::ClearTopic,
+            text => Command::Topic(Some(text.to_string())),
+        },
         "/close" => Command::Close,
         "/keep" => Command::Keep,
         "/invites" => Command::Invites,
@@ -203,6 +251,7 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         "/mute" => Command::Mute,
         "/unmute" => Command::Unmute,
         "/details" => Command::Details,
+        "/settings" => Command::Settings(parse_setting(rest)?),
         "/clear" => Command::Clear,
         "/about" => Command::About,
         "/theme" => Command::Theme((!rest.is_empty()).then(|| rest.to_string())),
@@ -212,6 +261,12 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
             "off" => Some(false),
             _ => return Err("Usage: /mouse on, or /mouse off".into()),
         }),
+        "/updates" => Command::Updates(match rest {
+            "" => None,
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => return Err("Usage: /updates on, or /updates off".into()),
+        }),
         "/help" => Command::Help,
         "/quit" => Command::Quit,
         other => {
@@ -220,6 +275,22 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
             ))
         }
     })
+}
+
+/// What follows `/settings`.
+fn parse_setting(rest: &str) -> Result<Option<Setting>, String> {
+    const USAGE: &str = "Usage: /settings, /settings invite admins, /settings invite anyone, /settings slow <seconds>, /settings slow off, /settings topic admins, or /settings topic anyone";
+    let w: Vec<&str> = rest.split_whitespace().collect();
+    Ok(Some(match w.as_slice() {
+        [] => return Ok(None),
+        ["invite", "admins"] => Setting::Invite(WhoCanInvite::Admins),
+        ["invite", "anyone"] => Setting::Invite(WhoCanInvite::Anyone),
+        ["slow", "off"] => Setting::Slow(0),
+        ["slow", n] => Setting::Slow(n.parse().map_err(|_| USAGE.to_string())?),
+        ["topic", "admins"] => Setting::Topic(WhoCanSetTopic::Admins),
+        ["topic", "anyone"] => Setting::Topic(WhoCanSetTopic::Anyone),
+        _ => return Err(USAGE.into()),
+    }))
 }
 
 /// How many files a refused `/save` lists by name; older ones are counted.

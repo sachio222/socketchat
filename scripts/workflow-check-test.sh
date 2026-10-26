@@ -66,6 +66,19 @@ has permission_forms_fail "$P:16: job build asks for a write permission"
 has permission_forms_fail "$P:24: job test asks for a write permission"
 count permission_forms_fail "$P:" 3
 
+# The Homebrew tap token only in a step of publish-homebrew-formula, which
+# may not write to this repository; no other secret anywhere.
+S="$F/secrets.yml"
+runf secrets_fail 1 "$S"
+has secrets_fail "$S:14: the Homebrew tap token is set in job build; give it only to the step in publish-homebrew-formula that pushes the formula"
+has secrets_fail "$S:20: job publish-homebrew-formula asks for a write permission; only host may"
+has secrets_fail "$S:22: the Homebrew tap token is set in job publish-homebrew-formula; give it only to the step in publish-homebrew-formula that pushes the formula"
+has secrets_fail "$S:27: the secret NPM_TOKEN is not allowed; only GITHUB_TOKEN in host and HOMEBREW_TAP_TOKEN in publish-homebrew-formula are"
+has secrets_fail "$S:31: the workflow hands over every secret; name the one a step needs"
+has secrets_fail "$S:40: the Homebrew tap token is set in job host; give it only to the step in publish-homebrew-formula that pushes the formula"
+has secrets_fail "$S:44: a checkout keeps its token for the steps after it; set persist-credentials: false"
+count secrets_fail "$S:" 7
+
 W="$F/write-all-top.yml"
 runf write_all_at_top_fails 1 "$W"
 has write_all_at_top_fails "$W:2: the workflow-wide permissions grant write"

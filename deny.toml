@@ -13,7 +13,6 @@ ignore = [
     { id = "RUSTSEC-2026-0347", reason = "needs Encrypted Client Hello; socketchat does not use ECH" },
     { id = "RUSTSEC-2026-0348", reason = "needs the brotli feature; it is off" },
     { id = "RUSTSEC-2026-0349", reason = "downgrade of a hybrid TLS key exchange; socketchat's TLS uses ring with classical groups only" },
-    { id = "RUSTSEC-2026-0382", reason = "needs trust-anchor path building through webpki; socketchat verifies a pinned end-entity certificate with its own verifier and has no root store" },
     # Build-time macro crate under hpke-rs (libcrux hax-lib); no maintained
     # replacement upstream yet, and it does not run in socketchat.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro used only at build time by hpke-rs dependencies" },

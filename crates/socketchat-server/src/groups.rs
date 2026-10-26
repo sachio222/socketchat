@@ -17,6 +17,7 @@ use openmls_traits::public_storage::PublicStorageProvider as _;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use socketchat_core::provider::JsonCodec;
+use socketchat_core::settings::{room_settings, settings_in, WhoCanInvite};
 use socketchat_core::suite::{parse_admins, FALLBACK_SUITE, MAX_PAST_EPOCHS, SUITE};
 use socketchat_proto::msg::{
     Entry, FileId, GroupId as Gid, InviteInfo, Key, MemberInfo, Push, Response, ServerFrame, Sig,
@@ -27,9 +28,51 @@ use socketchat_proto::{Token, MAX_FRAME};
 use crate::auth::{admit, load_invite, signed};
 use crate::conn::ConnState;
 use crate::quota::{self, Count};
+use crate::rules::{wait_text, Pace, RoomRules};
 use crate::State;
 
 type Storage<'a> = SqliteStorageProvider<JsonCodec, &'a Connection>;
+
+/// The OpenMLS group storage in the server's database.
+pub(crate) fn storage(db: &Connection) -> Storage<'_> {
+    Storage::new(db)
+}
+
+/// The answer to a post that came too fast: `SlowDown` for apps that read
+/// it, words with the wait for older ones.
+fn slow_down(cs: &ConnState, ms: u32) -> Response {
+    if cs.version >= 3 {
+        Response::SlowDown { retry_after_ms: ms }
+    } else {
+        Response::Refused(format!(
+            "this room limits fast posting; try again in {}",
+            wait_text(ms)
+        ))
+    }
+}
+
+/// Counts a post of `bytes` by `member` against their pace in `group`, or
+/// says how long to wait. Admins are not held by the room's slow mode, as
+/// Discord leaves moderators out of it, and get ten times a member's pace:
+/// the app posts on their behalf for every person they bring in, and one
+/// account that makes its own room still meets a limit.
+fn pace_refused(
+    state: &State,
+    rules: Option<&RoomRules>,
+    group: &Gid,
+    member: &Key,
+    bytes: usize,
+) -> Result<(), u32> {
+    let admin = rules.is_some_and(|r| r.admins.contains(member));
+    let slow = rules.map_or(0, |r| r.settings.slow_secs);
+    state.limiter.take(
+        *group,
+        *member,
+        bytes,
+        state.now_ms(),
+        Pace::new(state, slow, admin),
+    )
+}
 
 /// Most entries one fetch returns.
 const FETCH_LIMIT: u16 = 500;
@@ -106,13 +149,24 @@ fn retire(db: &Connection, group: &Gid, k: &Key) -> rusqlite::Result<()> {
     // A Welcome nobody fetched goes with the mailbox it was for, whether
     // that person left or waited on a link whose maker left.
     db.execute("DELETE FROM welcomes WHERE mailbox = ?1", [k.0.as_slice()])?;
+    db.execute("DELETE FROM mailboxes WHERE key = ?1", [k.0.as_slice()])?;
+    drop_links(db, group, k)?;
+    db.execute(
+        "INSERT OR IGNORE INTO retired_keys (hash, group_id) VALUES (?1, ?2)",
+        params![retired_hash(k).as_slice(), group.0.as_slice()],
+    )?;
+    Ok(())
+}
+
+/// The links `k` made in `group` stop working, and joins waiting on them
+/// go with the joiners' mailboxes and any Welcome not yet fetched.
+fn drop_links(db: &Connection, group: &Gid, k: &Key) -> rusqlite::Result<()> {
     db.execute(
         "DELETE FROM welcomes WHERE mailbox IN (
              SELECT j.mailbox FROM joins j JOIN invites i ON i.token = j.token
              WHERE i.maker = ?1 AND i.group_id = ?2)",
         params![k.0.as_slice(), group.0.as_slice()],
     )?;
-    db.execute("DELETE FROM mailboxes WHERE key = ?1", [k.0.as_slice()])?;
     db.execute(
         "DELETE FROM mailboxes WHERE joined_seq IS NULL AND key IN (
              SELECT j.mailbox FROM joins j JOIN invites i ON i.token = j.token
@@ -128,10 +182,44 @@ fn retire(db: &Connection, group: &Gid, k: &Key) -> rusqlite::Result<()> {
         "DELETE FROM invites WHERE maker = ?1 AND group_id = ?2",
         params![k.0.as_slice(), group.0.as_slice()],
     )?;
-    db.execute(
-        "INSERT OR IGNORE INTO retired_keys (hash, group_id) VALUES (?1, ?2)",
-        params![retired_hash(k).as_slice(), group.0.as_slice()],
-    )?;
+    Ok(())
+}
+
+/// Said when a link's maker can no longer bring people into its room.
+pub(crate) const MAKER_CANNOT_INVITE: &str = "this invite link stopped working, because the person who made it can no longer invite people into this room; ask an admin of the room for a new one";
+
+/// Whether the member who made a room link may still bring people into
+/// `group`: an admin always, anyone else only while both the server and
+/// the room let members invite. A link with no recorded maker passes.
+pub(crate) fn maker_may_invite(
+    state: &State,
+    db: &Connection,
+    group: &Gid,
+    maker: Option<&[u8]>,
+) -> bool {
+    let Some(maker) = maker.and_then(key_of) else {
+        return true;
+    };
+    let Some(rules) = state.rules.get(db, group) else {
+        return false;
+    };
+    rules.admins.contains(&maker)
+        || (state.cfg.members_can_invite_to_rooms && rules.settings.invite == WhoCanInvite::Anyone)
+}
+
+/// A room just went admins-only, or lost an admin while admins-only: the
+/// links made by members who are not admins stop working, with the joins
+/// waiting on them.
+fn drop_members_links(db: &Connection, group: &Gid, admins: &[Key]) -> rusqlite::Result<()> {
+    let makers: Vec<Vec<u8>> = db
+        .prepare("SELECT DISTINCT maker FROM invites WHERE group_id = ?1 AND maker IS NOT NULL")?
+        .query_map([group.0.as_slice()], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for m in makers.iter().filter_map(|m| key_of(m)) {
+        if !admins.contains(&m) {
+            drop_links(db, group, &m)?;
+        }
+    }
     Ok(())
 }
 
@@ -214,9 +302,12 @@ pub fn register_mailbox(
             if inv.uses_left < 1 {
                 return refused("this invite link was already used");
             }
-            // A room that could not take this person's add says so now, to
-            // the joiner, and the link stays unused.
             if let Ok(gid) = <[u8; 16]>::try_from(group.as_slice()).map(Gid) {
+                if !maker_may_invite(state, &db, &gid, inv.maker.as_deref()) {
+                    return refused(MAKER_CANNOT_INVITE);
+                }
+                // A room that could not take this person's add says so now,
+                // to the joiner, and the link stays unused.
                 if let Some(r) = quota::join_refused(state, &db, &gid) {
                     return r;
                 }
@@ -296,6 +387,9 @@ pub fn create_group(
     }) else {
         return refused(ONLY_CREATOR);
     };
+    if settings_in(pg.group_context().extensions()).is_none() {
+        return refused("the room's settings do not read");
+    }
     let epoch = pg.group_context().epoch().as_u64();
 
     let mut guard = state.db();
@@ -391,16 +485,24 @@ fn append(db: &Connection, group: &Gid, mls: &[u8], now: u64) -> rusqlite::Resul
     Ok(seq as u64)
 }
 
-/// Why a commit is refused, if it is.
+/// Why a commit is refused, if it is. Everything is judged by the room as
+/// it stood before the commit: its admins and its settings then.
+/// `server_lets_members_invite` is the operator's own rule; when false,
+/// every room is admins-only for adds, whatever its setting says.
 fn check_commit(
     pg: &PublicGroup,
     committer: &Key,
     sc: &StagedCommit,
     join_order: &HashMap<Key, u64>,
-    members_can_add: bool,
+    server_lets_members_invite: bool,
 ) -> Result<(), &'static str> {
     let old_admins = parse_admins(pg.group_context());
     let is_admin = old_admins.contains(committer);
+    let old_settings = room_settings(pg.group_context().extensions());
+    let Some(new_settings) = settings_in(sc.group_context().extensions()) else {
+        return Err("the room's new settings do not read; nothing changed");
+    };
+    let members_can_add = old_settings.invite == WhoCanInvite::Anyone;
     let leaf_key = |i: LeafNodeIndex| {
         pg.leaf(i)
             .and_then(|l| key_of(l.signature_key().as_slice()))
@@ -412,8 +514,11 @@ fn check_commit(
     for q in sc.queued_proposals() {
         match q.proposal() {
             Proposal::Add(a) => {
+                if !is_admin && !server_lets_members_invite {
+                    return Err("on this server only admins can add people to rooms");
+                }
                 if !is_admin && !members_can_add {
-                    return Err("adding people needs an admin");
+                    return Err("in this room only admins can add people");
                 }
                 if let Some(k) = key_of(a.key_package().leaf_node().signature_key().as_slice()) {
                     added.insert(k);
@@ -453,9 +558,15 @@ fn check_commit(
         if !has_gce || longest.map(|l| vec![l]) != Some(new_admins) {
             return Err("the last admin is leaving; the change must make the longest-standing member an admin");
         }
+        if new_settings != old_settings {
+            return Err("handing on the admin role cannot change the room's settings");
+        }
         return Ok(());
     }
     if has_gce {
+        if !is_admin && new_settings != old_settings {
+            return Err("changing this room's settings needs an admin");
+        }
         if !is_admin {
             return Err("changing admins needs an admin");
         }
@@ -496,9 +607,9 @@ pub fn post(
     let Ok(db) = guard.transaction() else {
         return Response::Error("could not store the message".into());
     };
-    if member_key(&db, cs, &group).is_none() {
+    let Some(me) = member_key(&db, cs, &group) else {
         return refused("you are not a member of this group");
-    }
+    };
     let Ok(pm) = parsed else {
         return refused("that is not an MLS message");
     };
@@ -525,6 +636,10 @@ pub fn post(
         }
         if let Some(r) = quota::messages_refused(state, &db, &group, cost, 0, false) {
             return r;
+        }
+        let rules = state.rules.get(&db, &group);
+        if let Err(ms) = pace_refused(state, rules.as_deref(), &group, &me, mls.len()) {
+            return slow_down(cs, ms);
         }
         let Ok(seq) = append(&db, &group, mls, now).and_then(|seq| db.commit().map(|_| seq)) else {
             return Response::Error("could not store the message".into());
@@ -567,18 +682,23 @@ pub fn post(
     if !leaving {
         return refused("members may only propose to leave");
     }
-    // A full room still takes each member's first request to leave, if it
-    // is the size apps send, up to a little past the limit.
-    if let Some(r) = quota::messages_refused(state, &db, &group, cost, 0, false) {
-        let asked_before = pg.queued_proposals(&storage).map_or(true, |qs| {
-            qs.iter().any(|(_, q)| {
-                matches!(q.sender(), Sender::Member(s) if *s == sender_idx)
-                    && matches!(q.proposal(), Proposal::Remove(r) if r.removed() == sender_idx)
-            })
-        });
-        if asked_before || mls.len() > quota::EXEMPT_LEAVE_MAX || aad > quota::EXEMPT_AAD_MAX {
-            return r;
-        }
+    // A request to leave is never held by the pace or slow mode, so the
+    // server takes one per member per epoch, at the size apps send it.
+    if mls.len() > quota::EXEMPT_LEAVE_MAX || aad > quota::EXEMPT_AAD_MAX {
+        return refused("that request to leave is larger than Socketchat apps send");
+    }
+    let asked_before = pg.queued_proposals(&storage).map_or(true, |qs| {
+        qs.iter().any(|(_, q)| {
+            matches!(q.sender(), Sender::Member(s) if *s == sender_idx)
+                && matches!(q.proposal(), Proposal::Remove(r) if r.removed() == sender_idx)
+        })
+    });
+    if asked_before {
+        return refused("you already asked to leave; the room lets you go at its next change");
+    }
+    // A full room still takes each member's request to leave, up to a
+    // little past the limit.
+    if quota::messages_refused(state, &db, &group, cost, 0, false).is_some() {
         if let Some(r) = quota::messages_refused(state, &db, &group, cost, 0, true) {
             return r;
         }
@@ -661,6 +781,7 @@ fn post_commit(
         };
         (epoch, pg, queued, joined(&db, &group))
     };
+    let rules_before = RoomRules::from_context(pg.group_context().extensions());
 
     let delay = state.cfg.commit_check_delay.get();
     if !delay.is_zero() {
@@ -686,7 +807,13 @@ fn post_commit(
     let ProcessedMessageContent::StagedCommitMessage(sc) = processed.into_content() else {
         return refused("that kind of message is not allowed here");
     };
-    if let Err(why) = check_commit(&pg, &sender_key, &sc, &order, state.cfg.members_can_invite) {
+    if let Err(why) = check_commit(
+        &pg,
+        &sender_key,
+        &sc,
+        &order,
+        state.cfg.members_can_invite_to_rooms,
+    ) {
         return refused(why);
     }
     let added: Vec<Key> = sc
@@ -706,6 +833,10 @@ fn post_commit(
     // still shrink.
     let shrinks =
         added.is_empty() && sc.remove_proposals().next().is_some() && aad <= quota::EXEMPT_AAD_MAX;
+    // Taking people out, a member's own leave included, is never held up
+    // by the pace limit.
+    let removes_only = added.is_empty() && sc.remove_proposals().next().is_some();
+    let rules_after = RoomRules::from_context(sc.group_context().extensions());
 
     let now = state.now();
     let mut guard = state.db();
@@ -749,6 +880,12 @@ fn post_commit(
     }
     if let Some(r) = quota::messages_refused(state, &db, &group, cost, welcome_bytes, shrinks) {
         return r;
+    }
+    // Charged last, so a change refused for any other reason spends none.
+    if !removes_only {
+        if let Err(ms) = pace_refused(state, Some(&rules_before), &group, &sender_key, mls.len()) {
+            return slow_down(cs, ms);
+        }
     }
     let old_members: Vec<Key> = joined(&db, &group).into_keys().collect();
     if pg.merge_commit(&storage, *sc).is_err() {
@@ -812,6 +949,12 @@ fn post_commit(
             retired = true;
             left = true;
         }
+        let admins_only_after = rules_after.settings.invite == WhoCanInvite::Admins
+            || !state.cfg.members_can_invite_to_rooms;
+        let switched = rules_before.settings.invite != rules_after.settings.invite;
+        if admins_only_after && (switched || rules_before.admins != rules_after.admins) {
+            drop_members_links(&db, &group, &rules_after.admins)?;
+        }
         // Files only those who left were waiting for go with them.
         if retired {
             unwanted = crate::files::drop_unwanted(&db, &group)?;
@@ -821,6 +964,11 @@ fn post_commit(
     let Ok(seq) = stored.and_then(|seq| db.commit().map(|_| seq)) else {
         return Response::Error("could not store the message".into());
     };
+    // Still under the database lock: the next post reads the new rules.
+    state.rules.set(group, rules_after);
+    for k in old_members.iter().filter(|k| !new_members.contains(k)) {
+        state.limiter.forget(&group, k);
+    }
     quota::note_stored(state, cost + welcome_bytes, 0);
     if !unwanted.is_empty() || left {
         quota::recount(state);
@@ -959,15 +1107,15 @@ pub fn create_invite(state: &State, cs: &ConnState, group: Option<Gid>) -> Respo
             let Some(me) = member_key(&db, cs, &g) else {
                 return refused("you are not a member of this group");
             };
-            if !state.cfg.members_can_invite {
-                let storage = Storage::new(&*db);
-                let is_admin = PublicGroup::load(&storage, &mls_gid(&g))
-                    .ok()
-                    .flatten()
-                    .is_some_and(|pg| parse_admins(pg.group_context()).contains(&me));
-                if !is_admin {
-                    return refused("on this server only admins can make invite links");
-                }
+            let Some(rules) = state.rules.get(&db, &g) else {
+                return Response::Error("could not load the group".into());
+            };
+            let is_admin = rules.admins.contains(&me);
+            if !state.cfg.members_can_invite_to_rooms && !is_admin {
+                return refused("on this server only admins can make invite links");
+            }
+            if rules.settings.invite == WhoCanInvite::Admins && !is_admin {
+                return refused("in this room only admins can make invite links");
             }
             let open: i64 = match db.query_row(
                 "SELECT COUNT(*) FROM invites
@@ -989,7 +1137,7 @@ pub fn create_invite(state: &State, cs: &ConnState, group: Option<Gid>) -> Respo
             let account = cs.proven.iter().copied().find(|k| is_account(&db, k));
             let saved = (|| -> rusqlite::Result<()> {
                 let t = db.unchecked_transaction()?;
-                let can_register = match (state.cfg.members_can_invite, account) {
+                let can_register = match (state.cfg.members_make_accounts, account) {
                     (true, Some(a)) => quota::take(
                         state,
                         &t,
@@ -1018,7 +1166,7 @@ pub fn create_invite(state: &State, cs: &ConnState, group: Option<Gid>) -> Respo
         }
         None => {
             let account = cs.proven.iter().copied().find(|k| is_account(&db, k));
-            let (true, Some(account)) = (state.cfg.members_can_invite, account) else {
+            let (true, Some(account)) = (state.cfg.members_make_accounts, account) else {
                 return refused("on this server only the operator can invite new people");
             };
             match take_server_invite(state, &db, &account, &token, expires) {
@@ -1138,6 +1286,13 @@ pub fn cancel_invite(state: &State, cs: &ConnState, token: Token) -> Response {
     Response::Ok
 }
 
+/// The server's own rules that rooms cannot change.
+pub fn server_rules(state: &State) -> Response {
+    Response::ServerRules {
+        members_can_invite_to_rooms: state.cfg.members_can_invite_to_rooms,
+    }
+}
+
 /// When the group was created, for a member.
 pub fn group_created(state: &State, cs: &ConnState, group: Gid) -> Response {
     let db = state.db();
@@ -1216,6 +1371,8 @@ pub(crate) fn delete_group(db: &Connection, state: &State, group: &Gid) -> rusql
             .map_err(to_sql_error)?;
     }
     t.commit()?;
+    state.rules.forget(group);
+    state.limiter.forget_room(group);
     crate::db::checkpoint(db);
     quota::recount(state);
     // The chunks go once the rows are gone for good.

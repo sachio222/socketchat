@@ -255,6 +255,10 @@ CREATE TABLE IF NOT EXISTS awaited_inviters (
     group_key BLOB NOT NULL,
     identity BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS topics (
+    group_id BLOB PRIMARY KEY,
+    topic BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ended_rooms (
     group_id BLOB PRIMARY KEY,
     name TEXT NOT NULL,
@@ -278,6 +282,7 @@ pub const ROOM_STATE_TABLES: &[&str] = &[
     "awaited_inviters",
     "owed_reposts",
     "held_profiles",
+    "topics",
     // Server links have no `group_id`, so ending a room leaves them be.
     "invites_made",
 ];
@@ -416,6 +421,12 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("groups", "closing", "BLOB"),
     ("profile", "theme", "TEXT"),
     ("profile", "mouse", "INTEGER"),
+    // The update check: 0 when the person turned it off, when the app last
+    // asked GitHub, when GitHub last answered and the release it named.
+    ("profile", "update_check", "INTEGER"),
+    ("profile", "update_asked_unix", "INTEGER"),
+    ("profile", "update_answered_unix", "INTEGER"),
+    ("profile", "update_latest", "TEXT"),
     ("pending_joins", "key_package_refs", "BLOB"),
     ("vouchers", "joiner", "BLOB"),
     ("files", "sender_group_key", "BLOB"),
@@ -448,17 +459,35 @@ fn migrate(conn: &Connection) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// How long [`lock`] keeps trying a taken lock before it says another app
+/// has the profile, and how long it waits between tries.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+const LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Takes the profile's lock, or says another app has it.
+///
+/// A taken lock is tried again for up to [`LOCK_WAIT`] before the answer is
+/// "in use". When this process starts a program, the program holds a copy of
+/// every open file until it has started, the lock of a profile that has just
+/// closed included, and for that moment the lock still looks taken. Nothing
+/// on this side can stop the copy. Another app that has the profile open is
+/// still refused, only up to half a second later.
 fn lock(dir: &Path) -> Result<std::fs::File, CoreError> {
     let f = crate::perms::private_options()
         .create(true)
         .truncate(false)
         .write(true)
         .open(dir.join(LOCK_FILE))?;
-    match f.try_lock() {
-        Ok(()) => Ok(f),
-        Err(std::fs::TryLockError::WouldBlock) => Err(CoreError::ProfileInUse),
-        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    let start = std::time::Instant::now();
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(f),
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < LOCK_WAIT => {
+                std::thread::sleep(LOCK_RETRY);
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err(CoreError::ProfileInUse),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
     }
 }
 
@@ -755,6 +784,53 @@ impl Store {
         Ok(())
     }
 
+    /// What the profile remembers about the update check.
+    pub fn update_state(&self) -> Result<crate::update::UpdateState, CoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT update_check, update_asked_unix, update_answered_unix, update_latest
+                 FROM profile WHERE id = 1",
+                [],
+                |r| {
+                    Ok(crate::update::UpdateState {
+                        on: r.get::<_, Option<bool>>(0)?.unwrap_or(true),
+                        asked_unix: r.get::<_, Option<i64>>(1)?.map(|t| t.max(0) as u64),
+                        answered_unix: r.get::<_, Option<i64>>(2)?.map(|t| t.max(0) as u64),
+                        latest: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or_default())
+    }
+
+    pub fn set_update_check(&self, on: bool) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE profile SET update_check = ?1 WHERE id = 1",
+            params![on],
+        )?;
+        Ok(())
+    }
+
+    /// Notes that the app asked GitHub at `unix`.
+    pub fn set_update_asked(&self, unix: u64) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE profile SET update_asked_unix = ?1 WHERE id = 1",
+            params![unix as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Notes that GitHub answered at `unix`, naming `latest`.
+    pub fn set_update_answer(&self, unix: u64, latest: &str) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE profile SET update_answered_unix = ?1, update_latest = ?2 WHERE id = 1",
+            params![unix as i64, latest],
+        )?;
+        Ok(())
+    }
+
     pub fn set_profile(&self, p: &Profile) -> Result<(), CoreError> {
         let id = Zeroizing::new(postcard::to_stdvec(&p.identity)?);
         self.conn.execute(
@@ -1003,6 +1079,31 @@ impl Store {
             params![name, g.0.as_slice()],
         )?;
         Ok(())
+    }
+
+    /// Keeps a room's topic as it came, signature and all, so it can be
+    /// passed on to someone who joins. An empty text keeps that the topic
+    /// was cleared.
+    pub fn set_topic(&self, g: &GroupId, t: &crate::appmsg::Topic) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO topics (group_id, topic) VALUES (?1, ?2)",
+            params![g.0.as_slice(), postcard::to_stdvec(t)?],
+        )?;
+        Ok(())
+    }
+
+    /// A room's topic as last set, or `None` when this app never learned
+    /// one. One that does not read counts as none.
+    pub fn topic(&self, g: &GroupId) -> Result<Option<crate::appmsg::Topic>, CoreError> {
+        let b: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT topic FROM topics WHERE group_id = ?1",
+                [g.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(b.and_then(|b| postcard::from_bytes(&b).ok()))
     }
 
     pub fn set_last_seq(&self, g: &GroupId, seq: u64) -> Result<(), CoreError> {
@@ -1854,12 +1955,12 @@ impl Store {
     }
 
     /// Deletes a live room's history on this computer in one transaction,
-    /// with its files list and the keys to those files: the lines that
-    /// offered them go too. [`Store::checkpoint`] then clears the old
-    /// copies out of the log.
+    /// with its files list and the keys to those files (the lines that
+    /// offered them go too) and its topic. [`Store::checkpoint`] then
+    /// clears the old copies out of the log.
     pub fn clear_history(&self, g: &GroupId) -> Result<(), CoreError> {
         let tx = self.conn.unchecked_transaction()?;
-        for table in ROOM_HISTORY_TABLES.iter().chain(&["files"]) {
+        for table in ROOM_HISTORY_TABLES.iter().chain(&["files", "topics"]) {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE group_id = ?1"),
                 [g.0.as_slice()],
@@ -2336,6 +2437,36 @@ mod tests {
             .unwrap()
             .expect("group reloads");
         assert_eq!(g.ciphersuite(), SUITE);
+    }
+
+    #[test]
+    fn room_from_before_padding_pads_after_reopen() {
+        use crate::suite::tests::{create_config_0_5_1, wire_len};
+        use crate::suite::{group_join_config, load_group, PADDING_BLOCK};
+        let d = tempfile::tempdir().unwrap();
+        let me = KeyPair::generate();
+        let gid = {
+            let (_s, p) = Store::create(d.path(), "k").unwrap();
+            let g = MlsGroup::new(
+                &p,
+                &me,
+                &create_config_0_5_1(SUITE, &[me.public()]),
+                me.credential(),
+            )
+            .unwrap();
+            g.group_id().clone()
+        };
+        {
+            let (_s, p) = Store::open(d.path(), "k").unwrap();
+            let mut g = load_group(p.storage(), &gid)
+                .unwrap()
+                .expect("group reloads");
+            assert_eq!(g.configuration(), &group_join_config());
+            assert_eq!(wire_len(&p, &me, &mut g, 1), wire_len(&p, &me, &mut g, 160));
+        }
+        let (_s, p) = Store::open(d.path(), "k").unwrap();
+        let g = MlsGroup::load(p.storage(), &gid).unwrap().unwrap();
+        assert_eq!(g.configuration().padding_size(), PADDING_BLOCK);
     }
 
     /// Writes a profile keyed with `params`, its salt file in the stored

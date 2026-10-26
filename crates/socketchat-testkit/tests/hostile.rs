@@ -1074,3 +1074,47 @@ async fn drift_after_a_later_change_is_reported_despite_an_old_refusal() {
         .collect();
     assert_eq!(out.len(), 1, "{w:?}");
 }
+
+/// Bo's app wrote a message for the room as it stood; Ada removed him
+/// before it reached the log, and a newcomer took the place in the group
+/// that Bo left. Apps still open a message that old, and it is Bo's: no
+/// app shows it as the newcomer's.
+#[tokio::test]
+async fn a_removed_members_late_message_is_not_taken_as_the_newcomers() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("Room").await.unwrap();
+    let mut b = TestClient::new(&s, "Bo").await;
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    let mut c = TestClient::new(&s, "Cy").await;
+    c.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut b, &mut c]).await;
+    let bk = b.my_group_key(g).unwrap();
+    let late = b
+        .test_encrypt_app(
+            g,
+            &AppMsg::Text {
+                body: "late".into(),
+            },
+        )
+        .unwrap();
+    a.remove_member(g, &bk).await.unwrap();
+    c.sync().await.unwrap();
+    let mut d = TestClient::new(&s, "Dee").await;
+    d.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    a.sync().await.unwrap();
+    c.sync().await.unwrap();
+    assert_eq!(c.members(g).len(), 3);
+    socketchat_testkit::append_to_log(&s, g, &late);
+    for x in [&mut a, &mut c] {
+        x.sync().await.unwrap();
+        let t = texts(x, g);
+        assert!(!t.iter().any(|l| l.ends_with(": late")), "{t:?}");
+    }
+}

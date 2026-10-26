@@ -20,6 +20,9 @@ async fn env_with(f: impl FnOnce(&mut Config)) -> Env {
     init(d.path(), "localhost").unwrap();
     let mut cfg = Config::load(d.path()).unwrap();
     cfg.listen = "127.0.0.1:0".parse().unwrap();
+    // These tests post faster than any person would; the pace limit has
+    // its own tests in rate_limit.rs.
+    cfg.rate_burst_messages = 0;
     f(&mut cfg);
     let h = Server::start(cfg).await.unwrap();
     Env { d, h }

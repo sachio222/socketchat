@@ -81,7 +81,12 @@ async fn a_joiner_hears_when_a_room_has_too_many_joins_waiting() {
 /// app says so once.
 #[tokio::test]
 async fn the_inviter_hears_when_an_add_is_refused() {
-    let s = TestServer::start_with(|c| c.max_room_messages_mb = 1).await;
+    let s = TestServer::start_with(|c| {
+        c.max_room_messages_mb = 1;
+        // Eve fills the room faster than the pace limit allows a member.
+        c.rate_burst_messages = 0;
+    })
+    .await;
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("Book club").await.unwrap();
     let mut eve = TestClient::new(&s, "Eve").await;

@@ -60,11 +60,13 @@ pub struct Invite {
     pub expires_unix: u64,
     pub uses_left: i64,
     pub account_used: bool,
+    /// Who made a room link, until a join through it completes.
+    pub maker: Option<Vec<u8>>,
 }
 
 pub fn load_invite(db: &rusqlite::Connection, token: &Token) -> Option<Invite> {
     db.query_row(
-        "SELECT group_id, expires_unix, uses_left, account_used FROM invites WHERE token = ?1",
+        "SELECT group_id, expires_unix, uses_left, account_used, maker FROM invites WHERE token = ?1",
         [token.0.as_slice()],
         |r| {
             Ok(Invite {
@@ -72,6 +74,7 @@ pub fn load_invite(db: &rusqlite::Connection, token: &Token) -> Option<Invite> {
                 expires_unix: r.get::<_, i64>(1)? as u64,
                 uses_left: r.get(2)?,
                 account_used: r.get(3)?,
+                maker: r.get(4)?,
             })
         },
     )
@@ -126,7 +129,22 @@ pub fn register_account(
                 .flatten();
             let holds_mailbox =
                 redeemer.is_some_and(|m| cs.proven.iter().any(|k| k.0[..] == m[..]));
-            if !state.cfg.members_can_invite || inv.account_used || !(unspent || holds_mailbox) {
+            let may = inv
+                .group
+                .as_deref()
+                .and_then(|g| <[u8; 16]>::try_from(g).ok())
+                .is_some_and(|g| {
+                    crate::groups::maker_may_invite(
+                        state,
+                        &db,
+                        &socketchat_proto::msg::GroupId(g),
+                        inv.maker.as_deref(),
+                    )
+                });
+            if !may {
+                return refused(crate::groups::MAKER_CANNOT_INVITE);
+            }
+            if !state.cfg.members_make_accounts || inv.account_used || !(unspent || holds_mailbox) {
                 return refused("this invite link cannot register a new account");
             }
             db.execute(

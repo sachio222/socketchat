@@ -5,6 +5,8 @@ use ratatui::Terminal;
 use socketchat_core::client::{Ended, RoomDetails};
 use socketchat_core::close::CloseView;
 use socketchat_core::keys::Key;
+use socketchat_core::settings::{WhoCanInvite, WhoCanSetTopic};
+use socketchat_core::topic::TopicView;
 use socketchat_proto::msg::GroupId;
 use socketchat_tui::app::{
     about_lines, details_lines, invite_row, leave_step, sent_file_status, Action, App, Focus,
@@ -12,7 +14,7 @@ use socketchat_tui::app::{
 };
 use socketchat_tui::commands::{parse_command, Command, HELP};
 use socketchat_tui::theme::{ColorSupport, Theme};
-use socketchat_tui::ui::{draw, GroupView, LineView, MemberLine, ViewModel};
+use socketchat_tui::ui::{draw, qr_choices, GroupView, LineView, MemberLine, ViewModel};
 
 fn render(app: &App, vm: &ViewModel, w: u16, h: u16) -> String {
     let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -55,10 +57,10 @@ fn crew() -> ViewModel {
             GroupView { id: g(3), name: "Climbing Saturdays".into(), unread: 12, is_dm: false, muted: false, ended: None },
         ],
         lines: vec![
-            LineView { time: "09:14:05".into(), sender: "Ada".into(), text: "Who is bringing the book list?".into(), notice: false, mine: true },
-            LineView { time: "09:15:12".into(), sender: "Bo".into(), text: "Me. Sending it now.".into(), notice: false, mine: false },
-            LineView { time: "09:15:40".into(), sender: String::new(), text: "Bo sent books.pdf (84 KB)".into(), notice: true, mine: false },
-            LineView { time: "09:16:58".into(), sender: "Cy".into(), text: "Got it, thanks. Saturday still works for me, and I can bring snacks for everyone.".into(), notice: false, mine: false },
+            LineView { time: "09:14:05".into(), sender: "Ada".into(), text: "Who is bringing the book list?".into(), notice: false, mine: true, topic: false },
+            LineView { time: "09:15:12".into(), sender: "Bo".into(), text: "Me. Sending it now.".into(), notice: false, mine: false, topic: false },
+            LineView { time: "09:15:40".into(), sender: String::new(), text: "Bo sent books.pdf (84 KB)".into(), notice: true, mine: false, topic: false },
+            LineView { time: "09:16:58".into(), sender: "Cy".into(), text: "Got it, thanks. Saturday still works for me, and I can bring snacks for everyone.".into(), notice: false, mine: false, topic: false },
         ],
         members: vec![
             MemberLine { key: k(1), name: "Ada".into(), verified: true, admin: true, me: true },
@@ -67,6 +69,7 @@ fn crew() -> ViewModel {
         ],
         connected: true,
         server: None,
+        topic: None,
     }
 }
 
@@ -123,6 +126,9 @@ fn parse_every_command() {
         ("/details", Command::Details),
         ("/clear", Command::Clear),
         ("/about", Command::About),
+        ("/updates", Command::Updates(None)),
+        ("/updates off", Command::Updates(Some(false))),
+        ("/updates on", Command::Updates(Some(true))),
         ("/help", Command::Help),
         ("/quit", Command::Quit),
     ];
@@ -146,6 +152,10 @@ fn parse_rejects_unknown_command_with_help_hint() {
         Err("Usage: /cancel <number>".into())
     );
     assert_eq!(parse_command("/title"), Err("Usage: /title <name>".into()));
+    assert_eq!(
+        parse_command("/updates maybe"),
+        Err("Usage: /updates on, or /updates off".into())
+    );
 }
 
 #[test]
@@ -157,6 +167,7 @@ fn screen_empty_first_run() {
         members: vec![],
         connected: true,
         server: None,
+        topic: None,
     };
     insta::assert_snapshot!(render(&App::new(), &vm, 80, 24));
 }
@@ -220,10 +231,109 @@ fn screen_invite_modal_with_qr() {
     assert_eq!(
         app.handle_key(key(KeyCode::Char('c')), &crew()),
         vec![Action::Copy(format!(
-            "Join me on Socketchat, an encrypted chat.\n1. Install it from https://socketchat.org\n2. Then run: socketchat join \"{link}\""
+            "Join me on Socketchat, an encrypted chat.\n1. Install it on your computer from https://socketchat.org\n2. Then run: socketchat join \"{link}\""
         ))]
     );
     assert!(app.modal.is_some(), "copying keeps the link on screen");
+}
+
+const LONG_LINK: &str = "socketchat://chat.example.com:7444/j/AAECAwQFBgcICQoLDA0ODw#3q2-7wABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhs.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
+
+fn invite_app(link: &str) -> App {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.modal = Some(Modal::Invite {
+        link: link.into(),
+        hours: 2,
+        copied: true,
+    });
+    app
+}
+
+/// The QR code on screen, row by row with its white border, read from the
+/// cells drawn black on white. Empty when there is none.
+fn qr_on_screen(app: &App, w: u16, h: u16) -> Vec<String> {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| draw(f, app, &crew())).unwrap();
+    let buf = t.backend().buffer().clone();
+    (0..h)
+        .map(|y| {
+            (0..w)
+                .map(|x| &buf[(x, y)])
+                .filter(|c| c.bg == Color::Rgb(255, 255, 255))
+                .map(|c| c.symbol())
+                .collect::<String>()
+        })
+        .filter(|row| !row.is_empty())
+        .collect()
+}
+
+#[test]
+fn invite_qr_holds_the_web_link() {
+    // A phone camera opens the web address; it has no app for socketchat://.
+    let app = invite_app(LONG_LINK);
+    let web = socketchat_proto::to_web_link(LONG_LINK).unwrap();
+    assert_eq!(web, format!("https://socketchat.org/join#{LONG_LINK}"));
+    let shown = qr_on_screen(&app, 100, 50);
+    assert!(!shown.is_empty(), "no QR code at 100x50");
+    assert!(
+        qr_choices(&web).contains(&shown),
+        "the QR code does not hold {web}"
+    );
+    assert!(!qr_choices(LONG_LINK).contains(&shown));
+    // The text under the box stays the link to paste into a terminal.
+    let text = render(&app, &crew(), 100, 50);
+    assert!(
+        text.contains("│socketchat://chat.example.com:7444/j/"),
+        "{text}"
+    );
+    assert!(!text.contains("https://socketchat.org/join"), "{text}");
+}
+
+#[test]
+fn invite_qr_is_whole_or_absent_at_every_size() {
+    // A QR code with rows cut off cannot be read, so the box shows all of
+    // it or a note.
+    let app = invite_app(LONG_LINK);
+    let web = socketchat_proto::to_web_link(LONG_LINK).unwrap();
+    let choices = qr_choices(&web);
+    for w in [80, 90, 100, 120] {
+        for h in 24..=60 {
+            let shown = qr_on_screen(&app, w, h);
+            if shown.is_empty() {
+                let text = render(&app, &crew(), w, h);
+                assert!(
+                    text.contains("Make the window larger to show a QR code."),
+                    "{w}x{h}: {text}"
+                );
+            } else {
+                assert!(choices.contains(&shown), "{w}x{h}: QR code cut short");
+            }
+        }
+    }
+}
+
+#[test]
+fn invite_qr_takes_the_smaller_code_when_only_that_fits() {
+    let app = invite_app(LONG_LINK);
+    let choices = qr_choices(&socketchat_proto::to_web_link(LONG_LINK).unwrap());
+    assert!(choices[1].len() < choices[0].len(), "level L is smaller");
+    assert_eq!(qr_on_screen(&app, 100, 50), choices[0], "level M at 100x50");
+    let small = qr_on_screen(&app, 100, 45);
+    if std::env::var_os("SHOW_QR").is_some() {
+        println!("{}", render(&app, &crew(), 100, 45));
+    }
+    assert_eq!(small, choices[1], "level L at 100x45");
+}
+
+#[test]
+fn invite_qr_shows_at_100x50_with_a_long_server_name() {
+    let link = LONG_LINK.replace(
+        "chat.example.com",
+        "socketchat-server.home.example-family.net",
+    );
+    let shown = qr_on_screen(&invite_app(&link), 100, 50);
+    assert!(!shown.is_empty(), "no QR code at 100x50 for {link}");
 }
 
 #[test]
@@ -865,6 +975,19 @@ fn details() -> RoomDetails {
             my_vote: None,
             kept: false,
         }),
+        invite: WhoCanInvite::Admins,
+        slow_secs: 30,
+        server_enforces: Some(true),
+        server_members_invite: Some(true),
+        topic_who: WhoCanSetTopic::Admins,
+        topic: Some(TopicView {
+            text: "Piranesi, chapters 1 to 5".into(),
+            by: "Bo".into(),
+            by_key: k(2),
+            verified: true,
+            mine: false,
+            set_unix: 1_792_411_200,
+        }),
     }
 }
 
@@ -883,14 +1006,75 @@ fn details_lines_say_each_fact() {
         vec![
             "Name: Book club",
             "Server: chat.socketchat.org",
+            "Topic: Piranesi, chapters 1 to 5 (set by Bo, verified, 2026-10-19)",
             "Admins: Ada, Bo",
             "Members: 3",
             "Created: 2026-03-02",
             "You joined: 2026-10-19",
             "Muted: no",
+            "Who can invite: admins only",
+            "Slow mode: one message every 30 seconds for each member who isn't an admin",
+            "Who can set the topic: admins only",
             "Closing: 1 of 2 admins agree",
         ]
     );
+    // No topic, and a room that lets anyone set it.
+    let mut open_topic = d.clone();
+    open_topic.topic = None;
+    open_topic.topic_who = WhoCanSetTopic::Anyone;
+    let lines = details_lines(&open_topic, "Book club", true, &utc_date);
+    assert_eq!(lines[2], "Topic: none");
+    assert!(
+        lines.contains(&"Who can set the topic: anyone in the room".into()),
+        "{lines:?}"
+    );
+    let mut open = d.clone();
+    open.invite = WhoCanInvite::Anyone;
+    open.slow_secs = 0;
+    let lines = details_lines(&open, "Book club", true, &utc_date);
+    assert!(
+        lines.contains(&"Who can invite: anyone in the room".into()),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"Slow mode: off".into()), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.contains("older version")),
+        "{lines:?}"
+    );
+    // A server from before 0.5.2 cannot enforce them, and the box says so.
+    let mut old_server = d.clone();
+    old_server.server_enforces = Some(false);
+    let lines = details_lines(&old_server, "Book club", true, &utc_date);
+    assert!(
+        lines.contains(&"This server runs an older version of Socketchat, so it can't enforce who can invite or slow mode.".into()),
+        "{lines:?}"
+    );
+    // The server lets only admins invite, stricter than the room: the line
+    // says whose rule it is.
+    let mut floor = d.clone();
+    floor.invite = WhoCanInvite::Anyone;
+    floor.server_members_invite = Some(false);
+    let lines = details_lines(&floor, "Book club", true, &utc_date);
+    assert!(
+        lines.contains(
+            &"Who can invite: admins only, because this server lets only admins invite people"
+                .into()
+        ),
+        "{lines:?}"
+    );
+    // A room already admins-only needs no note.
+    let mut both = floor.clone();
+    both.invite = WhoCanInvite::Admins;
+    let lines = details_lines(&both, "Book club", true, &utc_date);
+    assert!(
+        lines.contains(&"Who can invite: admins only".into()),
+        "{lines:?}"
+    );
+    // Not reached: nothing said either way.
+    let mut offline = d.clone();
+    offline.server_enforces = None;
+    let lines = details_lines(&offline, "Book club", true, &utc_date);
+    assert!(!lines.iter().any(|l| l.contains("enforce")), "{lines:?}");
     let mut old = d.clone();
     old.created_unix = None;
     old.muted = true;
@@ -907,6 +1091,71 @@ fn details_lines_say_each_fact() {
 }
 
 #[test]
+fn settings_commands_parse() {
+    use socketchat_tui::commands::Setting;
+    for (s, want) in [
+        ("/settings", Command::Settings(None)),
+        (
+            "/settings invite admins",
+            Command::Settings(Some(Setting::Invite(WhoCanInvite::Admins))),
+        ),
+        (
+            "/settings invite anyone",
+            Command::Settings(Some(Setting::Invite(WhoCanInvite::Anyone))),
+        ),
+        (
+            "/settings slow 30",
+            Command::Settings(Some(Setting::Slow(30))),
+        ),
+        (
+            "/settings slow off",
+            Command::Settings(Some(Setting::Slow(0))),
+        ),
+        (
+            "/settings  slow   0",
+            Command::Settings(Some(Setting::Slow(0))),
+        ),
+        (
+            "/settings topic admins",
+            Command::Settings(Some(Setting::Topic(WhoCanSetTopic::Admins))),
+        ),
+        (
+            "/settings topic anyone",
+            Command::Settings(Some(Setting::Topic(WhoCanSetTopic::Anyone))),
+        ),
+    ] {
+        assert_eq!(parse_command(s), Ok(want), "{s}");
+    }
+    let usage = "Usage: /settings, /settings invite admins, /settings invite anyone, /settings slow <seconds>, /settings slow off, /settings topic admins, or /settings topic anyone";
+    for bad in [
+        "/settings invite",
+        "/settings invite everyone",
+        "/settings slow",
+        "/settings slow fast",
+        "/settings slow -3",
+        "/settings topic",
+        "/settings topic members",
+        "/settings slow 30 40",
+    ] {
+        assert_eq!(parse_command(bad), Err(usage.to_string()), "{bad}");
+    }
+    assert!(HELP.iter().any(|(c, _)| *c == "/settings"));
+}
+
+#[test]
+fn held_message_line_says_when_it_goes() {
+    use socketchat_tui::app::held_line;
+    assert_eq!(
+        held_line(4),
+        "This room limits fast posting; sending in 4 seconds."
+    );
+    assert_eq!(
+        held_line(1),
+        "This room limits fast posting; sending in 1 second."
+    );
+}
+
+#[test]
 fn screen_details_modal() {
     let mut app = App::new();
     app.selected = Some(g(1));
@@ -917,6 +1166,7 @@ fn screen_details_modal() {
     let s = render(&app, &crew(), 80, 24);
     assert!(s.contains(" Room details "), "{s}");
     assert!(s.contains("Closing: 1 of 2 admins agree"), "{s}");
+    assert!(s.contains("Who can invite: admins only"), "{s}");
     insta::assert_snapshot!(s);
 }
 
@@ -1085,11 +1335,12 @@ fn help_lists_the_new_commands_in_order() {
     let names: Vec<&str> = HELP.iter().map(|(c, _)| *c).collect();
     let at = names.iter().position(|c| *c == "/leave").unwrap();
     assert_eq!(
-        &names[at..at + 13],
+        &names[at..at + 18],
         &[
             "/leave",
             "/switch [room]",
             "/title <name>",
+            "/topic [text]",
             "/close",
             "/keep",
             "/invites",
@@ -1099,6 +1350,10 @@ fn help_lists_the_new_commands_in_order() {
             "/mute",
             "/unmute",
             "/details",
+            "/settings",
+            "/settings invite",
+            "/settings slow",
+            "/settings topic",
             "/clear"
         ]
     );
@@ -1251,13 +1506,13 @@ fn screen_about_modal() {
     let s = render(&app, &crew(), 80, 24);
     assert!(s.contains(" About "), "{s}");
     // The sentence wraps, so check the short lines and the sentence's ends.
-    for line in about_lines().iter().filter(|l| l.len() < 70) {
+    for line in about_lines(&app.updates).iter().filter(|l| l.len() < 70) {
         assert!(s.contains(line), "{line} is missing:\n{s}");
     }
     assert!(s.contains("Socketchat is encrypted chat"), "{s}");
     assert!(s.contains("but cannot read them."), "{s}");
-    assert!(about_lines()[0].ends_with(env!("CARGO_PKG_VERSION")));
-    assert!(about_lines().contains(&"License: MIT or Apache 2.0".to_string()));
+    assert!(about_lines("")[0].ends_with(env!("CARGO_PKG_VERSION")));
+    assert!(about_lines("").contains(&"License: MIT or Apache 2.0".to_string()));
     insta::assert_snapshot!(s);
     app.handle_key(key(KeyCode::Esc), &crew());
     assert!(app.modal.is_none());
@@ -1894,4 +2149,375 @@ fn a_sent_message_never_holds_ghost_text() {
     assert_eq!(app.ghost(&vm), None);
     let acts = app.handle_key(key(KeyCode::Enter), &vm);
     assert_eq!(acts, vec![Action::Send(g(1), "hello /sw".into())]);
+}
+
+// ---------- Up and Down bring back earlier lines ----------
+
+fn up(app: &mut App, vm: &ViewModel) {
+    app.handle_key(key(KeyCode::Up), vm);
+}
+
+fn down(app: &mut App, vm: &ViewModel) {
+    app.handle_key(key(KeyCode::Down), vm);
+}
+
+/// Types `text` in the message box and presses Enter.
+fn enter_line(app: &mut App, vm: &ViewModel, text: &str) -> Vec<Action> {
+    type_text(app, vm, text);
+    app.handle_key(key(KeyCode::Enter), vm)
+}
+
+#[test]
+fn up_brings_back_the_last_line_and_stops_at_the_oldest() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    assert_eq!(
+        enter_line(&mut app, &vm, "hello"),
+        vec![Action::Send(g(1), "hello".into())]
+    );
+    assert_eq!(
+        enter_line(&mut app, &vm, "/theme classic"),
+        vec![Action::Command(Command::Theme(Some("classic".into())))]
+    );
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/theme classic", "commands count too");
+    assert_eq!(app.focus, Focus::Input);
+    up(&mut app, &vm);
+    assert_eq!(app.input, "hello");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "hello", "the oldest line stays");
+}
+
+#[test]
+fn down_walks_forward_and_gives_back_the_draft() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "one");
+    enter_line(&mut app, &vm, "two");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "", "nothing to go forward to");
+    type_text(&mut app, &vm, "half typed");
+    up(&mut app, &vm);
+    up(&mut app, &vm);
+    assert_eq!(app.input, "one");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "two");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "half typed", "the draft comes back");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "half typed");
+}
+
+#[test]
+fn each_room_keeps_its_own_lines() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "for the book club");
+    app.selected = Some(g(2));
+    up(&mut app, &vm);
+    assert_eq!(app.input, "", "Bo's chat has no lines yet");
+    enter_line(&mut app, &vm, "for Bo");
+    up(&mut app, &vm);
+    up(&mut app, &vm);
+    assert_eq!(app.input, "for Bo");
+    app.handle_key(key(KeyCode::Esc), &vm);
+    app.selected = Some(g(1));
+    up(&mut app, &vm);
+    up(&mut app, &vm);
+    assert_eq!(app.input, "for the book club");
+}
+
+#[test]
+fn repeats_are_kept_once_empty_lines_never_and_at_most_100() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "first");
+    enter_line(&mut app, &vm, "again");
+    enter_line(&mut app, &vm, "again");
+    enter_line(&mut app, &vm, "   ");
+    app.handle_key(key(KeyCode::Esc), &vm);
+    up(&mut app, &vm);
+    assert_eq!(app.input, "again");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "first", "the repeat was kept once");
+    app.handle_key(key(KeyCode::Esc), &vm);
+    for n in 0..105 {
+        enter_line(&mut app, &vm, &format!("line {n}"));
+    }
+    for _ in 0..120 {
+        up(&mut app, &vm);
+    }
+    assert_eq!(app.input, "line 5", "the newest 100 lines stay");
+}
+
+#[test]
+fn lines_that_stay_in_the_box_are_not_kept() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "/nosuchcommand");
+    assert_eq!(app.input, "/nosuchcommand", "an unknown command stays");
+    app.handle_key(key(KeyCode::Esc), &vm);
+    up(&mut app, &vm);
+    assert_eq!(app.input, "");
+    let vm = ended_crew(Ended::Closed);
+    enter_line(&mut app, &vm, "nobody gets this");
+    app.handle_key(key(KeyCode::Esc), &vm);
+    up(&mut app, &vm);
+    assert_eq!(app.input, "");
+}
+
+#[test]
+fn editing_a_recalled_line_makes_it_the_draft() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "one");
+    enter_line(&mut app, &vm, "two");
+    up(&mut app, &vm);
+    type_text(&mut app, &vm, "!");
+    assert_eq!(app.input, "two!");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "two");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "two!");
+}
+
+/// The message box shows one row with the cursor after the text, so a
+/// draft of several lines has no line above the cursor to move to: Up
+/// brings back an earlier line and Down gives the whole draft back.
+#[test]
+fn a_draft_of_several_lines_comes_back_whole() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "sent");
+    app.handle_paste("one\ntwo");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "sent");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "one\ntwo");
+}
+
+#[test]
+fn tab_and_the_ghost_work_on_a_recalled_command() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "/theme cl");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/theme cl");
+    assert_eq!(app.ghost(&vm).as_deref(), Some("assic"));
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/theme classic");
+}
+
+#[test]
+fn up_and_down_keep_their_jobs_outside_the_message_box() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "hello");
+    app.focus = Focus::Messages;
+    up(&mut app, &vm);
+    assert_eq!(app.scroll, 1);
+    assert_eq!(app.input, "");
+    app.focus = Focus::Groups;
+    assert_eq!(
+        app.handle_key(key(KeyCode::Down), &vm),
+        vec![Action::Select(g(2))]
+    );
+    assert_eq!(app.input, "");
+}
+
+#[test]
+fn help_line_while_an_earlier_line_shows() {
+    let vm = crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    enter_line(&mut app, &vm, "hello");
+    up(&mut app, &vm);
+    insta::assert_snapshot!("help_line_recalling", help_row(&app, &vm));
+    type_text(&mut app, &vm, "!");
+    assert!(help_row(&app, &vm).starts_with("Enter send"));
+}
+
+#[test]
+fn help_box_mentions_up_and_down() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.modal = Some(Modal::Help { offset: 0 });
+    let s = render(&app, &crew(), 80, 60);
+    assert!(
+        modal_text(&s)
+            .iter()
+            .any(|r| r.starts_with("Up/Down") && r.contains("your earlier lines in this room")),
+        "{s}"
+    );
+}
+
+#[test]
+fn about_says_whether_the_update_check_is_on() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.updates = "Update check: on. Last checked 2026-10-24 at 14:02.".into();
+    app.modal = Some(Modal::About);
+    let lines = about_lines(&app.updates);
+    assert_eq!(lines.last(), Some(&app.updates));
+    let s = render(&app, &crew(), 80, 24);
+    assert!(
+        s.contains("Update check: on. Last checked 2026-10-24 at 14:02."),
+        "{s}"
+    );
+}
+
+#[test]
+fn the_update_notice_takes_the_help_line() {
+    let notice = "Socketchat 0.5.2 is out. Run socketchat update.";
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    app.update_notice = Some(notice.into());
+    let s = render(&app, &crew(), 100, 24);
+    let last = s.lines().nth(23).unwrap();
+    assert!(last.starts_with(notice), "{last}");
+    assert!(
+        last.ends_with(&format!("socketchat {}", env!("CARGO_PKG_VERSION"))),
+        "{last}"
+    );
+    // A narrow window keeps the notice whole and drops the version.
+    let s = render(&app, &crew(), 60, 24);
+    assert_eq!(s.lines().nth(23).unwrap(), notice);
+    // A status message still comes first, until the next key.
+    app.status = Some("Theme: classic.".into());
+    let s = render(&app, &crew(), 100, 24);
+    assert!(s.lines().nth(23).unwrap().starts_with("Theme: classic."));
+    // An open box keeps its own help.
+    app.status = None;
+    app.modal = Some(Modal::About);
+    let s = render(&app, &crew(), 100, 24);
+    assert!(s.lines().nth(23).unwrap().starts_with("Esc close"), "{s}");
+    // Typing a command keeps the command help.
+    app.modal = None;
+    app.input = "/the".into();
+    let s = render(&app, &crew(), 100, 24);
+    assert!(
+        s.lines()
+            .nth(23)
+            .unwrap()
+            .starts_with("Enter run · Tab completes"),
+        "{s}"
+    );
+}
+
+// ---------- room topic ----------
+
+#[test]
+fn topic_commands_parse() {
+    assert_eq!(parse_command("/topic"), Ok(Command::Topic(None)));
+    assert_eq!(
+        parse_command("/topic  Piranesi, chapters 1 to 5 "),
+        Ok(Command::Topic(Some("Piranesi, chapters 1 to 5".into())))
+    );
+    assert_eq!(parse_command("/topic --clear"), Ok(Command::ClearTopic));
+    assert!(HELP.iter().any(|(c, _)| *c == "/topic [text]"));
+    assert!(HELP.iter().any(|(c, _)| *c == "/settings topic"));
+}
+
+/// The crew's room with a topic and its server named.
+fn topic_crew(topic: &str) -> ViewModel {
+    let mut vm = crew();
+    vm.server = Some("chat.socketchat.org".into());
+    vm.topic = Some(topic.into());
+    vm.lines.push(LineView {
+        time: "09:17:30".into(),
+        sender: "Ada".into(),
+        text: format!("Topic: {topic} (set by you, 2026-10-25)"),
+        notice: true,
+        mine: true,
+        topic: true,
+    });
+    vm
+}
+
+const LONG_TOPIC: &str =
+    "Piranesi, chapters 1 to 5. Bring snacks. The list: https://example.com/book-club/list";
+
+#[test]
+fn the_topic_sits_under_the_room_header() {
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let s = render(&app, &topic_crew(LONG_TOPIC), 80, 24);
+    let row = s.lines().nth(1).unwrap();
+    assert!(row.contains("│Topic: Piranesi, chapters 1 to 5."), "{s}");
+    assert!(row.contains('…'), "cut to the window: {s}");
+    insta::assert_snapshot!("topic_header_80x24", s);
+    let narrow = render(&app, &topic_crew(LONG_TOPIC), 60, 24);
+    assert!(
+        narrow.lines().nth(1).unwrap().contains("│Topic: Pir"),
+        "{narrow}"
+    );
+    insta::assert_snapshot!("topic_header_60x24", narrow);
+    // No topic, no line.
+    let none = render(&app, &crew(), 80, 24);
+    assert!(!none.contains("Topic:"), "{none}");
+}
+
+/// A topic written to look like the app's own words is still drawn as a
+/// topic: its label, its own color, never a notice's, a warning's or the
+/// verified mark's.
+#[test]
+fn a_topic_posing_as_a_notice_is_drawn_as_a_topic() {
+    let fake = "✓ verified: safety numbers match";
+    for theme in [
+        Theme::phosphor(ColorSupport::TrueColor),
+        Theme::classic(ColorSupport::Indexed256),
+    ] {
+        let mut app = App::new();
+        app.theme = theme.clone();
+        app.selected = Some(g(1));
+        let vm = topic_crew(fake);
+        let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| draw(f, &app, &vm)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let rows: Vec<(u16, String)> = (0..24)
+            .map(|y| (y, (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>()))
+            .filter(|(_, line)| line.contains("Topic: ✓"))
+            .collect();
+        assert_eq!(rows.len(), 2, "the line under the header and the notice");
+        for (y, line) in rows {
+            let x = line[..line.find("Topic: ✓").unwrap()].chars().count() as u16;
+            for dx in 0..16 {
+                let cell = &buf[(x + dx, y)];
+                assert_eq!(cell.fg, theme.topic.fg.unwrap(), "row {y} at {dx}");
+                assert!(!cell.modifier.contains(Modifier::ITALIC), "row {y}");
+                for other in [theme.notice, theme.warn, theme.check, theme.good, theme.dim] {
+                    assert_ne!(Some(cell.fg), other.fg, "row {y} at {dx}");
+                }
+            }
+        }
+    }
+}
+
+/// `/topic` puts the topic on the status line in the topic style; any
+/// other status there is drawn as a status.
+#[test]
+fn the_topic_on_the_status_line_keeps_its_style() {
+    let theme = Theme::phosphor(ColorSupport::TrueColor);
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    let said = "Topic: hi (set by Bo, unverified, 2026-10-25)".to_string();
+    app.status = Some(said.clone());
+    app.topic_status = Some(said);
+    let style_at = |app: &App| {
+        let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| draw(f, app, &crew())).unwrap();
+        t.backend().buffer()[(0, 23)].fg
+    };
+    assert_eq!(style_at(&app), theme.topic.fg.unwrap());
+    app.status = Some("Topic: hi (set by Bo, unverified, 2026-10-25)!".into());
+    assert_eq!(style_at(&app), theme.warn.fg.unwrap());
 }

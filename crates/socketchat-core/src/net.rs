@@ -49,10 +49,27 @@ pub enum NetError {
     Busy(Busy),
     #[error("{0}")]
     Refused(String),
+    /// The server took nothing: this member posted faster than the room
+    /// allows. Try again after the wait.
+    #[error("This room limits fast posting; try again in {}.", wait_words(*.retry_after_ms))]
+    SlowDown { retry_after_ms: u32 },
     #[error("server error: {0}")]
     Server(String),
     #[error("unexpected reply from the server: {0}")]
     Unexpected(String),
+}
+
+/// Whole seconds to wait, rounded up, at least one.
+pub fn wait_secs(ms: u32) -> u64 {
+    u64::from(ms.div_ceil(1000).max(1))
+}
+
+/// "4 seconds", "1 second".
+pub fn wait_words(ms: u32) -> String {
+    match wait_secs(ms) {
+        1 => "1 second".into(),
+        n => format!("{n} seconds"),
+    }
 }
 
 /// What to tell people when a server turns them away.
@@ -369,6 +386,9 @@ impl Conn {
             Ok(Ok(Response::Error(e))) => Err(NetError::Server(crate::sanitize::clean_text(&e))),
             Ok(Ok(Response::Refused(why))) => {
                 Ok(Response::Refused(crate::sanitize::clean_text(&why)))
+            }
+            Ok(Ok(Response::SlowDown { retry_after_ms })) => {
+                Err(NetError::SlowDown { retry_after_ms })
             }
             Ok(Ok(r)) => Ok(r),
         }

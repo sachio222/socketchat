@@ -25,4 +25,4 @@ expression: "render(&app, &crew(), 80, 24)"
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-Y trust the new certificate · N keep the old one                socketchat 0.5.1
+Y trust the new certificate · N keep the old one                socketchat 0.5.2

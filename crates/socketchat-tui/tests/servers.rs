@@ -54,6 +54,7 @@ fn crew() -> ViewModel {
         members: vec![],
         connected: true,
         server: Some("chat.socketchat.org".into()),
+        topic: None,
     }
 }
 
@@ -224,6 +225,12 @@ fn details_name_the_server() {
         joined_unix: 1_792_411_200,
         muted: false,
         close: None,
+        invite: socketchat_core::settings::WhoCanInvite::Anyone,
+        slow_secs: 0,
+        server_enforces: Some(true),
+        server_members_invite: Some(true),
+        topic_who: socketchat_core::settings::WhoCanSetTopic::Admins,
+        topic: None,
     };
     let date = |_: u64| "2026-03-02".to_string();
     let lines = details_lines(&d, "Book club", true, &date);

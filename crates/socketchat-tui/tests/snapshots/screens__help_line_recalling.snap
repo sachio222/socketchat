@@ -1,0 +1,5 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: "help_row(&app, &vm)"
+---
+Up/Down your earlier lines in this room · Enter send · Ctrl-C quit

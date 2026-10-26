@@ -2,6 +2,7 @@
 //! keys go in, actions come out, and the run loop carries them out.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -10,6 +11,7 @@ use socketchat_core::client::{Ended, RoomDetails, ServerState, ServerView};
 use socketchat_core::invite::hours_text;
 use socketchat_core::keys::Key;
 use socketchat_core::sanitize::{direction_char, single_spaced, MAX_TEXT_BYTES};
+use socketchat_core::settings::{every, WhoCanInvite, WhoCanSetTopic};
 use socketchat_proto::msg::GroupId;
 use socketchat_proto::Token;
 
@@ -225,19 +227,58 @@ pub fn forgot_text(server: &str, rooms: usize) -> String {
 }
 
 /// The lines of the `/about` box: the version, one sentence on what
-/// socketchat is, the project link and the license.
-pub fn about_lines() -> Vec<String> {
+/// socketchat is, the project link, the license and `updates`, which says
+/// whether the update check is on (see [`update_about`]).
+pub fn about_lines(updates: &str) -> Vec<String> {
     let license = env!("CARGO_PKG_LICENSE")
         .replace(" OR ", " or ")
         .replace("Apache-", "Apache ");
-    vec![
+    let mut lines = vec![
         version_text(),
         String::new(),
         "Socketchat is encrypted chat with a server you run yourself. The server passes messages along but cannot read them.".into(),
         String::new(),
         env!("CARGO_PKG_REPOSITORY").into(),
         format!("License: {license}"),
-    ]
+    ];
+    if !updates.is_empty() {
+        lines.push(String::new());
+        lines.push(updates.to_string());
+    }
+    lines
+}
+
+/// What `/about` says about the update check: whether it is on, and when
+/// GitHub last answered, as `when` writes a time.
+pub fn update_about(
+    s: &socketchat_core::update::UpdateState,
+    env_off: bool,
+    when: &dyn Fn(u64) -> String,
+) -> String {
+    if env_off {
+        format!(
+            "Update check: off for this run, because {} is set.",
+            socketchat_core::update::OFF_VAR
+        )
+    } else if !s.on {
+        "Update check: off. Type /updates on to turn it on.".into()
+    } else {
+        match s.answered_unix {
+            Some(t) => format!("Update check: on, once a day. Last checked {}.", when(t)),
+            None => "Update check: on, once a day. Not checked yet.".into(),
+        }
+    }
+}
+
+/// The local date `unix` falls on, as YYYY-MM-DD.
+pub fn local_date(unix: u64) -> String {
+    chrono::DateTime::from_timestamp(unix as i64, 0)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 /// "socketchat 0.5.1", from the version in Cargo.toml.
@@ -259,20 +300,78 @@ pub fn details_lines(
         (None, true) => "not known (the server did not answer)".into(),
         (None, false) => "not known (this server runs an older version)".into(),
     };
+    let topic = match &d.topic {
+        Some(t) => t.words(&date(t.set_unix)),
+        None => "Topic: none".into(),
+    };
     let mut lines = vec![
         format!("Name: {name}"),
         format!("Server: {}", d.server),
+        topic,
         format!("Admins: {}", d.admins.join(", ")),
         format!("Members: {}", d.size),
         format!("Created: {created}"),
         format!("You joined: {}", date(d.joined_unix)),
         format!("Muted: {}", if d.muted { "yes" } else { "no" }),
     ];
+    let mut settings = settings_lines(d.invite, d.slow_secs, d.topic_who);
+    // The server's own rule is stricter than the room's: say whose it is.
+    if d.server_members_invite == Some(false) && d.invite == WhoCanInvite::Anyone {
+        settings[0] =
+            "Who can invite: admins only, because this server lets only admins invite people"
+                .into();
+    }
+    lines.extend(settings);
+    if d.server_enforces == Some(false) {
+        lines.push(OLD_SERVER_SETTINGS.into());
+    }
     if let Some(c) = d.close.as_ref().filter(|c| c.yes > 0 && !c.kept) {
         lines.push(format!("Closing: {} of {} admins agree", c.yes, c.needed));
     }
     lines
 }
+
+/// Said in a room's details when its server is from before 0.5.2.
+pub const OLD_SERVER_SETTINGS: &str =
+    "This server runs an older version of Socketchat, so it can't enforce who can invite or slow mode.";
+
+/// A room's settings, one line each, as `/details` and `/settings` show
+/// them.
+pub fn settings_lines(invite: WhoCanInvite, slow_secs: u32, topic: WhoCanSetTopic) -> Vec<String> {
+    let who = match invite {
+        WhoCanInvite::Admins => "admins only",
+        WhoCanInvite::Anyone => "anyone in the room",
+    };
+    let slow = match slow_secs {
+        0 => "off".to_string(),
+        n => format!(
+            "one message {} for each member who isn't an admin",
+            every(n)
+        ),
+    };
+    let topic = match topic {
+        WhoCanSetTopic::Admins => "admins only",
+        WhoCanSetTopic::Anyone => "anyone in the room",
+    };
+    vec![
+        format!("Who can invite: {who}"),
+        format!("Slow mode: {slow}"),
+        format!("Who can set the topic: {topic}"),
+    ]
+}
+
+/// The status line while a message waits because the room limits fast
+/// posting.
+pub fn held_line(wait_secs: u64) -> String {
+    let when = match wait_secs {
+        1 => "1 second".to_string(),
+        n => format!("{n} seconds"),
+    };
+    format!("{HELD_LEAD} {when}.")
+}
+
+/// How [`held_line`] starts.
+pub const HELD_LEAD: &str = "This room limits fast posting; sending in";
 
 /// The message box's hint while a room this person is no longer in is
 /// open.
@@ -395,6 +494,20 @@ fn no_room(text: &str) -> String {
     format!("No room called {text}. Type /switch to see them all.")
 }
 
+/// The most lines Up and Down keep for one room.
+const EARLIER_LINES: usize = 100;
+
+/// Where Up and Down are in a room's earlier lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Recall {
+    group: GroupId,
+    /// The line in the message box, counted from the oldest.
+    at: usize,
+    /// What the box held before the first Up; Down past the newest line
+    /// gives it back.
+    draft: String,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub focus: Focus,
@@ -405,6 +518,10 @@ pub struct App {
     pub switcher: Option<String>,
     pub modal: Option<Modal>,
     pub status: Option<String>,
+    /// The topic `/topic` put on the status line. While the status line
+    /// still shows exactly this, it is drawn in the topic's own style, not
+    /// as the app's words.
+    pub topic_status: Option<String>,
     pub warning: Option<String>,
     pub member_cursor: usize,
     /// While Tab completes a room name: the text typed before the first
@@ -431,11 +548,22 @@ pub struct App {
     pub mouse: bool,
     /// A copy to the clipboard is under way; the invite box says so.
     pub copying: bool,
+    /// "Socketchat 0.5.2 is out. Run socketchat update." while a newer
+    /// release is out; the help line shows it.
+    pub update_notice: Option<String>,
+    /// What `/about` says about the update check.
+    pub updates: String,
     pub(crate) hits: RefCell<Hits>,
     /// The box on screen and when it first showed there. A click read
     /// before then was meant for something else, so it never presses the
     /// box's buttons.
     shown: Option<(Modal, Instant)>,
+    /// What this person sent or ran in each room, oldest first, for Up and
+    /// Down. Kept in memory only and never saved: it can hold invite links
+    /// and words the person later cleared.
+    earlier: HashMap<GroupId, Vec<String>>,
+    /// Set while Up and Down show an earlier line.
+    recall: Option<Recall>,
 }
 
 /// The room Tab picked, while the text still shows its name.
@@ -555,6 +683,7 @@ impl App {
             switcher: None,
             modal: None,
             status: None,
+            topic_status: None,
             warning: None,
             member_cursor: 0,
             completion: None,
@@ -566,8 +695,90 @@ impl App {
             theme: Theme::default(),
             mouse: true,
             copying: false,
+            update_notice: None,
+            updates: String::new(),
             hits: RefCell::new(Hits::default()),
             shown: None,
+            earlier: HashMap::new(),
+            recall: None,
+        }
+    }
+
+    /// Keeps `line`, just sent or run in the open room, for Up and Down.
+    /// A line the same as the one before it is kept once.
+    fn remember(&mut self, line: &str) {
+        let Some(g) = self.selected else {
+            return;
+        };
+        let lines = self.earlier.entry(g).or_default();
+        if lines.last().map(String::as_str) != Some(line) {
+            lines.push(line.to_string());
+            if lines.len() > EARLIER_LINES {
+                lines.remove(0);
+            }
+        }
+    }
+
+    /// Up (`back`) or Down in the message box: the open room's earlier
+    /// lines, and after the newest, what the box held before.
+    fn recall_step(&mut self, back: bool) {
+        let Some(g) = self.selected else {
+            return;
+        };
+        let Some(lines) = self.earlier.get(&g).filter(|l| !l.is_empty()) else {
+            return;
+        };
+        let next = match (self.recall.take().filter(|r| r.group == g), back) {
+            (None, true) => Some(Recall {
+                group: g,
+                at: lines.len() - 1,
+                draft: std::mem::take(&mut self.input),
+            }),
+            (None, false) => None,
+            (Some(r), true) => Some(Recall {
+                at: r.at.saturating_sub(1),
+                ..r
+            }),
+            (Some(r), false) if r.at + 1 < lines.len() => Some(Recall { at: r.at + 1, ..r }),
+            (Some(r), false) => {
+                self.input = r.draft;
+                None
+            }
+        };
+        if let Some(line) = next.as_ref().and_then(|r| lines.get(r.at)) {
+            self.input = line.clone();
+        }
+        self.recall = next;
+    }
+
+    /// Whether the message box shows an earlier line Up or Down brought
+    /// back.
+    pub fn recalling(&self) -> bool {
+        self.recall
+            .as_ref()
+            .is_some_and(|r| Some(r.group) == self.selected)
+    }
+
+    /// Drops what this person sent or ran in room `g`, as `/leave` and
+    /// `/clear` do.
+    pub fn forget_earlier(&mut self, g: GroupId) {
+        self.earlier.remove(&g);
+        if self.recall.as_ref().is_some_and(|r| r.group == g) {
+            self.recall = None;
+        }
+    }
+
+    /// Drops the earlier lines of every room not in `rooms`, as `/forget`
+    /// does for the rooms it deletes.
+    pub fn keep_earlier_of(&mut self, rooms: &[GroupId]) {
+        let gone: Vec<GroupId> = self
+            .earlier
+            .keys()
+            .filter(|g| !rooms.contains(g))
+            .copied()
+            .collect();
+        for g in gone {
+            self.forget_earlier(g);
         }
     }
 
@@ -868,6 +1079,11 @@ impl App {
         }
         // A status message stays on the help line until the next key.
         self.status = None;
+        // Up and Down go on through earlier lines; any other key makes what
+        // the box holds the new draft.
+        if !matches!(k.code, KeyCode::Up | KeyCode::Down) {
+            self.recall = None;
+        }
         // Tab runs on through a command word; any other key ends the run.
         if !matches!(k.code, KeyCode::Tab | KeyCode::BackTab) {
             self.tab_cycle = None;
@@ -965,6 +1181,9 @@ impl App {
             KeyCode::Down if self.focus == Focus::Messages => {
                 self.scroll = self.scroll.saturating_sub(1)
             }
+            KeyCode::Up | KeyCode::Down if self.focus == Focus::Input => {
+                self.recall_step(k.code == KeyCode::Up)
+            }
             KeyCode::Esc => {
                 self.input.clear();
                 self.status = None;
@@ -1017,17 +1236,26 @@ impl App {
                     .and_then(|g| g.ended);
                 if line.starts_with('/') {
                     match parse_command(line) {
-                        Ok(Command::Switch(None)) => self.switcher = Some(String::new()),
+                        Ok(Command::Switch(None)) => {
+                            self.remember(line);
+                            self.switcher = Some(String::new());
+                        }
                         Ok(Command::Switch(Some(text))) => match tab_pick(&picked, &text, vm)
                             .or_else(|| pick_room(&text, &vm.groups).map(|g| g.id))
                         {
-                            Some(id) => return vec![Action::Select(id)],
+                            Some(id) => {
+                                self.remember(line);
+                                return vec![Action::Select(id)];
+                            }
                             None => {
                                 self.input = line.to_string();
                                 self.status = Some(no_room(&text));
                             }
                         },
-                        Ok(c) => return vec![Action::Command(c)],
+                        Ok(c) => {
+                            self.remember(line);
+                            return vec![Action::Command(c)];
+                        }
                         Err(e) => {
                             self.input = line.to_string();
                             self.status = Some(e);
@@ -1039,6 +1267,7 @@ impl App {
                     self.status = Some(ended_hint(why).into());
                 } else if let Some(g) = self.selected {
                     self.scroll = 0;
+                    self.remember(line);
                     return vec![Action::Send(g, line.to_string())];
                 } else {
                     self.input = line.to_string();
@@ -1056,6 +1285,7 @@ impl App {
     /// question it asked counts as answered no.
     pub fn handle_paste(&mut self, text: &str) -> Vec<Action> {
         self.status = None;
+        self.recall = None;
         self.completion = None;
         self.tab_cycle = None;
         self.hint = None;

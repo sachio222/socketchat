@@ -34,6 +34,7 @@ fn line(n: usize) -> LineView {
         text: format!("message {n}"),
         notice: false,
         mine: false,
+        topic: false,
     }
 }
 
@@ -55,6 +56,7 @@ fn crew() -> ViewModel {
         members: vec![member(1, "Ada"), member(2, "Bo"), member(3, "Cy")],
         connected: true,
         server: None,
+        topic: None,
     }
 }
 

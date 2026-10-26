@@ -1,3 +1,4 @@
 # Crates younger than 30 days that the dependency tree can't hold back.
 # One per line: name version reason. Each entry covers that exact version.
 openmls 0.9.1 required by socketchat-core, which pins openmls =0.9.1
+rustls-webpki 0.103.16 fixes RUSTSEC-2026-0382 (distrusted emSign intermediates), which reaches the update check; one-off exception approved by Jake 2026-10-24

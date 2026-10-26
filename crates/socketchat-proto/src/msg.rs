@@ -160,6 +160,9 @@ pub enum Request {
     LastLeave {
         group: GroupId,
     },
+    /// Protocol 3. Asks for the server's own rules that rooms cannot
+    /// change: today, whether members may bring people into rooms at all.
+    ServerRules,
 }
 
 impl Request {
@@ -190,6 +193,7 @@ impl Request {
             | Request::CancelInvite { .. }
             | Request::GroupCreated { .. }
             | Request::LastLeave { .. } => 2,
+            Request::ServerRules => 3,
         }
     }
 }
@@ -246,6 +250,18 @@ pub enum Response {
     /// Protocol 2. Answers `GroupCreated`.
     GroupCreated {
         created_unix: u64,
+    },
+    /// Protocol 3. The member posted faster than the room allows; the post
+    /// was not stored. Send it again after `retry_after_ms`. A connection
+    /// on an older protocol hears `Refused` with the wait in words.
+    SlowDown {
+        retry_after_ms: u32,
+    },
+    /// Protocol 3. Answers `ServerRules`. With `members_can_invite_to_rooms`
+    /// false, the server treats every room as admins-only for invite links
+    /// and adds, whatever the room's own setting says.
+    ServerRules {
+        members_can_invite_to_rooms: bool,
     },
 }
 
@@ -403,6 +419,7 @@ mod tests {
             },
             Request::CancelInvite { token: t },
             Request::GroupCreated { group: g },
+            Request::ServerRules,
         ] {
             rt(ClientFrame::Req { id: 42, body });
         }
@@ -464,6 +481,12 @@ mod tests {
             ]),
             Response::Invites(vec![]),
             Response::GroupCreated { created_unix: 99 },
+            Response::SlowDown {
+                retry_after_ms: 4_000,
+            },
+            Response::ServerRules {
+                members_can_invite_to_rooms: false,
+            },
         ] {
             rt(ServerFrame::Resp { id: 7, body });
         }
@@ -549,12 +572,23 @@ mod tests {
         ] {
             assert_eq!(r.min_version(), 2, "{r:?}");
         }
+        assert_eq!(Request::ServerRules.min_version(), 3);
     }
 
     #[test]
     fn protocol_numbers() {
-        assert_eq!(crate::PROTOCOL_VERSION, 2);
+        assert_eq!(crate::PROTOCOL_VERSION, 3);
         assert_eq!(crate::MIN_PROTOCOL_VERSION, 1);
+    }
+
+    /// Variants are appended, never reordered: an app on protocol 2 reads
+    /// every answer it knows exactly as before.
+    #[test]
+    fn slow_down_comes_after_every_older_answer() {
+        let old = postcard::to_stdvec(&Response::GroupCreated { created_unix: 1 }).unwrap();
+        let new = postcard::to_stdvec(&Response::SlowDown { retry_after_ms: 1 }).unwrap();
+        assert_eq!(old[0], 15);
+        assert_eq!(new[0], 16);
     }
 
     #[test]

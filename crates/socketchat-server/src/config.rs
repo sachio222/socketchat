@@ -25,8 +25,19 @@ pub struct Config {
     pub max_file_mb: u64,
     /// Hours an invite link stays valid.
     pub invite_ttl_hours: u32,
-    /// Whether members, not only admins, can make invite links.
-    pub members_can_invite: bool,
+    /// Whether people with an account here can bring new people onto the
+    /// server: make server invites, and register an account for whoever
+    /// joins through one of their room links.
+    pub members_make_accounts: bool,
+    /// Whether members who are not admins may bring people into rooms at
+    /// all. When false, every room is admins-only for invite links and
+    /// adds, whatever its own setting says. When true, each room decides.
+    pub members_can_invite_to_rooms: bool,
+    /// The one switch files from before 0.5.2 had for both of the above.
+    /// Read, applied to them by [`Config::from_toml`], never written.
+    #[serde(skip_serializing)]
+    #[doc(hidden)]
+    pub members_can_invite: Option<bool>,
     /// Refuse groups that use the post-quantum draft suite.
     pub require_standard_suite: bool,
     /// Most connections served at once.
@@ -61,6 +72,17 @@ pub struct Config {
     /// Megabytes of messages, files and invitations the whole server may
     /// hold.
     pub max_stored_mb: u64,
+    /// Messages one member who is not an admin can post in a room in a
+    /// quick burst before the steady pace applies. 0 turns the limit off.
+    pub rate_burst_messages: u32,
+    /// Seconds each member waits for one more message once the burst is
+    /// spent.
+    pub rate_seconds_per_message: u32,
+    /// Kilobytes (of 1,000 bytes) one member can post in a room in a burst.
+    /// Never less than one message of the largest size.
+    pub rate_burst_kb: u32,
+    /// Kilobytes a second each member gets back once the burst is spent.
+    pub rate_kb_per_second: u32,
     /// How long a connection may wait before Hello, before signing in and
     /// between requests.
     /// Not read from the file; tests shorten it.
@@ -149,6 +171,24 @@ pub const MAX_MEMBER_FILES_MB: u64 = 4_000;
 pub const MAX_ROOM_WELCOMES: u32 = 100;
 pub const MAX_STORED_MB: u64 = 8_000;
 
+/// How fast one member who is not an admin can post in one room, unless
+/// the config says otherwise. Matrix's server allows each sender a burst
+/// of 10 messages, then one every 5 seconds, and counts invites and joins
+/// on their own. Socketchat counts everything a member posts in a room,
+/// and the app posts on its own when someone joins: about eight posts for
+/// each person a member brings in (the link's details, the add, then the
+/// inviter's name, the room's name and the app's version, twice). A burst
+/// of 30 lets a member bring in three people at once and still chat; the
+/// steady pace stays one message every 5 seconds, so a flood slows to 12
+/// messages a minute. Admins are not held. The byte allowance lets
+/// through one message of the largest size (about 1 MB) and thousands of
+/// short texts; after it, 10 KB a second is still dozens of short texts a
+/// second, so only large messages ever meet it.
+pub const RATE_BURST_MESSAGES: u32 = 30;
+pub const RATE_SECONDS_PER_MESSAGE: u32 = 5;
+pub const RATE_BURST_KB: u32 = 2_000;
+pub const RATE_KB_PER_SECOND: u32 = 10;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timing {
     pub hello: Duration,
@@ -175,7 +215,9 @@ impl Default for Config {
             retention_days: 30,
             max_file_mb: 100,
             invite_ttl_hours: 24,
-            members_can_invite: true,
+            members_make_accounts: true,
+            members_can_invite_to_rooms: true,
+            members_can_invite: None,
             require_standard_suite: false,
             max_connections: 1000,
             max_per_ip: MAX_PER_IP,
@@ -187,6 +229,10 @@ impl Default for Config {
             max_member_files_mb: MAX_MEMBER_FILES_MB,
             max_room_welcomes: MAX_ROOM_WELCOMES,
             max_stored_mb: MAX_STORED_MB,
+            rate_burst_messages: RATE_BURST_MESSAGES,
+            rate_seconds_per_message: RATE_SECONDS_PER_MESSAGE,
+            rate_burst_kb: RATE_BURST_KB,
+            rate_kb_per_second: RATE_KB_PER_SECOND,
             timing: Timing::default(),
             protocol_max: socketchat_proto::PROTOCOL_VERSION,
             commit_check_delay: CheckDelay::default(),
@@ -203,7 +249,20 @@ impl Config {
     pub fn load_file(path: &Path) -> Result<Config, ServerError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| ServerError::Config(format!("{}: {e}", path.display())))?;
-        toml::from_str(&text).map_err(|e| ServerError::Config(format!("{}: {e}", path.display())))
+        Self::from_toml(&text).map_err(|e| ServerError::Config(format!("{}: {e}", path.display())))
+    }
+
+    /// Reads a config file's text. The old `members_can_invite` switch
+    /// still holds what it held before 0.5.2: false keeps members from
+    /// making accounts and from inviting into rooms. It never loosens a
+    /// new key set beside it.
+    pub fn from_toml(text: &str) -> Result<Config, toml::de::Error> {
+        let mut cfg: Config = toml::from_str(text)?;
+        if let Some(old) = cfg.members_can_invite.take() {
+            cfg.members_make_accounts &= old;
+            cfg.members_can_invite_to_rooms &= old;
+        }
+        Ok(cfg)
     }
 
     pub fn save(&self) -> Result<(), ServerError> {
@@ -322,5 +381,84 @@ mod tests {
         assert_eq!(old.max_room_welcomes, 100);
         assert_eq!(old.max_stored_mb, 8000);
         assert_eq!(old.commit_check_delay.get(), Duration::ZERO);
+    }
+
+    /// The pace limits are in the file with their defaults, an operator's
+    /// values are read back, and a file from before them gets the defaults.
+    #[test]
+    fn rate_limits_round_trip_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        cfg.save().unwrap();
+        let mut text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
+        for (key, value) in [
+            ("rate_burst_messages", 30),
+            ("rate_seconds_per_message", 5),
+            ("rate_burst_kb", 2000),
+            ("rate_kb_per_second", 10),
+        ] {
+            let line = format!("{key} = {value}");
+            assert!(text.contains(&line), "{line} missing from {text}");
+            text = text.replace(&line, &format!("{key} = {}", value + 1));
+        }
+        std::fs::write(dir.path().join(CONFIG_FILE), text).unwrap();
+        let back = Config::load(dir.path()).unwrap();
+        assert_eq!(back.rate_burst_messages, 31);
+        assert_eq!(back.rate_seconds_per_message, 6);
+        assert_eq!(back.rate_burst_kb, 2001);
+        assert_eq!(back.rate_kb_per_second, 11);
+        let old: Config = toml::from_str("retention_days = 3").unwrap();
+        assert_eq!(old.rate_burst_messages, 30);
+        assert_eq!(old.rate_seconds_per_message, 5);
+    }
+
+    /// A file from before 0.5.2 that set `members_can_invite = false`
+    /// keeps both things it stopped: members bringing new accounts onto
+    /// the server, and members bringing people into rooms.
+    #[test]
+    fn the_old_member_invite_switch_still_holds_both() {
+        let old = Config::from_toml("members_can_invite = false").unwrap();
+        assert!(!old.members_make_accounts);
+        assert!(!old.members_can_invite_to_rooms);
+        let old_on = Config::from_toml("members_can_invite = true").unwrap();
+        assert!(old_on.members_make_accounts);
+        assert!(old_on.members_can_invite_to_rooms);
+        // The old switch never loosens a new key set beside it.
+        let mixed =
+            Config::from_toml("members_can_invite = true\nmembers_can_invite_to_rooms = false")
+                .unwrap();
+        assert!(mixed.members_make_accounts);
+        assert!(!mixed.members_can_invite_to_rooms);
+        let rooms = Config::from_toml("members_can_invite_to_rooms = false").unwrap();
+        assert!(rooms.members_make_accounts);
+        assert!(!rooms.members_can_invite_to_rooms);
+        let accounts = Config::from_toml("members_make_accounts = false").unwrap();
+        assert!(!accounts.members_make_accounts);
+        assert!(accounts.members_can_invite_to_rooms);
+        let d = Config::default();
+        assert!(d.members_make_accounts && d.members_can_invite_to_rooms);
+    }
+
+    /// Saving writes the new keys with what the old one meant, and never
+    /// the old one.
+    #[test]
+    fn a_saved_config_keeps_the_old_switch_in_the_new_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(CONFIG_FILE), "members_can_invite = false\n").unwrap();
+        let mut cfg = Config::load(dir.path()).unwrap();
+        cfg.data_dir = dir.path().to_path_buf();
+        cfg.save().unwrap();
+        let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("members_make_accounts = false"), "{text}");
+        assert!(
+            text.contains("members_can_invite_to_rooms = false"),
+            "{text}"
+        );
+        assert!(!text.contains("members_can_invite ="), "{text}");
+        let back = Config::load(dir.path()).unwrap();
+        assert!(!back.members_make_accounts && !back.members_can_invite_to_rooms);
     }
 }

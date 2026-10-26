@@ -38,10 +38,21 @@ pub fn key_packages(
     key: &KeyPair,
     join_sig: Option<&Sig>,
 ) -> Result<KeyPackages, CoreError> {
+    key_packages_with(prov, key, join_sig, capabilities())
+}
+
+/// [`key_packages`] with the given leaf capabilities; tests use the
+/// capabilities of an older app.
+pub fn key_packages_with(
+    prov: &impl OpenMlsProvider,
+    key: &KeyPair,
+    join_sig: Option<&Sig>,
+    caps: Capabilities,
+) -> Result<KeyPackages, CoreError> {
     let mut kps = Vec::new();
     let mut refs = Vec::new();
     for suite in [SUITE, FALLBACK_SUITE] {
-        let mut builder = KeyPackage::builder().leaf_node_capabilities(capabilities());
+        let mut builder = KeyPackage::builder().leaf_node_capabilities(caps.clone());
         if let Some(sig) = join_sig {
             let ext = Extension::Unknown(JOIN_SIG_EXT, UnknownExtension(sig.0.to_vec()));
             let exts = Extensions::single(ext).map_err(|e| CoreError::Mls(e.to_string()))?;

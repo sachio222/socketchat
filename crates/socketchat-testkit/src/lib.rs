@@ -80,6 +80,15 @@ impl TestServer {
         panic!("no new server on the old port");
     }
 
+    /// Stops the server and starts it again on the same port and data,
+    /// with its config changed by `f`, as an operator who edits the file
+    /// and restarts would.
+    pub async fn restart_with(&mut self, f: impl FnOnce(&mut Config)) {
+        f(&mut self.cfg);
+        self.cfg.save().expect("save config");
+        self.restart().await;
+    }
+
     /// Stops the server and starts it again on the same port and data.
     pub async fn restart(&mut self) {
         self.handle.shutdown();

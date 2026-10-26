@@ -4,19 +4,23 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use socketchat_core::client::{server_text, Client, Event, JoinStatus, ServerView, Verification};
+use socketchat_core::client::{
+    server_text, Client, Event, JoinStatus, SendOutcome, ServerView, UpdateCheck, Verification,
+};
 use socketchat_core::invite::hours_text;
 use socketchat_core::keys::fingerprint_text;
 use socketchat_core::sanitize::{clean_name, clean_text, same_name};
+use socketchat_core::update;
 use socketchat_core::CoreError;
 use socketchat_proto::msg::GroupId;
 use socketchat_proto::InviteLink;
 use socketchat_server::{
     acceptable_use_text, init, make_server_invite, public_host_warning, Config, Server,
 };
-use socketchat_tui::app::{forget_warning, forgot_text, server_row};
+use socketchat_tui::app::{forget_warning, forgot_text, local_date, server_row};
 
 #[derive(Parser)]
 #[command(
@@ -86,6 +90,17 @@ enum Cmd {
         #[arg(required = true)]
         text: Vec<String>,
     },
+    /// Print a group's topic, or set it for everyone (admins, or anyone the
+    /// room allows).
+    Topic {
+        #[arg(long)]
+        group: String,
+        /// The new topic. Leave out to print the current one.
+        text: Vec<String>,
+        /// Remove the topic for everyone.
+        #[arg(long, conflicts_with = "text")]
+        clear: bool,
+    },
     /// Print a group's recent messages, or its oldest unread ones when more
     /// are unread than --limit, and mark them read (for scripts).
     Log {
@@ -96,6 +111,8 @@ enum Cmd {
     },
     /// Fetch everything new and print what happened (for scripts).
     Sync,
+    /// Print the command that updates Socketchat. It installs nothing.
+    Update,
 }
 
 #[derive(Subcommand)]
@@ -492,6 +509,267 @@ async fn server(cmd: ServerCmd) -> Result<(), Fail> {
     }
 }
 
+/// A command that works on the profile, already open in `c`.
+async fn profile_command(c: &mut Client, cmd: Cmd) -> Result<(), Fail> {
+    match cmd {
+        Cmd::New { name, server } => {
+            let server = match server {
+                Some(n) => Some(server_number(c, n)?.id),
+                None => c.new_room_server(None),
+            };
+            let g = match server {
+                Some(s) => c.create_group_at(s, &name).await?,
+                None => c.create_group(&name).await?,
+            };
+            let on = c.room_server(g).unwrap_or_default();
+            println!(
+                "Made {name} on {on}. Invite people with: socketchat invite --group \"{name}\""
+            );
+            Ok(())
+        }
+        Cmd::Servers { forget, yes } => {
+            c.sync().await?;
+            let list = c.servers(None);
+            match forget {
+                None if list.is_empty() => {
+                    println!("You have no servers yet. Join one with: socketchat join <link>")
+                }
+                None => {
+                    for (i, s) in list.iter().enumerate() {
+                        println!("{}", server_row(i + 1, s));
+                    }
+                }
+                Some(n) => {
+                    let s = server_number(c, n)?;
+                    if yes || ask_to_forget(&s, n)? {
+                        let rooms = c.forget_server(s.id)?;
+                        println!("{}", forgot_text(&s.text, rooms));
+                    } else {
+                        println!("Kept {}.", s.text);
+                    }
+                }
+            }
+            c.purge_read(None);
+            report_warnings(c);
+            Ok(())
+        }
+        Cmd::Invite { group, dm } => {
+            c.sync().await?;
+            let (link, expires_unix) = match (group, dm) {
+                (None, true) => c.invite(None, true).await?,
+                (Some(g), false) => {
+                    let gid = group_by_name(c, &g)?;
+                    c.invite(Some(gid), false).await?
+                }
+                _ => return Err(Fail(1, "Use --group <name>, or --dm on its own.".into())),
+            };
+            let hours = hours_text(c.hours_until(expires_unix));
+            c.purge_read(None);
+            report_warnings(c);
+            println!("{link}");
+            eprintln!("Send this to one person. It works once and expires in {hours}.");
+            Ok(())
+        }
+        Cmd::Invites { cancel } => {
+            c.sync().await?;
+            let list = c.invites().await?;
+            match cancel {
+                None if list.is_empty() => println!("You have no open invite links."),
+                None => {
+                    for (i, v) in list.iter().enumerate() {
+                        println!(
+                            "{}. {}: expires in {}",
+                            i + 1,
+                            clean_name(&v.label),
+                            hours_text(c.hours_until(v.expires_unix))
+                        );
+                    }
+                }
+                Some(n) => {
+                    let Some(v) = n.checked_sub(1).and_then(|i| list.get(i)) else {
+                        c.purge_read(None);
+                        report_warnings(c);
+                        return Err(Fail(
+                            1,
+                            format!(
+                                "There is no link {n}. Run socketchat invites to see the list."
+                            ),
+                        ));
+                    };
+                    let done = c.cancel_invite(v.token).await;
+                    if done.is_ok() {
+                        println!(
+                            "Cancelled {} (expires in {}). That link no longer works.",
+                            clean_name(&v.label),
+                            hours_text(c.hours_until(v.expires_unix))
+                        );
+                    }
+                    c.purge_read(None);
+                    report_warnings(c);
+                    return Ok(done?);
+                }
+            }
+            c.purge_read(None);
+            report_warnings(c);
+            Ok(())
+        }
+        Cmd::Send { group, text } => {
+            c.sync().await?;
+            let gid = group_by_name(c, &group)?;
+            // A room that limits fast posting holds the message; it goes
+            // once the server allows it, and this waits for that.
+            if let SendOutcome::Held { wait_secs } = c.send_text(gid, &text.join(" ")).await? {
+                let when = if wait_secs == 1 {
+                    "1 second".to_string()
+                } else {
+                    format!("{wait_secs} seconds")
+                };
+                eprintln!("This room limits fast posting; sending in {when}.");
+                while c.held(gid) > 0 {
+                    c.wait(std::time::Duration::from_secs(60)).await;
+                    c.sync().await?;
+                    let events = c.take_events();
+                    for e in &events {
+                        if let Event::Warning(w) = e {
+                            eprintln!("{}", clean_text(w));
+                        }
+                    }
+                    let not_sent = events
+                        .iter()
+                        .any(|e| matches!(e, Event::NotSent { group, .. } if *group == gid));
+                    if not_sent {
+                        return Err(Fail(
+                            1,
+                            "Not sent, because the people in this room changed while it waited. Send it again if you still want to.".into(),
+                        ));
+                    }
+                    if !c.connected() {
+                        report_warnings(c);
+                        return Err(Fail(
+                            1,
+                            "The connection to the server dropped before the message went. It was not sent.".into(),
+                        ));
+                    }
+                }
+            }
+            c.purge_read(None);
+            report_warnings(c);
+            Ok(())
+        }
+        Cmd::Topic { group, text, clear } => {
+            c.sync().await?;
+            let gid = group_by_name(c, &group)?;
+            let room = group_name(c, gid);
+            let done = if clear {
+                c.clear_topic(gid)
+                    .await
+                    .map(|()| format!("Cleared the topic of {room}."))
+            } else if text.is_empty() {
+                Ok(match c.topic(gid) {
+                    Some(t) => t.words(&local_date(t.set_unix)),
+                    None => format!("{room} has no topic."),
+                })
+            } else {
+                c.set_topic(gid, &text.join(" "))
+                    .await
+                    .map(|()| format!("Set the topic of {room}."))
+            };
+            c.purge_read(None);
+            report_warnings(c);
+            println!("{}", done?);
+            Ok(())
+        }
+        Cmd::Log { group, limit } => {
+            c.sync().await?;
+            let gid = group_by_name(c, &group)?;
+            let lines = c.lines_to_read(gid, limit);
+            let members = c.members(gid);
+            for l in &lines {
+                let head = if l.notice {
+                    "· ".to_string()
+                } else {
+                    format!("{}: ", clean_name(&l.sender))
+                };
+                // A topic line says who set it, whether they are verified,
+                // and the day.
+                let text = if l.topic {
+                    let verified = members
+                        .iter()
+                        .any(|m| Some(m.key) == l.sender_key && m.verified);
+                    let mine = l.sender_key.is_some() && l.sender_key == c.my_group_key(gid);
+                    socketchat_core::topic::words(
+                        &l.text,
+                        &l.sender,
+                        verified,
+                        mine,
+                        &local_date(l.sent_unix),
+                    )
+                } else {
+                    l.text.clone()
+                };
+                println!("{}", message_lines(&head, &text));
+            }
+            if let Some(newest) = lines.last() {
+                c.mark_seen_upto(gid, newest.seq)?;
+            }
+            c.purge_read(None);
+            report_warnings(c);
+            Ok(())
+        }
+        Cmd::Sync => sync_and_report(c).await,
+        // main_inner and main run these.
+        Cmd::Server { .. } | Cmd::Join { .. } | Cmd::Update => Ok(()),
+    }
+}
+
+/// How long a command waits, once its own work is done, for an update
+/// check still under way. A check that takes longer is dropped, and the
+/// next one is a day later.
+const CHECK_WAIT: Duration = Duration::from_secs(3);
+
+/// Keeps what an update check found, and with `say` prints the update
+/// notice when there is one.
+async fn finish_update_check(c: &Client, check: Option<UpdateCheck>, say: bool) {
+    if let Some(check) = check {
+        let found = tokio::time::timeout(CHECK_WAIT, check)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten();
+        c.finish_update_check(found);
+    }
+    if say {
+        if let Some(notice) = c.update_notice(update::install_kind()) {
+            eprintln!("{notice}");
+        }
+    }
+}
+
+/// The install command on macOS and Linux, as the README gives it.
+const CURL_INSTALL: &str = "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sachio222/socketchat/releases/latest/download/socketchat-installer.sh | sh";
+/// The install command on Windows, for PowerShell.
+const POWERSHELL_INSTALL: &str = "powershell -ExecutionPolicy Bypass -c \"irm https://github.com/sachio222/socketchat/releases/latest/download/socketchat-installer.ps1 | iex\"";
+
+/// What `socketchat update` prints for a copy installed as `install`, on
+/// Windows or not. Socketchat never replaces itself: the person runs the
+/// command for the way they installed it.
+fn update_advice(install: update::Install, windows: bool) -> String {
+    match install {
+        update::Install::Homebrew => {
+            "Homebrew installed this copy of Socketchat. To update it, run:\n  brew upgrade socketchat".into()
+        }
+        update::Install::Installer if windows => format!(
+            "The Socketchat installer put this copy here. To update it, run the install command again in PowerShell:\n  {POWERSHELL_INSTALL}"
+        ),
+        update::Install::Installer => format!(
+            "The Socketchat installer put this copy here. To update it, run the install command again:\n  {CURL_INSTALL}"
+        ),
+        update::Install::Unknown => format!(
+            "To update Socketchat, run the command for the way you installed it.\n  Homebrew: brew upgrade socketchat\n  Installer on macOS or Linux: {CURL_INSTALL}\n  Installer on Windows, in PowerShell: {POWERSHELL_INSTALL}"
+        ),
+    }
+}
+
 async fn main_inner(cli: Cli) -> Result<(), Fail> {
     match cli.cmd {
         Some(Cmd::Server { cmd }) => server(cmd).await,
@@ -499,9 +777,10 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             link,
             new_certificate,
         }) => {
-            let link: InviteLink = link.trim().parse().map_err(|e| {
-                Fail(1, format!("That is not a Socketchat invite link ({e}). Links start with socketchat://"))
-            })?;
+            let link: InviteLink = link
+                .trim()
+                .parse()
+                .map_err(|e| Fail(1, format!("That is not a Socketchat invite link: {e}.")))?;
             let mut c = open_or_create().await?;
             let joined = if new_certificate {
                 let old = c.trusted_certificate(&link.host, link.port)?;
@@ -538,144 +817,24 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
             }
             Ok(())
         }
-        Some(Cmd::New { name, server }) => {
+        Some(
+            cmd @ (Cmd::New { .. }
+            | Cmd::Servers { .. }
+            | Cmd::Invite { .. }
+            | Cmd::Invites { .. }
+            | Cmd::Send { .. }
+            | Cmd::Topic { .. }
+            | Cmd::Log { .. }
+            | Cmd::Sync),
+        ) => {
             let mut c = open().await?;
-            let server = match server {
-                Some(n) => Some(server_number(&c, n)?.id),
-                None => c.new_room_server(None),
-            };
-            let g = match server {
-                Some(s) => c.create_group_at(s, &name).await?,
-                None => c.create_group(&name).await?,
-            };
-            let on = c.room_server(g).unwrap_or_default();
-            println!(
-                "Made {name} on {on}. Invite people with: socketchat invite --group \"{name}\""
-            );
-            Ok(())
+            let check = c.start_update_check();
+            let done = profile_command(&mut c, cmd).await;
+            finish_update_check(&c, check, done.is_ok()).await;
+            done
         }
-        Some(Cmd::Servers { forget, yes }) => {
-            let mut c = open().await?;
-            c.sync().await?;
-            let list = c.servers(None);
-            match forget {
-                None if list.is_empty() => {
-                    println!("You have no servers yet. Join one with: socketchat join <link>")
-                }
-                None => {
-                    for (i, s) in list.iter().enumerate() {
-                        println!("{}", server_row(i + 1, s));
-                    }
-                }
-                Some(n) => {
-                    let s = server_number(&c, n)?;
-                    if yes || ask_to_forget(&s, n)? {
-                        let rooms = c.forget_server(s.id)?;
-                        println!("{}", forgot_text(&s.text, rooms));
-                    } else {
-                        println!("Kept {}.", s.text);
-                    }
-                }
-            }
-            c.purge_read(None);
-            report_warnings(&mut c);
-            Ok(())
-        }
-        Some(Cmd::Invite { group, dm }) => {
-            let mut c = open().await?;
-            c.sync().await?;
-            let (link, expires_unix) = match (group, dm) {
-                (None, true) => c.invite(None, true).await?,
-                (Some(g), false) => {
-                    let gid = group_by_name(&c, &g)?;
-                    c.invite(Some(gid), false).await?
-                }
-                _ => return Err(Fail(1, "Use --group <name>, or --dm on its own.".into())),
-            };
-            let hours = hours_text(c.hours_until(expires_unix));
-            c.purge_read(None);
-            report_warnings(&mut c);
-            println!("{link}");
-            eprintln!("Send this to one person. It works once and expires in {hours}.");
-            Ok(())
-        }
-        Some(Cmd::Invites { cancel }) => {
-            let mut c = open().await?;
-            c.sync().await?;
-            let list = c.invites().await?;
-            match cancel {
-                None if list.is_empty() => println!("You have no open invite links."),
-                None => {
-                    for (i, v) in list.iter().enumerate() {
-                        println!(
-                            "{}. {}: expires in {}",
-                            i + 1,
-                            clean_name(&v.label),
-                            hours_text(c.hours_until(v.expires_unix))
-                        );
-                    }
-                }
-                Some(n) => {
-                    let Some(v) = n.checked_sub(1).and_then(|i| list.get(i)) else {
-                        c.purge_read(None);
-                        report_warnings(&mut c);
-                        return Err(Fail(
-                            1,
-                            format!(
-                                "There is no link {n}. Run socketchat invites to see the list."
-                            ),
-                        ));
-                    };
-                    let done = c.cancel_invite(v.token).await;
-                    if done.is_ok() {
-                        println!(
-                            "Cancelled {} (expires in {}). That link no longer works.",
-                            clean_name(&v.label),
-                            hours_text(c.hours_until(v.expires_unix))
-                        );
-                    }
-                    c.purge_read(None);
-                    report_warnings(&mut c);
-                    return Ok(done?);
-                }
-            }
-            c.purge_read(None);
-            report_warnings(&mut c);
-            Ok(())
-        }
-        Some(Cmd::Send { group, text }) => {
-            let mut c = open().await?;
-            c.sync().await?;
-            let gid = group_by_name(&c, &group)?;
-            c.send_text(gid, &text.join(" ")).await?;
-            c.purge_read(None);
-            report_warnings(&mut c);
-            Ok(())
-        }
-        Some(Cmd::Log { group, limit }) => {
-            let mut c = open().await?;
-            c.sync().await?;
-            let gid = group_by_name(&c, &group)?;
-            let lines = c.lines_to_read(gid, limit);
-            for l in &lines {
-                let head = if l.notice {
-                    "· ".to_string()
-                } else {
-                    format!("{}: ", clean_name(&l.sender))
-                };
-                println!("{}", message_lines(&head, &l.text));
-            }
-            if let Some(newest) = lines.last() {
-                c.mark_seen_upto(gid, newest.seq)?;
-            }
-            c.purge_read(None);
-            report_warnings(&mut c);
-            Ok(())
-        }
-        Some(Cmd::Sync) => {
-            let mut c = open().await?;
-            sync_and_report(&mut c).await
-        }
+        // main runs it before anything else.
+        Some(Cmd::Update) => Ok(()),
         None => {
             // A first run right after installing: say how to start.
             if !profile_dir().join(socketchat_core::store::DB_FILE).exists() {
@@ -691,6 +850,10 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if matches!(cli.cmd, Some(Cmd::Update)) {
+        println!("{}", update_advice(update::install_kind(), cfg!(windows)));
+        return ExitCode::SUCCESS;
+    }
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

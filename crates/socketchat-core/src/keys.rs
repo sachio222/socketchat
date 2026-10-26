@@ -29,6 +29,9 @@ pub const CTX_VOUCHER: &[u8] = b"socketchat/v1/voucher";
 /// A joiner's request to join through an invite link: the message is
 /// `token || mailbox key`.
 pub const CTX_JOIN_REQUEST: &[u8] = b"socketchat/v1/join-request";
+/// A member's group key signing the topic they set for a room: the message
+/// is `group ID || set time || text`.
+pub const CTX_TOPIC: &[u8] = b"socketchat/v1/topic";
 
 /// An Ed25519 key pair. The private half is wiped from memory on drop.
 #[derive(Clone)]

@@ -7,22 +7,22 @@ expression: s
 │@ Bo             3││         list?                        ││✓ Bo              │
 │# Climbing Sat… 12││09:15:12 Bo: Me. Sending it now.      ││  Cy              │
 │                  ││09:15:40 · Bo sent books.pdf (84 KB)  ││                  │
-│                  ││09:16:58 Cy: Got it, thanks. Saturday ││                  │
-│                  ││         still works for me, and I can││                  │
 │ ┌ Room details ────────────────────────────────────────────────────────────┐ │
 │ │Name: Book club                                                           │ │
 │ │Server: chat.socketchat.org                                               │ │
+│ │Topic: Piranesi, chapters 1 to 5 (set by Bo, verified, 2026-10-19)        │ │
 │ │Admins: Ada, Bo                                                           │ │
 │ │Members: 3                                                                │ │
 │ │Created: 2026-03-02                                                       │ │
 │ │You joined: 2026-10-19                                                    │ │
 │ │Muted: no                                                                 │ │
+│ │Who can invite: admins only                                               │ │
+│ │Slow mode: one message every 30 seconds for each member who isn't an admin│ │
+│ │Who can set the topic: admins only                                        │ │
 │ │Closing: 1 of 2 admins agree                                              │ │
 │ └────────────────────────────────────────────────────────────────[ Close ]─┘ │
-│                  ││                                      ││                  │
-│                  ││                                      ││                  │
 └──────────────────┘└──────────────────────────────────────┘└──────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-Esc close                                                       socketchat 0.5.1
+Esc close                                                       socketchat 0.5.2

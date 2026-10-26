@@ -4,25 +4,25 @@ expression: at_end
 ---
 ┌ Chats ───────────┐┌ Book club ───────────────────────────┐┌ People ──────────┐
 │#┌ Commands ────────────────────────────────────────────────────────────────┐ │
-│@│/leave                leave this chat and delete its history here         │ │
-│#│/switch [room]        open another room; Tab completes the name           │ │
-│ │/title <name>         rename this room for everyone (admins)              │ │
-│ │/close                close this room for everyone (admins agree)         │ │
-│ │/keep                 say no to closing this room (admins)                │ │
-│ │/invites              see your open invite links                          │ │
-│ │/cancel <number>      stop an invite link from /invites                   │ │
-│ │/servers              see your servers and whether each is connected      │ │
-│ │/forget <number>      delete a server and its rooms from this computer    │ │
+│@│/servers              see your servers and whether each is connected      │ │
+│#│/forget <number>      delete a server and its rooms from this computer    │ │
 │ │/mute                 hide this room's new-message count                  │ │
 │ │/unmute               show this room's new-message count again            │ │
 │ │/details              see this room's admins, size and age                │ │
+│ │/settings             see this room's settings                            │ │
+│ │/settings invite      admins or anyone: who can bring people in (admins)  │ │
+│ │/settings slow        seconds or off: how long members wait between       │ │
+│ │                      messages (admins)                                   │ │
+│ │/settings topic       admins or anyone: who can set the topic (admins)    │ │
 │ │/clear                delete this room's messages from this computer      │ │
 │ │/theme [name]         see or change the colors: phosphor or classic       │ │
 │ │/mouse [on|off]       turn mouse clicks and scrolling on or off           │ │
+│ │/updates [on|off]     turn the daily check for a new version on or off    │ │
 │ │/about                see the version and what Socketchat is              │ │
 │ │/quit                 close Socketchat                                    │ │
+│ │Up/Down               bring back your earlier lines in this room          │ │
 └─│                                                                          │─┘
 ┌─│To select text while the mouse is on, hold Shift as you drag (Option or Fn│─┐
 │ │on a Mac), or type /mouse off.                                            │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Up/Down scroll · Esc close                                      socketchat 0.5.1
+Up/Down scroll · Esc close                                      socketchat 0.5.2

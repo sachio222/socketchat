@@ -281,3 +281,65 @@ fn scanner_finds_planted_secrets() {
         .collect();
     assert_eq!(found, vec![true, true]);
 }
+
+#[tokio::test]
+async fn server_sees_one_size_for_short_texts() {
+    use socketchat_core::suite::PADDING_BLOCK;
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    for text in ["k", "see you at eight", &"x".repeat(160), &"y".repeat(400)] {
+        a.send_text(g, text).await.unwrap();
+    }
+    let sizes = last_sizes(&s, g, 4);
+    assert_eq!(sizes[0], sizes[1], "{sizes:?}");
+    assert_eq!(sizes[0], sizes[2], "{sizes:?}");
+    assert_eq!(sizes[3], sizes[0] + PADDING_BLOCK, "{sizes:?}");
+}
+
+/// Sizes of the last `n` messages the server holds for `g`, oldest first.
+fn last_sizes(s: &TestServer, g: GroupId, n: usize) -> Vec<usize> {
+    let db = open_server_db(s);
+    let mut stmt = db
+        .prepare("SELECT length(mls) FROM log WHERE group_id = ?1 ORDER BY seq DESC LIMIT ?2")
+        .unwrap();
+    let mut sizes: Vec<usize> = stmt
+        .query_map(rusqlite::params![g.0.as_slice(), n as i64], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    sizes.reverse();
+    sizes
+}
+
+#[tokio::test]
+async fn room_from_before_padding_pads_after_reopen() {
+    let s = TestServer::start().await;
+    let mut a = TestClient::new(&s, "Ada").await;
+    let g = a.create_group("G").await.unwrap();
+    let mut b = TestClient::new(&s, "Bo").await;
+    b.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+
+    // Stored as 0.5.1 stored it: the server sees each length.
+    a.test_store_unpadded(g);
+    a.send_text(g, "k").await.unwrap();
+    a.send_text(g, "see you at eight").await.unwrap();
+    let before = last_sizes(&s, g, 2);
+    assert_ne!(before[0], before[1], "{before:?}");
+
+    // The next time the app opens, the room pads.
+    let mut a = a.reopen().await;
+    a.send_text(g, "j").await.unwrap();
+    a.send_text(g, "see you at nine").await.unwrap();
+    let after = last_sizes(&s, g, 2);
+    assert_eq!(after[0], after[1], "{after:?}");
+
+    settle(&mut [&mut a, &mut b]).await;
+    let t = texts(&b, g);
+    for want in ["k", "see you at eight", "j", "see you at nine"] {
+        assert!(t.contains(&want.to_string()), "{t:?}");
+    }
+}

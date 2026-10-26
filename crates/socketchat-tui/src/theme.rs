@@ -80,6 +80,10 @@ pub struct Theme {
     pub dim: Style,
     /// File and notice lines.
     pub notice: Style,
+    /// A room's topic, wherever it shows. Its own color, never a notice's,
+    /// a warning's or the verified mark's, so a topic cannot pass for the
+    /// app's own words.
+    pub topic: Style,
     /// Status messages and people not yet verified.
     pub warn: Style,
     /// The warning bar at the top of the messages.
@@ -124,6 +128,7 @@ impl Theme {
             check: Style::default(),
             dim: fg(Color::DarkGray),
             notice: fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            topic: fg(Color::LightBlue),
             warn: fg(Color::Yellow),
             banner: Style::default().fg(Color::White).bg(Color::Red),
             selected: Style::default().add_modifier(Modifier::REVERSED),
@@ -143,6 +148,7 @@ impl Theme {
     /// | times, you, check | `#7dff6a` | 119 |
     /// | other names, room | `#8af0c6` | 122 |
     /// | dim, notices      | `#6b7c6e` | 242 |
+    /// | topic             | `#87afd7` | 110 |
     /// | selected text     | `#031004` | 16  |
     /// | warning           | `#f2c94c` | 221 |
     /// | warning bar       | white on `#b3261e` | 231 on 124 |
@@ -159,6 +165,7 @@ impl Theme {
         let green = c((125, 255, 106), 119);
         let mint = c((138, 240, 198), 122);
         let dim = c((107, 124, 110), 242);
+        let sky = c((135, 175, 215), 110);
         let ink = c((3, 16, 4), 16);
         let amber = c((242, 201, 76), 221);
         let red = c((179, 38, 30), 124);
@@ -181,6 +188,7 @@ impl Theme {
             check: fg(green),
             dim: fg(dim),
             notice: fg(dim).add_modifier(Modifier::ITALIC),
+            topic: fg(sky),
             warn: fg(amber),
             banner: Style::default().fg(white).bg(red),
             selected: Style::default().fg(ink).bg(green),

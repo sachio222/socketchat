@@ -10,7 +10,7 @@ expression: s
 │                  ││09:16:58 Cy: Got it, thanks. Saturday ││                  │
 │                  ││         still works for me, and I can││                  │
 │ ┌ About ───────────────────────────────────────────────────────────────────┐ │
-│ │socketchat 0.5.1                                                          │ │
+│ │socketchat 0.5.2                                                          │ │
 │ │                                                                          │ │
 │ │Socketchat is encrypted chat with a server you run yourself. The server   │ │
 │ │passes messages along but cannot read them.                               │ │
@@ -25,4 +25,4 @@ expression: s
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-Esc close                                                       socketchat 0.5.1
+Esc close                                                       socketchat 0.5.2

@@ -211,9 +211,34 @@ fn invites_state_the_configured_expiry() {
 #[test]
 fn join_with_bad_link_explains() {
     let home = tempfile::tempdir().unwrap();
-    let o = run(home.path(), &["join", "https://example.com/nope"]);
+    let o = run(home.path(), &["join", "chat.example.com/nope"]);
     assert_eq!(o.status.code(), Some(1));
-    assert!(out(&o).contains("socketchat://"), "{}", out(&o));
+    assert_eq!(
+        out(&o).trim(),
+        "That is not a Socketchat invite link: an invite link starts with socketchat://."
+    );
+}
+
+#[test]
+fn join_refuses_any_other_web_address() {
+    let home = tempfile::tempdir().unwrap();
+    for web in [
+        "https://example.com/nope",
+        "https://example.com/join#socketchat://chat.example.com:7444/j/x#y",
+        "http://socketchat.org/join#socketchat://chat.example.com:7444/j/x#y",
+    ] {
+        let o = run(home.path(), &["join", web]);
+        assert_eq!(o.status.code(), Some(1), "{web}");
+        assert_eq!(
+            out(&o).trim(),
+            "That is not a Socketchat invite link: the only web address that carries an invite is https://socketchat.org/join.",
+            "{web}"
+        );
+    }
+    assert!(
+        !home.path().join(socketchat_core::store::DB_FILE).exists(),
+        "a profile was made for a refused link"
+    );
 }
 
 #[test]
@@ -224,6 +249,12 @@ fn join_accepts_the_web_form_of_a_link() {
     let web = format!("https://socketchat.org/join#{}", server_invite(&s));
     let o = run(&ada, &["join", &web]);
     assert!(o.status.success(), "{}", out(&o));
+    assert!(out(&o).contains("You are on 127.0.0.1"), "{}", out(&o));
+    // The address a browser shows after the join page's redirect works too.
+    let bo = home.path().join("Bo");
+    let web = format!("https://socketchat.org/join/#{}", server_invite(&s));
+    let o = run(&bo, &["join", &web]);
+    assert!(o.status.success(), "{}", out(&o));
 }
 
 #[test]
@@ -231,7 +262,7 @@ fn join_with_a_bad_web_link_explains() {
     let home = tempfile::tempdir().unwrap();
     let o = run(home.path(), &["join", "https://socketchat.org/join#nope"]);
     assert_eq!(o.status.code(), Some(1));
-    assert!(out(&o).contains("socketchat://"), "{}", out(&o));
+    assert!(out(&o).contains("ask for a fresh link"), "{}", out(&o));
 }
 
 #[test]
@@ -1087,4 +1118,64 @@ fn servers_lists_and_forgets() {
     assert!(run(&ada, &["send", "--group", "Second", "still here"])
         .status
         .success());
+}
+
+#[test]
+fn the_topic_through_binary() {
+    let s = server();
+    let home = tempfile::tempdir().unwrap();
+    let (ada, bo) = (home.path().join("Ada"), home.path().join("Bo"));
+    assert!(run(&ada, &["join", &server_invite(&s)]).status.success());
+    assert!(run(&ada, &["new", "Crew"]).status.success());
+    let o = run(&ada, &["invite", "--group", "Crew"]);
+    let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    assert!(run(&bo, &["join", &link]).status.success());
+    assert!(run(&ada, &["sync"]).status.success());
+    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&bo, &["topic", "--group", "Crew"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert_eq!(out(&o).trim(), "Crew has no topic.");
+    let o = run(
+        &ada,
+        &[
+            "topic",
+            "--group",
+            "Crew",
+            "Piranesi",
+            "\x1b[2Jtonight\u{202E}",
+        ],
+    );
+    assert!(o.status.success(), "{}", out(&o));
+    assert_eq!(out(&o).trim(), "Set the topic of Crew.");
+    let o = run(&bo, &["topic", "--group", "Crew"]);
+    let said = out(&o);
+    assert!(o.status.success(), "{said}");
+    assert!(
+        said.starts_with("Topic: Piranesi [2Jtonight (set by Ada, "),
+        "{said}"
+    );
+    assert!(
+        !said.contains('\x1b') && !said.contains('\u{202E}'),
+        "{said:?}"
+    );
+    let o = run(&bo, &["log", "--group", "Crew"]);
+    assert!(
+        out(&o).contains("· Topic: Piranesi [2Jtonight (set by Ada, "),
+        "{}",
+        out(&o)
+    );
+    let o = run(&bo, &["topic", "--group", "Crew", "--clear"]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(
+        out(&o).contains("Only admins can set this room's topic."),
+        "{}",
+        out(&o)
+    );
+    let o = run(&ada, &["topic", "--group", "Crew", "--clear"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert_eq!(out(&o).trim(), "Cleared the topic of Crew.");
+    let o = run(&bo, &["topic", "--group", "Crew"]);
+    assert_eq!(out(&o).trim(), "Crew has no topic.");
+    let o = run(&ada, &["topic", "--group", "Crew", "--clear", "both"]);
+    assert!(!o.status.success());
 }

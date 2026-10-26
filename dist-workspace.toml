@@ -8,7 +8,12 @@ cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell"]
+installers = ["shell", "powershell", "homebrew"]
+# The Homebrew tap the release publishes the formula to, and its name there
+tap = "sachio222/homebrew-tap"
+formula = "socketchat"
+# Jobs to run after the release is published
+publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Path that installers should place binaries in: ~/.local/bin unless XDG says otherwise.
@@ -16,7 +21,8 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 install-path = ["$XDG_BIN_HOME/", "$XDG_DATA_HOME/../bin", "~/.local/bin"]
 # Where to host releases
 hosting = "github"
-# Whether to install an updater program
+# Whether to install an updater program. None: socketchat update prints
+# the command that installs the new version instead.
 install-updater = false
 # What the installer says when it finishes. The shell and PowerShell
 # installers print it inside double quotes, so it must not hold a double

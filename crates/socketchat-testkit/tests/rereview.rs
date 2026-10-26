@@ -157,18 +157,22 @@ impl BigCut {
     }
 }
 
-/// With member invites turned off, a non-admin member tries to get a
+/// In a room where only admins invite, a non-admin member tries to get a
 /// puppet of their own into the group through an admin's open link, using
 /// what every member receives about it. Members hold only the public key
 /// that checks a join request, so the best they can do is sign with
 /// something they hold; the admin's app must ignore the request.
 #[tokio::test]
 async fn rr_member_cannot_add_puppet_when_member_invites_are_off() {
-    let s = TestServer::start_with(|c| c.members_can_invite = false).await;
+    let s = TestServer::start().await;
     let mut a = TestClient::new(&s, "Ada").await;
     let g = a.create_group("G").await.unwrap();
     let mut m = TestClient::profile_only("Mal").await;
     m.join(&a.invite(Some(g), false).await.unwrap().0)
+        .await
+        .unwrap();
+    settle(&mut [&mut a, &mut m]).await;
+    a.set_who_can_invite(g, socketchat_core::settings::WhoCanInvite::Admins)
         .await
         .unwrap();
     settle(&mut [&mut a, &mut m]).await;

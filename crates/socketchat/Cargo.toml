@@ -1,11 +1,12 @@
 [package]
 name = "socketchat"
-description = "Encrypted group chat for people who run their own server."
+description = "Encrypted group chat with a server you run yourself"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 authors.workspace = true
 readme = "../../README.md"
 

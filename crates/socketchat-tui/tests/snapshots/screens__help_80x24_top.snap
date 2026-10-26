@@ -20,9 +20,9 @@ expression: first
 │ │/leave                leave this chat and delete its history here         │ │
 │ │/switch [room]        open another room; Tab completes the name           │ │
 │ │/title <name>         rename this room for everyone (admins)              │ │
-│ │/close                close this room for everyone (admins agree)         │ │
-└─│/keep                 say no to closing this room (admins)                │─┘
-┌─│/invites              see your open invite links                          │─┐
+│ │/topic [text]         see or set the topic; /topic --clear removes it     │ │
+└─│/close                close this room for everyone (admins agree)         │─┘
+┌─│/keep                 say no to closing this room (admins)                │─┐
 │ │↓ more                                                                    │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Up/Down scroll · Esc close                                      socketchat 0.5.1
+Up/Down scroll · Esc close                                      socketchat 0.5.2

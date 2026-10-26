@@ -4,6 +4,7 @@ use common::*;
 use openmls::prelude::tls_codec::Serialize as _;
 use openmls::prelude::*;
 use openmls_traits::OpenMlsProvider;
+use socketchat_core::settings::RoomSettings;
 use socketchat_core::suite::{group_context_extensions, FALLBACK_SUITE, SUITE};
 use socketchat_proto::msg::{Push, Request, Response, ServerFrame};
 use socketchat_server::{init, make_server_invite, Config, Server, ServerHandle};
@@ -119,19 +120,18 @@ async fn admin_add_accepted_and_welcome_delivered() {
     assert!(matches!(r, Response::Refused(_)), "{r:?}");
 }
 
+/// The server setting now covers accounts only: who brings people into a
+/// room is the room's own setting (see `room_settings.rs`).
 #[tokio::test]
-async fn non_admin_add_refused() {
-    let e = env_with(|c| c.members_can_invite = false).await;
+async fn member_add_allowed_when_members_make_no_accounts() {
+    let e = env_with(|c| c.members_make_accounts = false).await;
     let mut a = e.admin().await;
     let mut b = e.member(&mut a).await;
     let mut c = e.person().await;
-    let t = a.invite().await;
+    let t = b.invite().await;
     assert_eq!(c.redeem_mailbox(t).await, Response::Ok);
     let r = b.add(c.key_package(), t).await;
-    assert!(
-        matches!(r, Response::Refused(ref s) if s.contains("admin")),
-        "{r:?}"
-    );
+    assert!(matches!(r, Response::Posted { .. }), "{r:?}");
 }
 
 #[tokio::test]
@@ -247,7 +247,10 @@ async fn last_admin_leave_must_promote_longest_standing() {
     let cc = c.group.as_mut().unwrap();
     let bundle = cc
         .commit_builder()
-        .propose_group_context_extensions(group_context_extensions(&[c.key.public()]))
+        .propose_group_context_extensions(group_context_extensions(
+            &[c.key.public()],
+            &RoomSettings::default(),
+        ))
         .unwrap()
         .load_psks(c.prov.storage())
         .unwrap()
@@ -266,7 +269,10 @@ async fn last_admin_leave_must_promote_longest_standing() {
     let cc = c.group.as_mut().unwrap();
     let bundle = cc
         .commit_builder()
-        .propose_group_context_extensions(group_context_extensions(&[b.key.public()]))
+        .propose_group_context_extensions(group_context_extensions(
+            &[b.key.public()],
+            &RoomSettings::default(),
+        ))
         .unwrap()
         .load_psks(c.prov.storage())
         .unwrap()
@@ -401,7 +407,7 @@ async fn garbage_post_refused() {
 }
 
 #[tokio::test]
-async fn member_add_allowed_when_members_can_invite() {
+async fn member_add_allowed_in_a_room_on_the_defaults() {
     let e = env().await;
     let mut a = e.admin().await;
     let mut b = e.member(&mut a).await;
@@ -413,7 +419,7 @@ async fn member_add_allowed_when_members_can_invite() {
 }
 
 #[tokio::test]
-async fn member_cannot_remove_others_even_when_members_can_invite() {
+async fn member_cannot_remove_others_in_a_room_on_the_defaults() {
     let e = env().await;
     let mut a = e.admin().await;
     let mut b = e.member(&mut a).await;
@@ -444,10 +450,10 @@ async fn share_admin(admin: &mut Person, member: &mut Person) {
         .as_mut()
         .unwrap()
         .commit_builder()
-        .propose_group_context_extensions(group_context_extensions(&[
-            admin.key.public(),
-            member.key.public(),
-        ]))
+        .propose_group_context_extensions(group_context_extensions(
+            &[admin.key.public(), member.key.public()],
+            &RoomSettings::default(),
+        ))
         .unwrap()
         .load_psks(admin.prov.storage())
         .unwrap()

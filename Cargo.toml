@@ -3,24 +3,25 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sachio222/socketchat"
+homepage = "https://socketchat.org"
 authors = ["sachio222"]
 
 [workspace.dependencies]
-socketchat-proto = { version = "0.5.1", path = "crates/socketchat-proto" }
+socketchat-proto = { version = "0.5.2", path = "crates/socketchat-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 thiserror = "2"
 base64 = "0.22"
 proptest = "1"
-socketchat-core = { version = "0.5.1", path = "crates/socketchat-core" }
-socketchat-server = { version = "0.5.1", path = "crates/socketchat-server" }
-socketchat-testkit = { version = "0.5.1", path = "crates/socketchat-testkit" }
+socketchat-core = { version = "0.5.2", path = "crates/socketchat-core" }
+socketchat-server = { version = "0.5.2", path = "crates/socketchat-server" }
+socketchat-testkit = { version = "0.5.2", path = "crates/socketchat-testkit" }
 openmls = { version = "=0.9.1", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_rust_crypto = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_basic_credential = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
@@ -41,6 +42,8 @@ tempfile = "3"
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "logging"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["ring"] }
+# The update check trusts the certificate authorities the system trusts.
+rustls-native-certs = "=0.8.4"
 rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }
 toml = "=1.1.5"
 ratatui = "=0.30.2"
@@ -52,7 +55,7 @@ clap = { version = "=4.6.6", features = ["derive"] }
 rpassword = "=7.5.4"
 directories = "=6.0.0"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
-socketchat-tui = { version = "0.5.1", path = "crates/socketchat-tui" }
+socketchat-tui = { version = "0.5.2", path = "crates/socketchat-tui" }
 
 # Crypto in dependencies is slow unoptimized; tests run with it optimized.
 [profile.dev.package."*"]

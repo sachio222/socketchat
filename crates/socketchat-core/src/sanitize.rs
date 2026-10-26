@@ -11,6 +11,8 @@
 pub const MAX_NAME_CHARS: usize = 64;
 /// Longest message, in bytes.
 pub const MAX_TEXT_BYTES: usize = 16 * 1024;
+/// Longest room topic, in characters, as IRC servers commonly allow.
+pub const MAX_TOPIC_CHARS: usize = 300;
 
 /// Unicode's format characters (general category Cf, Unicode 16): they
 /// draw nothing, or change how the text around them is laid out. This
@@ -82,12 +84,32 @@ pub fn single_spaced(s: &str) -> String {
 /// turned into one plain space, trimmed and capped. A name then always
 /// shows its spacing, and the spaces typed in a command match it.
 pub fn clean_name(s: &str) -> String {
+    strict(s, MAX_NAME_CHARS)
+}
+
+/// A room topic, filtered as strictly as a name: no control characters
+/// or escape codes, no direction controls, no invisible characters, line
+/// breaks and every other run of whitespace as one space, and at most
+/// [`MAX_TOPIC_CHARS`] characters. It shows as one plain line.
+pub fn clean_topic(s: &str) -> String {
+    strict(s, MAX_TOPIC_CHARS)
+}
+
+/// How many characters [`clean_topic`] would keep of `s` with no cap: how
+/// long a topic is as it would show.
+pub fn topic_chars(s: &str) -> usize {
+    strict(s, usize::MAX).chars().count()
+}
+
+/// `s` with what names may not hold removed, single-spaced, trimmed and
+/// cut to `cap` characters, with no space left at the cut.
+fn strict(s: &str, cap: usize) -> String {
     let kept: String = s
         .chars()
         .map(|c| if c.is_whitespace() { ' ' } else { c })
         .filter(|c| !unsafe_in_name(*c))
         .collect();
-    let capped: String = single_spaced(&kept).chars().take(MAX_NAME_CHARS).collect();
+    let capped: String = single_spaced(&kept).chars().take(cap).collect();
     capped.trim_end().to_string()
 }
 
@@ -256,6 +278,70 @@ mod tests {
         assert_eq!(clean_name(&long).chars().count(), MAX_NAME_CHARS);
         assert_eq!(clean_name("  Ada \n"), "Ada");
         assert_eq!(clean_name(&"é".repeat(100)).chars().count(), MAX_NAME_CHARS);
+    }
+
+    // ---------- room topics ----------
+
+    #[test]
+    fn a_topic_drops_escape_codes() {
+        // No cursor moves, colors, window titles or bells.
+        assert_eq!(
+            clean_topic("\x1b[2J\x1b[31mRed\x1b[0m\x07\x1b]0;owned\x07"),
+            "[2J[31mRed[0m]0;owned"
+        );
+        // NEL (U+0085) breaks a line, so it becomes a space; CSI goes.
+        assert_eq!(
+            clean_topic("a\u{0085}b\u{009B}31m"),
+            "a b31m",
+            "C1 controls"
+        );
+    }
+
+    #[test]
+    fn a_topic_drops_direction_controls_and_isolates() {
+        assert_eq!(clean_topic("see \u{202E}gnp.exe"), "see gnp.exe");
+        assert_eq!(
+            clean_topic("\u{2066}a\u{2067}b\u{2068}c\u{2069}\u{200E}\u{200F}\u{061C}"),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn a_topic_drops_invisible_characters_and_hangul_fillers() {
+        assert_eq!(
+            clean_topic("A\u{200B}d\u{200C}a\u{200D}\u{2060}\u{FEFF}"),
+            "Ada"
+        );
+        assert_eq!(clean_topic("Cy\u{E0041}\u{E007F}"), "Cy");
+        assert_eq!(clean_topic("\u{3164}\u{115F}\u{1160}\u{FFA0}"), "");
+    }
+
+    #[test]
+    fn a_topic_is_one_line_with_single_spaces() {
+        assert_eq!(
+            clean_topic("Meet\nat\r\n\n  noon\u{2029}today"),
+            "Meet at noon today"
+        );
+        assert_eq!(clean_topic("  a \t\u{3000} b  "), "a b");
+    }
+
+    #[test]
+    fn a_topic_is_capped_at_300_characters() {
+        assert_eq!(MAX_TOPIC_CHARS, 300);
+        assert_eq!(clean_topic(&"x".repeat(1000)).chars().count(), 300);
+        assert_eq!(clean_topic(&"é".repeat(1000)), "é".repeat(300));
+        let long = format!("{} tail", "x".repeat(299));
+        assert_eq!(
+            clean_topic(&long),
+            "x".repeat(299),
+            "no space left at the cap"
+        );
+    }
+
+    #[test]
+    fn a_topic_keeps_links_and_visible_text() {
+        let t = "Notes: https://example.com/a?b=1#c and ✓ verified";
+        assert_eq!(clean_topic(t), t);
     }
 
     #[test]

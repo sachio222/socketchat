@@ -1,0 +1,28 @@
+---
+source: crates/socketchat-tui/tests/screens.rs
+expression: narrow
+---
+┌ Chats ───────────┐┌ Book… ───────────┐┌ People ──────────┐
+│# Book club       ││Topic: Piranesi,… ││✓ Ada* (you)      │
+│@ Bo             3││Sending it now.   ││✓ Bo              │
+│# Climbing Sat… 12││09:15:40 · Bo sent││  Cy              │
+│                  ││books.pdf (84 KB) ││                  │
+│                  ││09:16:58 Cy: Got  ││                  │
+│                  ││it, thanks.       ││                  │
+│                  ││Saturday still    ││                  │
+│                  ││works for me, and ││                  │
+│                  ││I can bring snacks││                  │
+│                  ││for everyone.     ││                  │
+│                  ││09:17:30 · Topic: ││                  │
+│                  ││Piranesi, chapters││                  │
+│                  ││1 to 5. Bring     ││                  │
+│                  ││snacks. The list: ││                  │
+│                  ││https://example.co││                  │
+│                  ││m/book-club/list  ││                  │
+│                  ││(set by you,      ││                  │
+│                  ││2026-10-25)       ││                  │
+└──────────────────┘└──────────────────┘└──────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  What's on your mind? #Book club           / for commands│
+└──────────────────────────────────────────────────────────┘
+Enter send · /help commands · Tab move · Ctrl-K switch chat…
