@@ -12,6 +12,11 @@ use socketchat_core::keys::{KeyPair, CTX_AUTH};
 use socketchat_proto::msg::{from_body, to_frame, ClientFrame, Request, Response, ServerFrame};
 use socketchat_proto::FrameDecoder;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// How long a test waits for the server before calling it stalled. It
+/// catches a hung server, not a slow one, so it leaves room for a slow
+/// test machine.
+const STALLED: std::time::Duration = std::time::Duration::from_secs(30);
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
@@ -119,12 +124,9 @@ impl Raw {
                 return Some(from_body(&b).unwrap());
             }
             let mut buf = [0u8; 8192];
-            let n = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                self.s.read(&mut buf),
-            )
-            .await
-            .expect("server stalled")
+            let n = match tokio::time::timeout(STALLED, self.s.read(&mut buf))
+                .await
+                .expect("server stalled")
             {
                 Ok(n) => n,
                 Err(_) => return None,
@@ -149,12 +151,9 @@ impl Raw {
                 return Some(from_body(&b).unwrap());
             }
             tokio::time::sleep(pause).await;
-            let n = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                self.s.read(&mut buf),
-            )
-            .await
-            .expect("server stalled")
+            let n = match tokio::time::timeout(STALLED, self.s.read(&mut buf))
+                .await
+                .expect("server stalled")
             {
                 Ok(n) => n,
                 Err(_) => return None,
