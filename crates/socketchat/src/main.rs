@@ -918,7 +918,33 @@ async fn main_inner(cli: Cli) -> Result<(), Fail> {
     }
 }
 
+/// The stack of the thread that runs Socketchat, and of tokio's workers
+/// and blocking threads. A program's main thread gets 1 MiB on Windows and
+/// 8 MiB on macOS and Linux, and a sync that lets someone in takes more
+/// than 1 MiB in a debug build, so Socketchat runs on a thread of its own
+/// and sets the size itself.
+const STACK_BYTES: usize = 8 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    // Named "main" so a panic message reads as it did on the main thread.
+    let program = std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(STACK_BYTES)
+        .spawn(run_program);
+    match program.map(std::thread::JoinHandle::join) {
+        Ok(Ok(code)) => code,
+        // The panic message is already out: end as that panic would have.
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Reads the command line, runs the command on a tokio runtime and says
+/// how it ended.
+fn run_program() -> ExitCode {
     let cli = Cli::parse();
     if matches!(cli.cmd, Some(Cmd::Update)) {
         println!("{}", update_advice(update::install_kind(), cfg!(windows)));
@@ -926,6 +952,7 @@ fn main() -> ExitCode {
     }
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(STACK_BYTES)
         .build()
     {
         Ok(rt) => rt,

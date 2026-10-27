@@ -2,7 +2,15 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_socketchat");
+
+/// The program, with the 1 MiB main-thread stack Windows gives it, so a
+/// command that needs more fails here on every system.
+fn bin() -> Command {
+    common::windows_stack(BIN)
+}
 
 /// The passphrase for every temporary profile in these tests: 16 random bytes
 /// in hex, made once per run so every command opens the same profiles.
@@ -16,7 +24,7 @@ fn pass() -> &'static str {
 }
 
 fn run(home: &Path, args: &[&str]) -> Output {
-    Command::new(BIN)
+    bin()
         .args(args)
         .env("SOCKETCHAT_HOME", home)
         .env("SOCKETCHAT_PASSPHRASE", pass())
@@ -69,7 +77,7 @@ fn server_with_config(edit: impl FnOnce(String) -> String) -> Server {
 fn server_at(listen: &str, edit: impl FnOnce(String) -> String) -> Option<Server> {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path().to_str().unwrap();
-    let o = Command::new(BIN)
+    let o = bin()
         .args([
             "server",
             "init",
@@ -85,7 +93,7 @@ fn server_at(listen: &str, edit: impl FnOnce(String) -> String) -> Option<Server
     assert!(o.status.success(), "{}", out(&o));
     let cfg = dir.path().join("socketchat-server.toml");
     std::fs::write(&cfg, edit(std::fs::read_to_string(&cfg).unwrap())).unwrap();
-    let mut child = Command::new(BIN)
+    let mut child = bin()
         .args(["server", "run", "--data-dir", d])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -100,7 +108,7 @@ fn server_at(listen: &str, edit: impl FnOnce(String) -> String) -> Option<Server
 }
 
 fn server_invite(s: &Server) -> String {
-    let o = Command::new(BIN)
+    let o = bin()
         .args([
             "server",
             "invite",
@@ -113,9 +121,23 @@ fn server_invite(s: &Server) -> String {
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
+/// The tests run every command with Windows' 1 MiB main-thread stack.
+#[cfg(unix)]
+#[test]
+fn commands_run_with_the_stack_windows_gives() {
+    let o = common::windows_stack("sh")
+        .args(["-c", "ulimit -s"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        common::WINDOWS_MAIN_STACK_KIB.to_string()
+    );
+}
+
 #[test]
 fn help_lists_subcommands() {
-    let o = Command::new(BIN).arg("--help").output().unwrap();
+    let o = bin().arg("--help").output().unwrap();
     let s = out(&o);
     for word in ["server", "join", "invite", "send", "log"] {
         assert!(s.contains(word), "{word} missing from:\n{s}");
@@ -125,7 +147,7 @@ fn help_lists_subcommands() {
 #[test]
 fn server_init_prints_aup_and_fingerprint() {
     let d = tempfile::tempdir().unwrap();
-    let o = Command::new(BIN)
+    let o = bin()
         .args([
             "server",
             "init",
@@ -149,7 +171,7 @@ fn server_init_prints_aup_and_fingerprint() {
         s.contains("socketchat server run"),
         "says what to do next: {s}"
     );
-    let again = Command::new(BIN)
+    let again = bin()
         .args([
             "server",
             "init",
@@ -177,7 +199,7 @@ fn invites_state_the_configured_expiry() {
         assert!(c.contains("invite_ttl_hours = 24"), "{c}");
         c.replace("invite_ttl_hours = 24", "invite_ttl_hours = 2")
     });
-    let o = Command::new(BIN)
+    let o = bin()
         .args([
             "server",
             "invite",
@@ -300,7 +322,7 @@ fn wrong_passphrase_exits_2_with_plain_message() {
     let ada = home.path().join("Ada");
     let o = run(&ada, &["join", &server_invite(&s)]);
     assert!(o.status.success(), "{}", out(&o));
-    let o = Command::new(BIN)
+    let o = bin()
         .args(["log", "--group", "x"])
         .env("SOCKETCHAT_HOME", &ada)
         .env("SOCKETCHAT_PASSPHRASE", format!("{}0", pass()))
@@ -312,7 +334,7 @@ fn wrong_passphrase_exits_2_with_plain_message() {
 
 /// Runs `args` with `SOCKETCHAT_PASSPHRASE` set to `value`.
 fn run_with_passphrase(home: &Path, value: &std::ffi::OsStr, args: &[&str]) -> Output {
-    Command::new(BIN)
+    bin()
         .args(args)
         .env("SOCKETCHAT_HOME", home)
         .env("SOCKETCHAT_PASSPHRASE", value)
@@ -976,7 +998,7 @@ fn log_and_sync_keep_a_message_s_lines_under_its_sender() {
 #[test]
 fn server_run_warns_about_a_host_links_cannot_carry() {
     let s = server_with_config(|c| c.replace("\"127.0.0.1\"", "\"pаypal.com\""));
-    let mut child = Command::new(BIN)
+    let mut child = bin()
         .args([
             "server",
             "run",

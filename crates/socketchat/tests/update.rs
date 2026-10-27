@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_socketchat");
 const PASS: &str = "update test passphrase";
 const NOTICE: &str = "Socketchat 99.0.0 is out. Run socketchat update.";
@@ -84,7 +86,7 @@ fn profile() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn cmd(bin: &Path, home: &Path, url: &str) -> Command {
-    let mut c = Command::new(bin);
+    let mut c = common::windows_stack(bin);
     c.env("SOCKETCHAT_HOME", home)
         .env("SOCKETCHAT_PASSPHRASE", PASS)
         .env("SOCKETCHAT_TEST_UPDATE_URL", url)
