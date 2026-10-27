@@ -319,7 +319,19 @@ fn path_of(
     let p = if let Some(rest) = word.strip_prefix("file://") {
         PathBuf::from(link_path(rest, platform)?)
     } else if let Some(rest) = word.strip_prefix("~/") {
-        home?.join(rest)
+        // Joined with the platform's separator rather than the host's, so
+        // each platform's rules give the same path on any machine.
+        let home = home?;
+        let sep = match platform {
+            Platform::Unix => "/",
+            Platform::Windows => "\\",
+        };
+        let mut p = home.as_os_str().to_os_string();
+        if !home.to_string_lossy().ends_with(sep) {
+            p.push(sep);
+        }
+        p.push(rest);
+        PathBuf::from(p)
     } else if platform.is_absolute(word) {
         PathBuf::from(word)
     } else {
