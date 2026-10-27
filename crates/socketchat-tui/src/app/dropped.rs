@@ -593,10 +593,13 @@ mod tests {
 
     /// Parses `text` by `platform`'s rules against a made-up disk that
     /// holds exactly `disk`, so both systems' forms run on every system.
+    /// The disk matches a path letter for letter: comparing `Path`s would
+    /// use the host's rules, and on Windows `/u/a/beach.jpg\` is the same
+    /// path as `/u/a/beach.jpg`.
     fn on(platform: Platform, disk: &[&str], text: &str) -> Option<Vec<PathBuf>> {
-        let disk: Vec<PathBuf> = disk.iter().map(PathBuf::from).collect();
         parse(text, Some(Path::new("/u/a")), platform, &|p| {
-            disk.iter().any(|d| d == p)
+            disk.iter()
+                .any(|d| p.as_os_str() == std::ffi::OsStr::new(d))
         })
     }
 
