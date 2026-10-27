@@ -101,9 +101,10 @@ jobs:
         env:
           EXACT: ${{ steps.cache.outputs.cache-hit }}
         run: |
-          mb=$(du -sm target 2>/dev/null | cut -f1)
-          echo "Restored target/: ${mb:-0} MB"
-          if [ "$EXACT" != true ] && [ "${mb:-0}" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
+          mb=0
+          if [ -d target ]; then mb=$(du -sm target | cut -f1); fi
+          echo "Restored target/: $mb MB"
+          if [ "$EXACT" != true ] && [ "$mb" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
       - name: Build the tests
         id: build
         run: cargo test --workspace --locked --no-run ${{ matrix.features }}
@@ -149,9 +150,10 @@ jobs:
         env:
           EXACT: ${{ steps.cache.outputs.cache-hit }}
         run: |
-          mb=$(du -sm target 2>/dev/null | cut -f1)
-          echo "Restored target/: ${mb:-0} MB"
-          if [ "$EXACT" != true ] && [ "${mb:-0}" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
+          mb=0
+          if [ -d target ]; then mb=$(du -sm target | cut -f1); fi
+          echo "Restored target/: $mb MB"
+          if [ "$EXACT" != true ] && [ "$mb" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
       - name: Clippy
         id: build
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -248,9 +250,10 @@ jobs:
         env:
           EXACT: ${{ steps.cache.outputs.cache-hit }}
         run: |
-          mb=$(du -sm target 2>/dev/null | cut -f1)
-          echo "Restored target/: ${mb:-0} MB"
-          if [ "$EXACT" != true ] && [ "${mb:-0}" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
+          mb=0
+          if [ -d target ]; then mb=$(du -sm target | cut -f1); fi
+          echo "Restored target/: $mb MB"
+          if [ "$EXACT" != true ] && [ "$mb" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
       - name: Build the program
         id: build
         run: cargo build --release --locked -p socketchat
@@ -298,9 +301,10 @@ jobs:
         env:
           EXACT: ${{ steps.cache.outputs.cache-hit }}
         run: |
-          mb=$(du -sm target 2>/dev/null | cut -f1)
-          echo "Restored target/: ${mb:-0} MB"
-          if [ "$EXACT" != true ] && [ "${mb:-0}" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
+          mb=0
+          if [ -d target ]; then mb=$(du -sm target | cut -f1); fi
+          echo "Restored target/: $mb MB"
+          if [ "$EXACT" != true ] && [ "$mb" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
       - name: Build the release binary
         id: build
         run: cargo build --profile dist --locked -p socketchat --features vendored-openssl
