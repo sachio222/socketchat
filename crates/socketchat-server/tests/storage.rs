@@ -569,8 +569,9 @@ async fn shrinking_changes_stop_a_tenth_past_the_limit() {
 }
 
 /// A change too large for even a full room's spare tenth is refused before
-/// the server checks it: with the check made to take 3 seconds, the answer
-/// comes in under half that, which leaves room for a slow test machine.
+/// the server checks it: with the check made to take 10 seconds, the
+/// answer comes in under half that, which leaves room for a slow test
+/// machine.
 /// The pause starts only after the room is set up, so no setup step waits
 /// on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -585,19 +586,19 @@ async fn a_change_past_the_ceiling_is_refused_before_its_check() {
     let b = e.member(&mut a).await;
     let c = e.member(&mut a).await;
     fill_room(&e, &mut a, MB).await;
-    delay.set(std::time::Duration::from_secs(3));
+    delay.set(std::time::Duration::from_secs(10));
     let t = std::time::Instant::now();
     let r = remove(&mut a, &b.key, 0).await;
     let plain = t.elapsed();
     assert!(matches!(r, Response::Posted { .. }), "{r:?}");
-    assert!(plain >= std::time::Duration::from_secs(3), "{plain:?}");
+    assert!(plain >= std::time::Duration::from_secs(10), "{plain:?}");
     // A second removal padded past the spare tenth never reaches the check.
     let t = std::time::Instant::now();
     let r = remove(&mut a, &c.key, 200_000).await;
     let padded = t.elapsed();
     assert!(refused_saying(&r, "1 MB"), "{r:?}");
     assert!(
-        padded < std::time::Duration::from_millis(1500),
+        padded < std::time::Duration::from_secs(5),
         "the refusal took {padded:?}"
     );
 }
