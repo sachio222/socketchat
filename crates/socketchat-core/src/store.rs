@@ -508,6 +508,10 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     // Where an invite's line waits to move to the room the chat screen
     // opens. Invites from before this column keep their line where it is.
     ("adds_in", "line_seq", "INTEGER"),
+    // The room line that says a file was sent, so a click on it saves that
+    // file. Files from before this column have none, and their lines stay
+    // as they were.
+    ("files", "line_seq", "INTEGER"),
 ];
 
 /// Adds the names of verified people that `members` rows matching
@@ -1955,26 +1959,50 @@ impl Store {
         }))
     }
 
-    /// Keeps a file offer with the key of the member who sent it.
+    /// Keeps a file offer with the key of the member who sent it and the
+    /// room line, at `line_seq`, that says it was sent.
     pub fn add_file(
         &self,
         g: &GroupId,
         offer: &crate::files::FileOffer,
         sender: Option<&Key>,
         added_unix: u64,
+        line_seq: u64,
     ) -> Result<(), CoreError> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO files (id, group_id, offer, sender_group_key, added_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR IGNORE INTO files
+                 (id, group_id, offer, sender_group_key, added_unix, line_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 offer.id.0.as_slice(),
                 g.0.as_slice(),
                 postcard::to_stdvec(offer)?,
                 sender.map(|k| k.0.to_vec()),
-                added_unix as i64
+                added_unix as i64,
+                line_seq as i64
             ],
         )?;
         Ok(())
+    }
+
+    /// The file whose room line is at `seq`, if that line says a file was
+    /// sent and the file was kept with its line.
+    pub fn file_at_line(
+        &self,
+        g: &GroupId,
+        seq: u64,
+    ) -> Result<Option<socketchat_proto::msg::FileId>, CoreError> {
+        let id: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT id FROM files WHERE group_id = ?1 AND line_seq = ?2",
+                params![g.0.as_slice(), seq as i64],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id
+            .and_then(|b| <[u8; 16]>::try_from(b.as_slice()).ok())
+            .map(socketchat_proto::msg::FileId))
     }
 
     /// Files offered in a group, oldest first.

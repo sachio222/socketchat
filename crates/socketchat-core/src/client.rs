@@ -157,6 +157,9 @@ pub struct ChatLine {
     /// byte range, so a screen can make it stand out. `text` itself stays
     /// plain.
     pub command: Option<std::ops::Range<usize>>,
+    /// In a line that says a file was sent, the file, so a screen can save
+    /// it on a click. `None` on lines kept before Socketchat linked them.
+    pub file: Option<socketchat_proto::msg::FileId>,
 }
 
 /// A file offered in a room, with who sent it and when.
@@ -171,6 +174,42 @@ pub struct SharedFile {
     /// When it arrived. 0 for a file that arrived before Socketchat kept
     /// the time.
     pub sent_unix: u64,
+}
+
+/// What `/save` takes to pick the file `id` among a room's `files`,
+/// oldest first: its name, in double quotes when it holds a space, and
+/// `:N` after it when more than one file has that name, N counting those
+/// files from the oldest.
+pub fn save_arg(files: &[SharedFile], id: socketchat_proto::msg::FileId) -> Option<String> {
+    use crate::sanitize::single_spaced;
+    let file = files.iter().find(|f| f.offer.id == id)?;
+    let name = single_spaced(&file.offer.name);
+    let same: Vec<&SharedFile> = files
+        .iter()
+        .filter(|f| single_spaced(&f.offer.name) == name)
+        .collect();
+    let shown = match name.contains(char::is_whitespace) {
+        true => format!("\"{name}\""),
+        false => name,
+    };
+    Some(match same.len() {
+        1 => shown,
+        _ => format!(
+            "{shown}:{}",
+            same.iter().position(|f| f.offer.id == id)? + 1
+        ),
+    })
+}
+
+/// A line that says someone sent a file, with how to save it: "Ada sent
+/// report.pdf (1.2 MB). Type /save report.pdf to save it to Downloads.",
+/// and where the command sits in it. `arg` is from [`save_arg`]; `folder`
+/// names where `/save` puts files.
+pub fn file_save_line(line: &str, arg: &str, folder: &str) -> (String, std::ops::Range<usize>) {
+    let head = format!("{line}. Type ");
+    let command = format!("/save {arg}");
+    let at = head.len()..head.len() + command.len();
+    (format!("{head}{command} to save it to {folder}."), at)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3504,7 +3543,7 @@ impl Client {
                 let mut offer = offer;
                 offer.name = crate::files::safe_name(&offer.name);
                 let now = self.now();
-                self.store.add_file(&gid, &offer, Some(&sender), now)?;
+                self.store.add_file(&gid, &offer, Some(&sender), now, seq)?;
                 let who = self.name_for(&gid, &sender);
                 let text = format!("{who} sent {} ({})", offer.name, human_size(offer.size));
                 self.store
@@ -3755,6 +3794,7 @@ impl Client {
             notice,
             topic: false,
             command: None,
+            file: None,
         }
     }
 
@@ -4313,6 +4353,9 @@ impl Client {
         );
         line.topic = topic;
         line.command = command;
+        if m.kind == kind::FILE {
+            line.file = self.store.file_at_line(gid, m.seq).ok().flatten();
+        }
         line
     }
 
@@ -5821,7 +5864,7 @@ impl Client {
         let seq = self.send_app(gid, &AppMsg::File(offer.clone())).await?;
         let me = self.my_group_key(gid);
         let now = self.now();
-        self.store.add_file(&gid, &offer, me.as_ref(), now)?;
+        self.store.add_file(&gid, &offer, me.as_ref(), now, seq)?;
         let text = format!("You sent {} ({})", offer.name, human_size(size));
         self.store
             .add_message(&gid, seq, me.as_ref(), kind::FILE, &text, now)?;
@@ -6628,5 +6671,70 @@ impl Client {
             .filter(|(g, _)| *g == gid)
             .map(|(_, k)| k.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::{file_save_line, save_arg, SharedFile};
+    use socketchat_proto::msg::FileId;
+
+    fn shared(id: u8, name: &str) -> SharedFile {
+        SharedFile {
+            offer: crate::files::FileOffer {
+                id: FileId([id; 16]),
+                name: name.into(),
+                size: 1,
+                mime: "application/octet-stream".into(),
+                sha256: [0; 32],
+                key: [0; 32],
+                nonce_prefix: [0; 19],
+            },
+            from: "Ada".into(),
+            mine: false,
+            sent_unix: 0,
+        }
+    }
+
+    #[test]
+    fn save_arg_is_the_name_quoted_when_spaced_and_numbered_when_shared() {
+        let files = [
+            shared(1, "report.pdf"),
+            shared(2, "my plan.txt"),
+            shared(3, "notes.txt"),
+            shared(4, "notes.txt"),
+            shared(5, "my  plan.txt"),
+        ];
+        let arg = |id: u8| save_arg(&files, FileId([id; 16]));
+        assert_eq!(arg(1).as_deref(), Some("report.pdf"));
+        assert_eq!(arg(3).as_deref(), Some("notes.txt:1"));
+        assert_eq!(arg(4).as_deref(), Some("notes.txt:2"));
+        assert_eq!(arg(2).as_deref(), Some("\"my plan.txt\":1"));
+        assert_eq!(arg(5).as_deref(), Some("\"my plan.txt\":2"));
+        assert_eq!(arg(9), None);
+        assert_eq!(
+            save_arg(&files[..2], FileId([2; 16])).as_deref(),
+            Some("\"my plan.txt\"")
+        );
+    }
+
+    #[test]
+    fn a_file_line_says_how_to_save_it_and_marks_the_command() {
+        let (text, at) = file_save_line("Ada sent report.pdf (1.2 MB)", "report.pdf", "Downloads");
+        assert_eq!(
+            text,
+            "Ada sent report.pdf (1.2 MB). Type /save report.pdf to save it to Downloads."
+        );
+        assert_eq!(&text[at], "/save report.pdf");
+        let (text, at) = file_save_line(
+            "Bo sent my plan.txt (3 bytes)",
+            "\"my plan.txt\":2",
+            "Downloads",
+        );
+        assert_eq!(
+            text,
+            "Bo sent my plan.txt (3 bytes). Type /save \"my plan.txt\":2 to save it to Downloads."
+        );
+        assert_eq!(&text[at], "/save \"my plan.txt\":2");
     }
 }

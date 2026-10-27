@@ -57,6 +57,7 @@ fn crew() -> ViewModel {
         topic: None,
         invite_names: vec![],
         join_rooms: vec![],
+        save_files: vec![],
     }
 }
 

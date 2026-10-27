@@ -27,6 +27,7 @@ fn vm() -> ViewModel {
             mine: true,
             topic: false,
             command: None,
+            file: None,
         }],
         members: vec![MemberLine {
             key: Key([1; 32]),
@@ -41,6 +42,7 @@ fn vm() -> ViewModel {
         topic: None,
         invite_names: vec![],
         join_rooms: vec![],
+        save_files: vec![],
     }
 }
 

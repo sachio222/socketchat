@@ -11,7 +11,8 @@ use socketchat_core::client::human_size;
 use socketchat_core::files::{fill, safe_name, sniff, Kind};
 use socketchat_core::sanitize::MAX_TEXT_BYTES;
 
-use super::{ended_hint, Action, App, Focus};
+use super::{ended_hint, word_matches, Action, App, Focus};
+use crate::commands::parse_command;
 use crate::ui::ViewModel;
 
 /// What `/send` makes of a file, as its placeholder names it.
@@ -496,6 +497,55 @@ impl App {
         Some(vec![])
     }
 
+    /// Enter on words that are nothing but paths to things on this
+    /// computer, as a terminal that types a drop instead of pasting it
+    /// leaves them: the paths never go to the room. Their files become
+    /// placeholders, as a drop makes them, and the bottom line says so,
+    /// so the next Enter sends the files. `None` leaves Enter to send or
+    /// run what the box holds: a message that mentions a path among other
+    /// words, or a command.
+    pub(super) fn enter_paths(&mut self) -> Option<Vec<Action>> {
+        let shown = self.attachments();
+        // The words after the placeholders; before and between them, only
+        // spaces.
+        let end = shown
+            .iter()
+            .map(|a| a.at + a.label().len())
+            .max()
+            .unwrap_or(0);
+        let mut head = self.input[..end].to_string();
+        for a in &shown {
+            head = head.replacen(&a.label(), "", 1);
+        }
+        let text = self.input[end..].trim().to_string();
+        if !head.trim().is_empty() || text.is_empty() {
+            return None;
+        }
+        let paths = dropped_paths(&text)?;
+        // A Unix path starts as a command does: only a file, and only when
+        // no command has that name, counts as a path.
+        if text.starts_with('/') {
+            let command = match parse_command(&text) {
+                Ok(_) => true,
+                Err(e) => !e.starts_with("There is no") || word_matches("", &text).len() == 1,
+            };
+            if command || !paths.iter().all(|p| p.is_file()) {
+                return None;
+            }
+        }
+        self.input.truncate(end);
+        self.paste_files(&text)?;
+        let stays = match paths.len() {
+            1 => "The path stays on this computer.",
+            _ => "The paths stay on this computer.",
+        };
+        self.status = Some(match self.status.take() {
+            Some(said) => format!("{stays} {said}"),
+            None => stays.to_string(),
+        });
+        Some(vec![])
+    }
+
     /// Backspace at the end of a placeholder removes it whole, and its
     /// file. Whether it did.
     pub(super) fn backspace_attachment(&mut self) -> bool {
@@ -724,6 +774,30 @@ mod tests {
                 find("/u/a/beach.jpg\n/u/a/Bo\\'s.png"),
                 paths(&["/u/a/beach.jpg", "/u/a/Bo's.png"])
             );
+        }
+
+        /// Other forms a macOS terminal may write a drop in: a link from
+        /// `localhost`, quoted paths one per line, and a path with only a
+        /// line break after it.
+        #[test]
+        fn more_forms_macos_terminals_may_write() {
+            assert_eq!(
+                find("file://localhost/u/a/beach.jpg"),
+                paths(&["/u/a/beach.jpg"])
+            );
+            assert_eq!(
+                find("file:///u/a/My Photo (1).jpg\n"),
+                paths(&["/u/a/My Photo (1).jpg"])
+            );
+            assert_eq!(
+                find("'/u/a/My Photo (1).jpg'\n'/u/a/Bo'\\''s.png'\n"),
+                paths(&["/u/a/My Photo (1).jpg", "/u/a/Bo's.png"])
+            );
+            assert_eq!(
+                find("/u/a/My\\ Photo\\ \\(1\\).jpg\r\n/u/a/beach.jpg\r\n"),
+                paths(&["/u/a/My Photo (1).jpg", "/u/a/beach.jpg"])
+            );
+            assert_eq!(find("\n/u/a/beach.jpg\n"), paths(&["/u/a/beach.jpg"]));
         }
 
         #[test]

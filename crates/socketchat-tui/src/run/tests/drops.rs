@@ -220,3 +220,76 @@ async fn a_dropped_video_asks_first() {
         Some("hi".into())
     );
 }
+
+/// The words in room `g` on Bo's screen, oldest first.
+fn texts(s: &Screen, g: GroupId) -> Vec<String> {
+    s.client
+        .messages(g, 50)
+        .into_iter()
+        .map(|l| l.text)
+        .collect()
+}
+
+/// A terminal that types a dropped path instead of pasting it leaves the
+/// path in the box as typed text. Enter never sends it: the file waits as
+/// a placeholder, and the next Enter sends the file.
+#[tokio::test]
+async fn a_typed_path_to_a_file_is_attached_and_never_sent_as_text() {
+    let srv = TestServer::start().await;
+    let (g, _a, mut bo, _dir) = room_with_bo(&srv).await;
+    bo.act(Action::Select(g)).await;
+    let (d, p) = files(&[("notes one.txt", b"one"), ("list.csv", b"a,b")]);
+    let before = texts(&bo, g);
+    // As this system's terminals write it, and as the plain path.
+    for typed in [dropped(&p[..1]), p[0].display().to_string()] {
+        type_text(&mut bo, &typed).await;
+        press(&mut bo, KeyCode::Enter).await;
+        assert_eq!(texts(&bo, g), before, "nothing went: {typed:?}");
+        assert_eq!(bo.app.input, "[File 1] ");
+        assert_eq!(
+            bo.app.status.as_deref(),
+            Some("The path stays on this computer. File 1 is notes one.txt, 3 bytes. Enter sends it.")
+        );
+        press(&mut bo, KeyCode::Esc).await;
+    }
+    // A second path typed after the first file's placeholder joins it.
+    type_text(&mut bo, &p[0].display().to_string()).await;
+    press(&mut bo, KeyCode::Enter).await;
+    type_text(&mut bo, &p[1].display().to_string()).await;
+    press(&mut bo, KeyCode::Enter).await;
+    assert_eq!(bo.app.input, "[File 1] [File 2] ");
+    press(&mut bo, KeyCode::Enter).await;
+    assert_eq!(sent_names(&bo, g), vec!["notes one.txt", "list.csv"]);
+    let dir = d.path().display().to_string();
+    assert!(
+        !texts(&bo, g).iter().any(|l| l.contains(&dir)),
+        "no path reaches the room"
+    );
+}
+
+/// Words around a path, a path to nothing, and commands go as before.
+#[tokio::test]
+async fn a_path_among_words_and_commands_go_as_before() {
+    let srv = TestServer::start().await;
+    let (g, _a, mut bo, _dir) = room_with_bo(&srv).await;
+    bo.act(Action::Select(g)).await;
+    let (d, p) = files(&[("a.txt", b"one")]);
+    let words = format!("the notes are in {}", p[0].display());
+    type_text(&mut bo, &words).await;
+    press(&mut bo, KeyCode::Enter).await;
+    assert_eq!(texts(&bo, g).last(), Some(&words));
+    let gone = d.path().join("gone.txt").display().to_string();
+    let gone_text = if gone.starts_with('/') {
+        format!("'{gone}'")
+    } else {
+        gone.clone()
+    };
+    type_text(&mut bo, &gone_text).await;
+    press(&mut bo, KeyCode::Enter).await;
+    assert_eq!(texts(&bo, g).last(), Some(&gone_text));
+    assert!(bo.app.attachments().is_empty());
+    // `/send` with the path runs as a command.
+    type_text(&mut bo, &format!("/send {}", p[0].display())).await;
+    press(&mut bo, KeyCode::Enter).await;
+    assert_eq!(sent_names(&bo, g), vec!["a.txt"]);
+}

@@ -14,13 +14,16 @@ Photos get one extra step before sending: your app removes the hidden data descr
 
 In the chat screen, type:
 
-- `/send <path>` to send a file, photo or video to the chat you have open. For example: `/send ~/Pictures/beach.jpg`
-- `/save <file>` to save a file someone sent, using the name shown in the chat. It goes to your Downloads folder.
+- `/send <path>` to send a file, photo or video to the chat you have open. For example: `/send ~/Pictures/beach.jpg`. You can also drag a file onto the window: the message box shows `[File 1]`, and Enter sends it.
+- `/save` to save the newest file someone else sent in the chat. It goes to your Downloads folder.
+- `/save <file>` to save a file by the name shown in the chat. `/save ` and Tab, or Up and Down, go through the chat's files, newest first.
 - `/save <file> <folder>` to save it somewhere else. For example: `/save beach.jpg ~/Desktop`
 
-The status line then says whose file you saved and where it went, for example "Saved Ana's beach.jpg to ~/Downloads/beach.jpg".
+The line that says someone sent a file also says how to save it, for example "Ana sent beach.jpg (2.1 MB). Type /save beach.jpg to save it to Downloads." While the mouse is on, a click on that line saves the file to Downloads, and a second click says where it went. After a save, a line that only you see says where the file went, for example "Saved beach.jpg to ~/Downloads/beach.jpg." On a computer with no Downloads folder, files go to the folder Socketchat started in, and the lines say so.
 
-When more than one file in the chat has the same name, `/save` saves nothing. It lists the three newest instead, each with a number, the person who sent it and the time it arrived, and gives the numbers of any older ones. Add the number after a colon to save that one, for example `/save beach.jpg:2`. Put a name with spaces in quotes: `/save "beach day.jpg":2`.
+Enter never sends the path of a file on your computer as a message. Some terminals type a dropped file's path instead of pasting it; when the message box holds nothing but such a path, Enter attaches the file as `[File 1]`, and the next Enter sends it.
+
+When more than one file in the chat has the same name, `/save` saves nothing. It lists the three newest instead, each with a number, the person who sent it and the time it arrived, and gives the numbers of any older ones. Add the number after a colon to save that one, for example `/save beach.jpg:2`. Put a name with spaces in quotes: `/save "beach day.jpg":2`. The line for each file already shows the command that saves it.
 
 Saving never replaces a file you already have. If `beach.jpg` exists, the new one becomes `beach (1).jpg`. On macOS and Linux, a saved file can be read only by your account.
 

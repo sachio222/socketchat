@@ -34,8 +34,10 @@ pub enum Command {
     New(String),
     Dm(String),
     Send(String),
+    /// Save the file named, or with none, the newest file someone else
+    /// sent, in `dir` or the default folder.
     Save {
-        file: String,
+        file: Option<String>,
         dir: Option<String>,
     },
     Verify(String),
@@ -118,7 +120,10 @@ pub const HELP: &[(&str, &str)] = &[
         "/send <path>",
         "send a file, photo or video, or drag one onto the window",
     ),
-    ("/save <file> [folder]", "save a file someone sent"),
+    (
+        "/save [file] [folder]",
+        "save a file someone sent, to Downloads or [folder]; Tab completes the name",
+    ),
     ("/verify <name>", "compare safety numbers with someone"),
     ("/rename <name> <new>", "rename someone on your screen only"),
     ("/name <new>", "change the name others see for you"),
@@ -196,7 +201,7 @@ pub fn help_entries() -> Vec<(&'static str, &'static str)> {
 }
 
 /// What picking a help row puts in the message box: the row without its
-/// placeholders, so `/save <file> [folder]` gives `/save` and
+/// placeholders, so `/save [file] [folder]` gives `/save` and
 /// `/settings slow` stays whole.
 pub fn command_of(usage: &str) -> String {
     usage
@@ -281,13 +286,17 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         "/new" => Command::New(need("/new <name>")?),
         "/dm" => Command::Dm(need("/dm <name>")?),
         "/send" => Command::Send(need("/send <path>")?),
+        "/save" if rest.is_empty() => Command::Save {
+            file: None,
+            dir: None,
+        },
         "/save" => {
-            let w = words(&need("/save <file> [folder]")?);
+            let w = words(rest);
             if w.first().is_none_or(|f| f.trim().is_empty()) {
-                return Err("Usage: /save <file> [folder]".into());
+                return Err("Usage: /save [file] [folder]".into());
             }
             Command::Save {
-                file: w[0].clone(),
+                file: Some(w[0].clone()),
                 dir: (w.len() > 1).then(|| w[1..].join(" ")),
             }
         }
@@ -469,12 +478,19 @@ mod tests {
 
     #[test]
     fn save_with_an_empty_name_is_a_usage_error() {
+        assert_eq!(
+            parse_command("/save"),
+            Ok(Command::Save {
+                file: None,
+                dir: None
+            })
+        );
         assert!(parse_command("/save \"\"").is_err());
         assert!(parse_command("/save \"   \"").is_err());
         assert_eq!(
             parse_command("/save \"my file.txt\":2 ~/Desktop"),
             Ok(Command::Save {
-                file: "my file.txt:2".into(),
+                file: Some("my file.txt:2".into()),
                 dir: Some("~/Desktop".into()),
             })
         );

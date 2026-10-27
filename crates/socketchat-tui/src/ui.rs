@@ -46,6 +46,9 @@ pub struct LineView {
     /// In an invite line, where in `text` the command to type sits, as a
     /// byte range: drawn in the command style, and copied as plain text.
     pub command: Option<std::ops::Range<usize>>,
+    /// In a line that says someone else sent a file, the file: a click on
+    /// the line saves it.
+    pub file: Option<socketchat_proto::msg::FileId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +82,9 @@ pub struct ViewModel {
     /// While the message box holds `/join`: what `/join` takes for each
     /// invite that waits, newest first, from [`crate::app::join_choices`].
     pub join_rooms: Vec<String>,
+    /// While the message box holds `/save`: what `/save` takes for each
+    /// file in the open room, newest first, for Tab and Up and Down.
+    pub save_files: Vec<String>,
 }
 
 const SIDE: u16 = 20;
@@ -798,6 +804,22 @@ pub(crate) fn message_body(vm: &ViewModel, w: usize, need: usize) -> Vec<TextRow
         .collect()
 }
 
+/// Which of the messages holds row `row` at `w` characters wide, rows
+/// counting back from the newest, which is -1.
+pub(crate) fn line_at_row(vm: &ViewModel, w: usize, row: i64) -> Option<usize> {
+    let back = usize::try_from(row.checked_neg()?)
+        .ok()
+        .filter(|b| *b > 0)?;
+    let mut rows = 0;
+    for (i, l) in vm.lines.iter().enumerate().rev() {
+        rows += message_text_rows(&message_head(l), l, w).len();
+        if back <= rows {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// The oldest of `lines` a draw needs: walking back from the newest, the
 /// first message by which the rows reach `need`, the window's height plus
 /// how far it is scrolled up. Older messages cannot reach the screen.
@@ -1447,6 +1469,7 @@ mod tests {
             mine: false,
             topic: false,
             command: None,
+            file: None,
         }
     }
 
@@ -1468,6 +1491,7 @@ mod tests {
             topic: None,
             invite_names: vec![],
             join_rooms: vec![],
+            save_files: vec![],
         }
     }
 

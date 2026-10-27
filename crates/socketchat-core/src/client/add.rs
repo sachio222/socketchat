@@ -1175,6 +1175,17 @@ impl Client {
         self.add_line(gid, last, text, None).map(|_| ())
     }
 
+    /// Puts a notice in room `gid` on this computer only, such as where a
+    /// file was saved. Nothing goes to the room.
+    pub fn add_local_notice(&mut self, gid: GroupId, text: &str) -> Result<(), CoreError> {
+        let last = self
+            .groups
+            .get(&gid)
+            .map(|g| g.row.last_seq)
+            .ok_or_else(|| CoreError::Other("you are not in that group".into()))?;
+        self.add_notice(gid, last, text.to_string())
+    }
+
     /// A notice, or with `command`, an invite line whose command to type
     /// sits there in `text`; the place it took.
     fn add_line(

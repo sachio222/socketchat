@@ -19,7 +19,8 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use socketchat_core::client::{
-    invite_line, server_text, Client, Event, GroupSummary, SendOutcome, UpdateCheck, Verification,
+    file_save_line, invite_line, save_arg, server_text, Client, Event, GroupSummary, SendOutcome,
+    UpdateCheck, Verification,
 };
 use socketchat_core::close::{close_needed, CloseOutcome};
 use socketchat_core::keys::{fingerprint_text, Key};
@@ -69,6 +70,7 @@ enum Pending {
 }
 
 mod dropped;
+mod saving;
 
 struct Screen {
     client: Client,
@@ -102,6 +104,10 @@ struct Screen {
     copies_running: usize,
     /// The update check under way, if one is.
     update_check: Option<UpdateCheck>,
+    /// Where `/save` and a click on a file line put files.
+    save_dir: saving::SaveDir,
+    /// Where each file a click saved went, so a second click says so.
+    saved: HashMap<socketchat_proto::msg::FileId, PathBuf>,
 }
 
 /// A program that puts text on the clipboard, shared with the thread that
@@ -313,6 +319,8 @@ impl Screen {
             copies: mpsc::unbounded_channel(),
             copies_running: 0,
             update_check: None,
+            save_dir: saving::SaveDir::system(),
+            saved: HashMap::new(),
         }
     }
 
@@ -396,10 +404,16 @@ impl Screen {
                 ended: g.ended,
             })
             .collect();
+        let saving = self.app.input.starts_with("/save");
+        let mut files = vec![];
         let (lines, members) = match self.app.selected {
             Some(g) => {
                 let members = self.client.members(g);
                 let chat = self.client.messages(g, SHOWN_LINES);
+                // Read only when a line or the message box needs them.
+                if saving || chat.iter().any(|l| l.file.is_some()) {
+                    files = self.client.shared_files(g);
+                }
                 let others_verified = members.iter().any(|m| !m.me && m.verified);
                 let is_dm = self.summary(g).is_some_and(|s| s.is_dm);
                 // The room's encryption line, when it falls among the lines
@@ -416,6 +430,7 @@ impl Screen {
                             mine: false,
                             topic: false,
                             command: None,
+                            file: None,
                         };
                         (at, line)
                     })
@@ -442,6 +457,19 @@ impl Screen {
                             }
                             false => l.text,
                         };
+                        // A file someone else sent says how to save it, and
+                        // a click on it saves it.
+                        let save = l
+                            .file
+                            .filter(|_| !mine)
+                            .and_then(|id| Some((id, save_arg(&files, id)?)));
+                        let (text, command, file) = match save {
+                            Some((id, arg)) => {
+                                let (text, at) = file_save_line(&text, &arg, &self.save_dir.label);
+                                (text, Some(at), Some(id))
+                            }
+                            None => (text, l.command, None),
+                        };
                         LineView {
                             time: local_time(l.sent_unix),
                             mine,
@@ -449,7 +477,8 @@ impl Screen {
                             text,
                             notice: l.notice,
                             topic: l.topic,
-                            command: l.command,
+                            command,
+                            file,
                         }
                     })
                     .collect();
@@ -499,6 +528,14 @@ impl Screen {
                         .collect();
                     join_choices(&waiting)
                 }
+                false => vec![],
+            },
+            save_files: match saving {
+                true => files
+                    .iter()
+                    .rev()
+                    .filter_map(|f| save_arg(&files, f.offer.id))
+                    .collect(),
                 false => vec![],
             },
         }
@@ -829,6 +866,7 @@ impl Screen {
                 Ok(())
             }
             Action::Send(g, text) => self.send_text(g, text).await,
+            Action::SaveFile(g, id) => self.click_save(g, id).await,
             Action::SendDrop(g) => self.send_drop(g).await,
             // The room the question was asked in, whatever is open now.
             Action::ConfirmVideo(g, path) => self
@@ -1228,28 +1266,8 @@ impl Screen {
             }
             Command::Save { file, dir } => {
                 let g = need()?;
-                let files = self.client.shared_files(g);
-                let picked = crate::commands::pick_file(&files, &file, local_time)?;
-                let dir = match dir {
-                    Some(d) => expand(&d),
-                    None => directories::UserDirs::new()
-                        .and_then(|u| u.download_dir().map(PathBuf::from))
-                        .unwrap_or_else(|| PathBuf::from(".")),
-                };
-                let saved = self
-                    .client
-                    .save_file(g, picked.offer.id, &dir)
-                    .await
-                    .map_err(e)?;
-                let whose = match picked.mine {
-                    true => "your".to_string(),
-                    false => format!("{}'s", picked.from),
-                };
-                self.app.status = Some(format!(
-                    "Saved {whose} {} to {}",
-                    picked.offer.name,
-                    saved.display()
-                ));
+                self.save_command(g, file, dir.as_deref().map(expand))
+                    .await?;
             }
             Command::Verify(name) => {
                 let g = need()?;
@@ -2016,6 +2034,7 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     mod drops;
+    mod saves;
 
     use super::{clock_time, to_base64, Action, Screen};
     use crate::app::Modal;
@@ -2306,7 +2325,13 @@ mod tests {
             .await
             .unwrap();
         client.join(&s.server_invite()).await.unwrap();
-        (Screen::new(client), dir)
+        let mut screen = Screen::new(client);
+        // Never the person's own Downloads folder.
+        screen.save_dir = super::saving::SaveDir {
+            path: dir.path().join("Downloads"),
+            label: "Downloads".into(),
+        };
+        (screen, dir)
     }
 
     /// Ada's room "Room", with Bo (on a screen) in it.
@@ -3584,7 +3609,7 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let folder = Some(out.path().display().to_string());
         let save = |file: &str| Command::Save {
-            file: file.into(),
+            file: Some(file.into()),
             dir: folder.clone(),
         };
         let err = bo.command(save("setup.sh")).await.unwrap_err();
@@ -3596,17 +3621,14 @@ mod tests {
         assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
         // The one Ada sent, picked by its number.
         bo.command(save("setup.sh:1")).await.unwrap();
-        let status = bo.app.status.clone().unwrap();
-        assert!(status.starts_with("Saved Ada's setup.sh to "), "{status}");
         let saved = out.path().join("setup.sh");
         assert_eq!(std::fs::read(&saved).unwrap(), b"from Ada");
+        assert_eq!(last_line(&bo, g), saved_line("setup.sh", &saved));
         bo.command(save("setup.sh:2")).await.unwrap();
-        assert!(bo
-            .app
-            .status
-            .clone()
-            .unwrap()
-            .starts_with("Saved Mo's setup.sh"));
+        assert_eq!(
+            last_line(&bo, g),
+            saved_line("setup.sh", &out.path().join("setup (1).sh"))
+        );
         assert_eq!(
             std::fs::read(out.path().join("setup (1).sh")).unwrap(),
             b"from Mo"
@@ -3635,7 +3657,7 @@ mod tests {
         }
         let out = tempfile::tempdir().unwrap();
         bo.command(Command::Save {
-            file: "a.txt:1".into(),
+            file: Some("a.txt:1".into()),
             dir: Some(out.path().display().to_string()),
         })
         .await
@@ -3646,8 +3668,25 @@ mod tests {
         );
     }
 
+    /// The newest line in room `g` on Bo's screen.
+    fn last_line(s: &Screen, g: GroupId) -> String {
+        s.client
+            .messages(g, 1)
+            .pop()
+            .map(|l| l.text)
+            .unwrap_or_default()
+    }
+
+    /// The line a save puts in the room.
+    fn saved_line(name: &str, at: &std::path::Path) -> String {
+        format!(
+            "Saved {name} to {}.",
+            super::saving::shown_path(at, super::saving::home().as_deref())
+        )
+    }
+
     #[tokio::test]
-    async fn a_single_file_saves_by_name_and_says_who_sent_it() {
+    async fn a_single_file_saves_by_name_and_says_where() {
         let srv = TestServer::start().await;
         let (g, mut a, mut bo, _dir) = room_with_bo(&srv).await;
         bo.act(Action::Select(g)).await;
@@ -3660,16 +3699,18 @@ mod tests {
         }
         let out = tempfile::tempdir().unwrap();
         bo.command(Command::Save {
-            file: "notes.txt".into(),
+            file: Some("notes.txt".into()),
             dir: Some(out.path().display().to_string()),
         })
         .await
         .unwrap();
-        let status = bo.app.status.clone().unwrap();
-        assert!(status.starts_with("Saved Ada's notes.txt to "), "{status}");
+        assert_eq!(
+            last_line(&bo, g),
+            saved_line("notes.txt", &out.path().join("notes.txt"))
+        );
         let err = bo
             .command(Command::Save {
-                file: "other.txt".into(),
+                file: Some("other.txt".into()),
                 dir: None,
             })
             .await

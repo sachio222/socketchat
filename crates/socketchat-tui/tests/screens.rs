@@ -57,10 +57,10 @@ fn crew() -> ViewModel {
             GroupView { id: g(3), name: "Climbing Saturdays".into(), unread: 12, is_dm: false, muted: false, ended: None },
         ],
         lines: vec![
-            LineView { time: "09:14:05".into(), sender: "Ada".into(), text: "Who is bringing the book list?".into(), notice: false, mine: true, topic: false, command: None  },
-            LineView { time: "09:15:12".into(), sender: "Bo".into(), text: "Me. Sending it now.".into(), notice: false, mine: false, topic: false, command: None  },
-            LineView { time: "09:15:40".into(), sender: String::new(), text: "Bo sent books.pdf (84 KB)".into(), notice: true, mine: false, topic: false, command: None  },
-            LineView { time: "09:16:58".into(), sender: "Cy".into(), text: "Got it, thanks. Saturday still works for me, and I can bring snacks for everyone.".into(), notice: false, mine: false, topic: false, command: None  },
+            LineView { time: "09:14:05".into(), sender: "Ada".into(), text: "Who is bringing the book list?".into(), notice: false, mine: true, topic: false, command: None, file: None },
+            LineView { time: "09:15:12".into(), sender: "Bo".into(), text: "Me. Sending it now.".into(), notice: false, mine: false, topic: false, command: None, file: None },
+            LineView { time: "09:15:40".into(), sender: String::new(), text: "Bo sent books.pdf (84 KB)".into(), notice: true, mine: false, topic: false, command: None, file: None },
+            LineView { time: "09:16:58".into(), sender: "Cy".into(), text: "Got it, thanks. Saturday still works for me, and I can bring snacks for everyone.".into(), notice: false, mine: false, topic: false, command: None, file: None },
         ],
         members: vec![
             MemberLine { key: k(1), name: "Ada".into(), verified: true, admin: true, me: true, changed_key: false },
@@ -72,6 +72,7 @@ fn crew() -> ViewModel {
         topic: None,
         invite_names: vec![],
         join_rooms: vec![],
+        save_files: vec![],
     }
 }
 
@@ -88,16 +89,23 @@ fn parse_every_command() {
         ("/dm Bo", Command::Dm("Bo".into())),
         ("/send ~/photo.jpg", Command::Send("~/photo.jpg".into())),
         (
+            "/save",
+            Command::Save {
+                file: None,
+                dir: None,
+            },
+        ),
+        (
             "/save books.pdf",
             Command::Save {
-                file: "books.pdf".into(),
+                file: Some("books.pdf".into()),
                 dir: None,
             },
         ),
         (
             "/save books.pdf ~/Desktop",
             Command::Save {
-                file: "books.pdf".into(),
+                file: Some("books.pdf".into()),
                 dir: Some("~/Desktop".into()),
             },
         ),
@@ -173,6 +181,7 @@ fn screen_empty_first_run() {
         topic: None,
         invite_names: vec![],
         join_rooms: vec![],
+        save_files: vec![],
     };
     insta::assert_snapshot!(render(&App::new(), &vm, 80, 24));
 }
@@ -2486,6 +2495,7 @@ fn topic_crew(topic: &str) -> ViewModel {
         mine: true,
         topic: true,
         command: None,
+        file: None,
     });
     vm
 }
@@ -2943,6 +2953,7 @@ fn encryption_notice(state: &JoinCheck, is_dm: bool, others_verified: bool) -> L
         mine: false,
         topic: false,
         command: None,
+        file: None,
     }
 }
 
@@ -3134,6 +3145,7 @@ fn screen_someone_new_under_a_verified_name() {
         mine: false,
         topic: false,
         command: None,
+        file: None,
     });
     let s = render(&app, &vm, 80, 24);
     assert!(s.contains(" People ! check "), "{s}");
@@ -3896,6 +3908,7 @@ fn invited_crew() -> ViewModel {
         mine: false,
         topic: false,
         command: Some(at..INVITE.len() - " to join.".len()),
+        file: None,
     });
     vm
 }
@@ -4376,5 +4389,154 @@ fn help_box_says_ctrl_c_twice_quits() {
     assert!(
         text.contains("Ctrl-C Ctrl-C quit; one Ctrl-C copies the text you selected"),
         "{s}"
+    );
+}
+
+// ---------- saving files ----------
+
+/// Book club, where Bo sent a file, as the screen shows it once the line
+/// says how to save it.
+const FILE_LINE: &str =
+    "Bo sent report.pdf (1.2 MB). Type /save report.pdf to save it to Downloads.";
+
+fn filed_crew() -> ViewModel {
+    let mut vm = crew();
+    let at = FILE_LINE.find("/save").unwrap();
+    vm.lines.push(LineView {
+        time: "09:17:30".into(),
+        sender: String::new(),
+        text: FILE_LINE.into(),
+        notice: true,
+        mine: false,
+        topic: false,
+        command: Some(at..at + "/save report.pdf".len()),
+        file: Some(socketchat_proto::msg::FileId([7; 16])),
+    });
+    vm.save_files = vec![
+        "\"my plan.txt\"".into(),
+        "report.pdf:2".into(),
+        "report.pdf:1".into(),
+        "notes.txt".into(),
+    ];
+    vm
+}
+
+#[test]
+fn the_file_line_makes_its_save_command_stand_out() {
+    let theme = Theme::phosphor(ColorSupport::TrueColor);
+    let mut app = App::new();
+    app.theme = theme.clone();
+    app.selected = Some(g(1));
+    let vm = filed_crew();
+    let s = render(&app, &vm, 140, 24);
+    assert!(s.contains(FILE_LINE), "{s}");
+    let buf = drawn(&app, &vm, 140, 24);
+    let (x, y) = find_text(&buf, 140, 24, "/save report.pdf").unwrap();
+    for i in 0.."/save report.pdf".chars().count() as u16 {
+        let c = &buf[(x + i, y)];
+        assert_eq!(c.fg, theme.command.fg.unwrap(), "{:?}", c.symbol());
+        assert!(c.modifier.contains(Modifier::BOLD), "{:?}", c.symbol());
+    }
+    let after = &buf[(x + 17, y)];
+    assert_eq!(after.symbol(), "t");
+    assert_eq!(Some(after.fg), theme.notice.fg);
+}
+
+#[test]
+fn tab_after_save_goes_through_the_rooms_files_newest_first() {
+    let vm = filed_crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    type_text(&mut app, &vm, "/save ");
+    let mut seen = vec![];
+    for _ in 0..5 {
+        tab(&mut app, &vm);
+        seen.push(app.input.clone());
+    }
+    assert_eq!(
+        seen,
+        [
+            "/save \"my plan.txt\"",
+            "/save report.pdf:2",
+            "/save report.pdf:1",
+            "/save notes.txt",
+            "/save \"my plan.txt\"",
+        ]
+    );
+    back_tab(&mut app, &vm);
+    assert_eq!(app.input, "/save notes.txt");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Save {
+            file: Some("notes.txt".into()),
+            dir: None,
+        })]
+    );
+}
+
+#[test]
+fn up_and_down_after_save_step_through_the_files_that_fit() {
+    let vm = filed_crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    type_text(&mut app, &vm, "/save rep");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/save report.pdf:2");
+    down(&mut app, &vm);
+    assert_eq!(app.input, "/save report.pdf:1");
+    up(&mut app, &vm);
+    assert_eq!(app.input, "/save report.pdf:2");
+    // A quoted start, and the ghost after the cursor.
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/save \"my");
+    assert_eq!(app.ghost(&vm).as_deref(), Some(" plan.txt\""));
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/save \"my plan.txt\"");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Save {
+            file: Some("my plan.txt".into()),
+            dir: None,
+        })]
+    );
+}
+
+#[test]
+fn tab_after_save_says_when_no_file_fits() {
+    let vm = filed_crew();
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/save zip");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/save zip");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("No file called zip in this chat.")
+    );
+    let mut app = App::new();
+    type_text(&mut app, &crew(), "/save ");
+    tab(&mut app, &crew());
+    assert_eq!(
+        app.status.as_deref(),
+        Some("No one has sent a file in this chat yet.")
+    );
+    // A name and a folder is not a name to complete.
+    let mut app = App::new();
+    type_text(&mut app, &vm, "/save notes.txt ~/Desktop");
+    tab(&mut app, &vm);
+    assert_eq!(app.input, "/save notes.txt ~/Desktop");
+}
+
+#[test]
+fn save_alone_runs_at_enter() {
+    let vm = filed_crew();
+    let mut app = App::new();
+    app.selected = Some(g(1));
+    type_text(&mut app, &vm, "/save");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter), &vm),
+        vec![Action::Command(Command::Save {
+            file: None,
+            dir: None,
+        })]
     );
 }

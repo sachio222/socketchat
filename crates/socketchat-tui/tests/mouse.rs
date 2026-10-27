@@ -36,6 +36,7 @@ fn line(n: usize) -> LineView {
         mine: false,
         topic: false,
         command: None,
+        file: None,
     }
 }
 
@@ -61,6 +62,7 @@ fn crew() -> ViewModel {
         topic: None,
         invite_names: vec![],
         join_rooms: vec![],
+        save_files: vec![],
     }
 }
 
@@ -925,6 +927,7 @@ fn an_invite_line_copies_as_plain_text() {
         text: text.into(),
         notice: true,
         command: Some(at..text.len() - " to join.".len()),
+        file: None,
         ..line(0)
     }];
     let (mut app, buf) = open(&vm);
@@ -952,4 +955,100 @@ fn ctrl_c_copies_a_selection_before_it_quits() {
     assert!(app.handle_key(c, &vm).is_empty());
     assert_eq!(app.status.as_deref(), Some("Press Ctrl-C again to quit."));
     assert_eq!(app.handle_key(c, &vm), vec![Action::Quit]);
+}
+
+// ---------- a click on a file line saves it ----------
+
+const FILE_LINE: &str =
+    "Ada sent report.pdf (1.2 MB). Type /save report.pdf to save it to Downloads.";
+
+fn file_id(n: u8) -> socketchat_proto::msg::FileId {
+    socketchat_proto::msg::FileId([n; 16])
+}
+
+/// Book club with a line that says Ada sent a file, then Bo's message.
+fn with_a_file() -> ViewModel {
+    let at = FILE_LINE.find("/save").unwrap();
+    let mut vm = crew();
+    vm.lines = vec![
+        line(1),
+        LineView {
+            sender: String::new(),
+            text: FILE_LINE.into(),
+            notice: true,
+            command: Some(at..at + "/save report.pdf".len()),
+            file: Some(file_id(7)),
+            ..line(0)
+        },
+        line(2),
+    ];
+    vm
+}
+
+#[test]
+fn a_click_on_a_file_line_saves_that_file() {
+    let vm = with_a_file();
+    let (mut app, buf) = open(&vm);
+    let t = Instant::now();
+    for spot in [find(&buf, "Ada sent"), find(&buf, "Downloads.")] {
+        assert!(app.handle_mouse(press(spot), later(t), &vm).is_empty());
+        assert_eq!(
+            app.handle_mouse(release(spot), later(t), &vm),
+            vec![Action::SaveFile(g(1), file_id(7))]
+        );
+    }
+    assert_eq!(app.focus, Focus::Messages);
+    // Other lines only take focus, as before.
+    let at = find(&buf, "message 2");
+    app.handle_mouse(press(at), later(t), &vm);
+    assert!(app.handle_mouse(release(at), later(t), &vm).is_empty());
+}
+
+#[test]
+fn a_drag_over_a_file_line_copies_and_saves_nothing() {
+    let vm = with_a_file();
+    let (mut app, buf) = open(&vm);
+    let from = find(&buf, "Ada sent");
+    let to = right(find(&buf, "Ada sent"), 7);
+    assert_eq!(
+        select(&mut app, &vm, from, to),
+        vec![Action::CopySelected("Ada sent".into())]
+    );
+}
+
+#[test]
+fn a_file_line_you_sent_saves_nothing_on_a_click() {
+    let mut vm = with_a_file();
+    vm.lines[1].mine = true;
+    let (mut app, buf) = open(&vm);
+    let at = find(&buf, "Ada sent");
+    let t = Instant::now();
+    app.handle_mouse(press(at), later(t), &vm);
+    assert!(app.handle_mouse(release(at), later(t), &vm).is_empty());
+}
+
+#[test]
+fn with_the_mouse_off_a_click_on_a_file_line_saves_nothing() {
+    let vm = with_a_file();
+    let (mut app, buf) = open(&vm);
+    app.mouse = false;
+    let at = find(&buf, "Ada sent");
+    let t = Instant::now();
+    assert!(app.handle_mouse(press(at), later(t), &vm).is_empty());
+    assert!(app.handle_mouse(release(at), later(t), &vm).is_empty());
+}
+
+#[test]
+fn a_click_in_the_blank_space_under_the_lines_saves_nothing() {
+    let mut vm = with_a_file();
+    // The file line is the newest, and the panel is blank under it.
+    vm.lines.pop();
+    let (mut app, buf) = open(&vm);
+    let (x, y) = find(&buf, "save it to Downloads.");
+    let t = Instant::now();
+    app.handle_mouse(press((x, y + 3)), later(t), &vm);
+    assert!(app
+        .handle_mouse(release((x, y + 3)), later(t), &vm)
+        .is_empty());
+    assert_eq!(app.focus, Focus::Messages);
 }

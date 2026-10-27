@@ -227,6 +227,8 @@ async fn saved_names_never_overwrite_or_escape() {
     a.send_file(g, &p, false).await.unwrap();
     std::fs::write(&p, b"v2").unwrap();
     a.send_file(g, &p, false).await.unwrap();
+    std::fs::write(&p, b"v3").unwrap();
+    a.send_file(g, &p, false).await.unwrap();
     settle(&mut [&mut a, &mut b]).await;
     let out = tempfile::tempdir().unwrap();
     let mut saved = vec![];
@@ -237,7 +239,12 @@ async fn saved_names_never_overwrite_or_escape() {
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into())
         .collect();
-    assert_eq!(names, vec!["report.txt", "report (1).txt"]);
+    assert_eq!(
+        names,
+        vec!["report.txt", "report (1).txt", "report (2).txt"]
+    );
+    let read: Vec<Vec<u8>> = saved.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    assert_eq!(read, [b"v1".to_vec(), b"v2".to_vec(), b"v3".to_vec()]);
     assert!(saved.iter().all(|p| p.parent() == Some(out.path())));
 }
 
@@ -393,4 +400,60 @@ async fn jpeg_second_images_lose_their_location() {
     assert!(got.starts_with(b"\xff\xd8\xff"));
     assert!(!has(&got, b"SecretPhoneModel"));
     assert!(!has(&got, b"Exif\0\0"));
+}
+
+/// The line that says a file was sent names that file, on both sides, so
+/// a click on it can save exactly that one, and a notice written here
+/// stays here.
+#[tokio::test]
+async fn file_lines_name_their_file_and_local_notices_stay_local() {
+    let s = TestServer::start().await;
+    let (g, mut a, mut b) = pair(&s).await;
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("report.pdf");
+    std::fs::write(&p, b"one").unwrap();
+    let first = a.send_file(g, &p, false).await.unwrap();
+    std::fs::write(&p, b"two").unwrap();
+    let second = a.send_file(g, &p, false).await.unwrap();
+    settle(&mut [&mut a, &mut b]).await;
+    let file_lines = |c: &TestClient| -> Vec<(String, Option<socketchat_proto::msg::FileId>)> {
+        c.messages(g, 50)
+            .into_iter()
+            .filter(|l| l.file.is_some() || l.text.contains("sent report.pdf"))
+            .map(|l| (l.text, l.file))
+            .collect()
+    };
+    assert_eq!(
+        file_lines(&b),
+        [
+            ("Ada sent report.pdf (3 bytes)".to_string(), Some(first.id)),
+            ("Ada sent report.pdf (3 bytes)".to_string(), Some(second.id)),
+        ]
+    );
+    assert_eq!(
+        file_lines(&a),
+        [
+            ("You sent report.pdf (3 bytes)".to_string(), Some(first.id)),
+            ("You sent report.pdf (3 bytes)".to_string(), Some(second.id)),
+        ]
+    );
+    // What /save takes for each, as the line shows it.
+    let files = b.shared_files(g);
+    let arg = |id| socketchat_core::client::save_arg(&files, id);
+    assert_eq!(arg(first.id).as_deref(), Some("report.pdf:1"));
+    assert_eq!(arg(second.id).as_deref(), Some("report.pdf:2"));
+
+    b.add_local_notice(g, "Saved report.pdf to ~/Downloads/report.pdf.")
+        .unwrap();
+    let last = b.messages(g, 1).pop().unwrap();
+    assert_eq!(last.text, "Saved report.pdf to ~/Downloads/report.pdf.");
+    assert!(last.notice);
+    assert_eq!(last.file, None);
+    settle(&mut [&mut a, &mut b]).await;
+    assert!(
+        !a.messages(g, 50)
+            .iter()
+            .any(|l| l.text.starts_with("Saved report.pdf")),
+        "Ada never sees Bo's notice"
+    );
 }

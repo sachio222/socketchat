@@ -14,13 +14,13 @@ use socketchat_core::invite::hours_text;
 use socketchat_core::keys::{fingerprint_text, Key};
 use socketchat_core::sanitize::{direction_char, single_spaced, MAX_TEXT_BYTES};
 use socketchat_core::settings::{every, WhoCanInvite, WhoCanSetTopic};
-use socketchat_proto::msg::GroupId;
+use socketchat_proto::msg::{FileId, GroupId};
 use socketchat_proto::Token;
 
 use crate::commands::{command_of, command_words, help_entries, parse_command, Command};
 use crate::select::{ordered, picked, Area, Spot, TextArea};
 use crate::theme::{Theme, THEMES};
-use crate::ui::{box_rows, message_body, GroupView, LineView, ViewModel};
+use crate::ui::{box_rows, line_at_row, message_body, GroupView, LineView, ViewModel};
 
 pub use socketchat_proto::invite_message;
 
@@ -171,6 +171,9 @@ pub enum Action {
     /// Send the files dropped in the message box to this room, then the
     /// words around them.
     SendDrop(GroupId),
+    /// Save this file from this room in the default folder: a click on
+    /// the line that says someone sent it.
+    SaveFile(GroupId, FileId),
     /// Join with this link, trusting the certificate it names.
     AcceptCertificate(String),
     MarkVerified(Key),
@@ -693,12 +696,27 @@ pub fn join_choices(waiting: &[(u64, String)]) -> Vec<String> {
     out
 }
 
-/// The command whose word Tab, Up and Down complete after it, `/invite `
-/// or `/join `, and the word as typed, when the message box holds one of
-/// them. After `/invite` that is one name, or a quoted name that may hold
-/// spaces; a name and a room, or `--dm`, is not completed. After `/join`
-/// it is any room name, but not a link.
+/// The command whose word Tab, Up and Down complete after it, `/invite `,
+/// `/save ` or `/join `, and the word as typed, when the message box holds
+/// one of them. After `/invite` that is one name, or a quoted name that
+/// may hold spaces; a name and a room, or `--dm`, is not completed. After
+/// `/save` it is one file name, or a quoted one; a name and a folder is
+/// not completed. After `/join` it is any room name, but not a link.
 fn arg_typed(input: &str) -> Option<(&'static str, String)> {
+    if let Some(rest) = input.strip_prefix("/save ") {
+        let typed = match rest.strip_prefix('"') {
+            Some(q) => {
+                let q = q.strip_suffix('"').unwrap_or(q);
+                if q.contains('"') {
+                    return None;
+                }
+                q
+            }
+            None if rest.contains(char::is_whitespace) => return None,
+            None => rest,
+        };
+        return Some(("/save ", typed.to_string()));
+    }
     if let Some(rest) = input.strip_prefix("/invite ") {
         let typed = match rest.strip_prefix('"') {
             Some(q) => {
@@ -718,8 +736,17 @@ fn arg_typed(input: &str) -> Option<(&'static str, String)> {
 }
 
 /// What can follow `head` for `typed`, best first: the names `/invite`
-/// takes, a name with spaces in quotes, or the rooms `/join` takes.
+/// takes, a name with spaces in quotes, the files `/save` takes, newest
+/// first, or the rooms `/join` takes.
 fn arg_choices(head: &str, typed: &str, vm: &ViewModel) -> Vec<String> {
+    if head == "/save " {
+        // Matched on the name, without the quotes `/save` reads.
+        let names: Vec<String> = vm.save_files.iter().map(|f| f.replace('"', "")).collect();
+        return ranked_at(typed, names.iter().map(String::as_str))
+            .into_iter()
+            .map(|i| vm.save_files[i].clone())
+            .collect();
+    }
     let all: Vec<&str> = if head == "/invite " {
         // A quote cannot be typed inside a name: `/invite` reads it as
         // the start or end of one.
@@ -747,6 +774,8 @@ fn arg_choices(head: &str, typed: &str, vm: &ViewModel) -> Vec<String> {
 /// What the status line says when nothing can follow `head` for `typed`.
 fn no_arg(head: &str, typed: &str) -> String {
     match (head, typed.is_empty()) {
+        ("/save ", true) => "No one has sent a file in this chat yet.".into(),
+        ("/save ", false) => format!("No file called {typed} in this chat."),
         ("/invite ", true) => "Nobody else shares a room with you yet.".into(),
         ("/invite ", false) => format!("Nobody called {typed} shares a room with you."),
         (_, true) => "No invite waits for you.".into(),
@@ -791,11 +820,11 @@ pub struct TabCycle {
     idx: Option<usize>,
 }
 
-/// Where Tab, Shift-Tab, Up and Down are in the names after `/invite` or
-/// the rooms after `/join`.
+/// Where Tab, Shift-Tab, Up and Down are in the names after `/invite`,
+/// the files after `/save` or the rooms after `/join`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArgCycle {
-    /// `/invite ` or `/join `.
+    /// `/invite `, `/save ` or `/join `.
     head: &'static str,
     /// The word as typed before the first press.
     typed: String,
@@ -1582,18 +1611,21 @@ impl App {
         }
     }
 
-    /// The button came up at `(x, y)`: a drag copies what it selected,
-    /// and a click with no drag does nothing more.
+    /// The button came up at `(x, y)`: a drag copies what it selected.
+    /// A click with no drag on the line that says someone sent a file
+    /// saves it, and elsewhere does nothing more.
     fn let_go(&mut self, x: u16, y: u16, vm: &ViewModel) -> Vec<Action> {
         let Some(d) = self.drag.as_ref().filter(|d| d.held) else {
             return vec![];
         };
         if !d.moved {
             let use_row = d.use_row;
+            let file = self.file_clicked(d, vm);
             self.drag = None;
-            return match use_row {
-                Some(i) => self.use_help_row(i, vm),
-                None => vec![],
+            return match (use_row, file) {
+                (Some(i), _) => self.use_help_row(i, vm),
+                (None, Some(a)) => vec![a],
+                (None, None) => vec![],
             };
         }
         let spot = self.area_of(d.area).and_then(|a| a.spot(x, y));
@@ -1607,6 +1639,23 @@ impl App {
             Some(text) if !text.is_empty() => vec![Action::CopySelected(text)],
             _ => vec![],
         }
+    }
+
+    /// What a click with no drag, `d`, does to the line under it: on one
+    /// that says someone sent a file, saves the file.
+    fn file_clicked(&self, d: &Drag, vm: &ViewModel) -> Option<Action> {
+        if d.area != Area::Messages {
+            return None;
+        }
+        let g = self.selected?;
+        // On the text's rows, not the blank space above them.
+        let (spot, 0) = self.area_of(Area::Messages)?.spot(d.at.0, d.at.1)? else {
+            return None;
+        };
+        let line = vm.lines.get(line_at_row(vm, d.width, spot.row)?)?;
+        line.file
+            .filter(|_| !line.mine)
+            .map(|id| Action::SaveFile(g, id))
     }
 
     /// The two ends of the selection in `which`, if one is made there.
@@ -1728,8 +1777,8 @@ impl App {
     }
 
     /// Whether Tab and Shift-Tab, or with `spaced` Up and Down, go
-    /// through the rooms after `/switch`, the names after `/invite` or the
-    /// rooms after `/join`. Up and Down need the space after the command
+    /// through the rooms after `/switch`, the names after `/invite`, the
+    /// files after `/save` or the rooms after `/join`. Up and Down need the space after the command
     /// word: before it they go through command words.
     fn completes_args(&self, spaced: bool) -> bool {
         let switch = match spaced {
@@ -1739,8 +1788,8 @@ impl App {
         switch || self.arg_cycle.is_some() || arg_typed(&self.input).is_some()
     }
 
-    /// Puts the next room or name (`forward`) after `/switch`, `/invite`
-    /// or `/join` in the message box, or the one before, from those that
+    /// Puts the next room, name or file (`forward`) after `/switch`,
+    /// `/invite`, `/save` or `/join` in the message box, or the one before, from those that
     /// fit what was typed, going round; or says on the status line that
     /// none does.
     fn step_arg(&mut self, vm: &ViewModel, forward: bool) {
@@ -2028,8 +2077,8 @@ impl App {
         }
         let tabs = matches!(k.code, KeyCode::Tab | KeyCode::BackTab);
         let up_down = matches!(k.code, KeyCode::Up | KeyCode::Down);
-        // After `/switch `, `/invite ` or `/join `, Tab, Shift-Tab, Up and
-        // Down go through the rooms or names that fit; Up and Down only
+        // After `/switch `, `/invite `, `/save ` or `/join `, Tab, Shift-Tab,
+        // Up and Down go through the rooms, names or files that fit; Up and Down only
         // while the box holds what this person typed, not an earlier line.
         let arg_step = self.modal.is_none()
             && self.switcher.is_none()
@@ -2164,6 +2213,10 @@ impl App {
                 }
             }
             KeyCode::Enter => {
+                // A path to a file here never goes out as a message.
+                if let Some(acts) = self.enter_paths() {
+                    return acts;
+                }
                 if let Some(acts) = self.enter_attachments(vm) {
                     return acts;
                 }

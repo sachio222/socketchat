@@ -103,7 +103,7 @@ A terminal interface with four areas:
 - Right: members of the current group, with verified marks, under a title that counts them.
 - Bottom: the input line and a one-line help bar with the keys for the current area.
 
-Keys: Tab moves between areas, or completes a command that starts with `/`, the room after `/switch`, the name after `/invite` and the invited room after `/join`, as Up and Down also do after those three; Ctrl-K opens a quick switcher; Up and Down in the message box bring back the lines sent in the open room, kept in memory only; Page Up and Page Down scroll; Enter sends; Esc cancels. The mouse opens a room, moves between areas, scrolls, presses the buttons on boxes and copies the text it drags over, until `/mouse off` gives it back to the terminal. Slash commands: `/invite`, `/invite --dm`, `/join <link>`, `/new <group name>`, `/dm <name>`, `/invite <name>`, `/join <room>`, `/send <path>`, `/save <file> [dir]`, `/verify <name>`, `/rename <name> <new>`, `/name <new>`, `/kick <name>`, `/topic [text]`, `/topic --clear`, `/settings`, `/status`, `/leave`, `/servers`, `/forget <number>`, `/theme`, `/mouse on|off`, `/help`, `/quit`.
+Keys: Tab moves between areas, or completes a command that starts with `/`, the room after `/switch`, the name after `/invite`, the file after `/save` and the invited room after `/join`, as Up and Down also do after those four; Ctrl-K opens a quick switcher; Up and Down in the message box bring back the lines sent in the open room, kept in memory only; Page Up and Page Down scroll; Enter sends; Esc cancels. The mouse opens a room, moves between areas, scrolls, presses the buttons on boxes and copies the text it drags over, until `/mouse off` gives it back to the terminal. Slash commands: `/invite`, `/invite --dm`, `/join <link>`, `/new <group name>`, `/dm <name>`, `/invite <name>`, `/join <room>`, `/send <path>`, `/save [file] [dir]`, `/verify <name>`, `/rename <name> <new>`, `/name <new>`, `/kick <name>`, `/topic [text]`, `/topic --clear`, `/settings`, `/status`, `/leave`, `/servers`, `/forget <number>`, `/theme`, `/mouse on|off`, `/help`, `/quit`.
 
 The screen stays readable at 80 by 24 characters and works over SSH.
 
@@ -114,7 +114,7 @@ The screen stays readable at 80 by 24 characters and works over SSH.
 1. The sender's app picks a fresh random key for the file and encrypts it in 64 KiB chunks with XChaCha20-Poly1305 in the STREAM construction, which detects reordered, dropped or altered chunks.
 2. It uploads the encrypted chunks to the server's file store.
 3. It sends an MLS message to the group with the file name, size, type, SHA-256 hash, and the file key.
-4. Each member's app downloads the chunks, decrypts, checks the hash, and saves the file when the person types `/save`.
+4. Each member's app downloads the chunks, decrypts, checks the hash, and saves the file when the person types `/save` or clicks the line that says it was sent.
 
 Files stream through memory one chunk at a time, so a large video never loads whole into RAM on either end.
 
