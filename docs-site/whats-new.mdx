@@ -9,6 +9,14 @@ This page lists every Socketchat release, newest first, with what changed in eac
 
 Version numbers follow [Semantic Versioning](https://semver.org): the first number changes when something stops working the old way, the second for new features, the third for fixes.
 
+<Update label="0.6.1" description="October 27, 2026" rss={{ title: "Socketchat 0.6.1", date: "2026-10-27" }}>
+  This release makes dropping a file on the window work on Windows.
+
+  ### Fixed
+
+  - **Drop a file on Windows**: a file dropped on the Socketchat window in Windows Terminal, the classic console or VS Code now shows as `[Photo 1]`, `[Video 1]` or `[File 1]`, as it does on macOS and Linux. Before, its path pasted as text, because Socketchat read the backslashes in a Windows path as escapes. Paths with spaces, which these terminals wrap in double quotes, and `file:///C:/` links work too.
+</Update>
+
 <Update label="0.6.0" description="October 26, 2026" rss={{ title: "Socketchat 0.6.0", date: "2026-10-26" }}>
   This release lets you invite someone you already share a room with by name, with `/invite <name>`, and they join with `/join <room>`. Commands are easier to find: `/` and Enter opens a help box you pick from, Up and Down step through the commands that start with what you typed, and Tab fills in names after `/invite` and invited rooms after `/join`. Dragging the mouse over messages copies them, and a file dropped on the window waits in the message box for Enter. Each room says once that it is end-to-end encrypted, the People title counts the people you verified, and Socketchat warns you when someone joins under a verified person's name with a different key. `/status` and `socketchat status` show the server, the connection, the open room and the app in one place. Apps and servers on 0.4.0 to 0.5.2 still work with 0.6.0; "Upgrading" at the end lists what changes for them.
 
