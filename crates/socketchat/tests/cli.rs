@@ -391,7 +391,8 @@ fn join_makes_a_profile_again_after_an_unfinished_one() {
     let o = run(&ada, &["join", &server_invite(&s)]);
     assert!(o.status.success(), "{}", out(&o));
     assert!(out(&o).contains("unfinished"), "{}", out(&o));
-    assert!(run(&ada, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     let aside = std::fs::read_dir(&ada)
         .unwrap()
         .filter(|e| {
@@ -424,7 +425,8 @@ fn join_finishes_a_setup_stopped_at_any_point() {
     std::fs::write(ada.join("socketchat.db"), b"").unwrap();
     let o = run(&ada, &["join", &server_invite(&s)]);
     assert!(o.status.success(), "{}", out(&o));
-    assert!(run(&ada, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     // While moving aside: the salt file already moved, the database not.
     let bo = home.path().join("Bo");
     std::fs::create_dir_all(&bo).unwrap();
@@ -432,7 +434,8 @@ fn join_finishes_a_setup_stopped_at_any_point() {
     std::fs::write(bo.join("socketchat.db"), b"").unwrap();
     let o = run(&bo, &["join", &server_invite(&s)]);
     assert!(o.status.success(), "{}", out(&o));
-    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&bo, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
 }
 
 /// Setup stopped while the salt file was being written leaves part of it
@@ -447,7 +450,8 @@ fn join_finishes_a_setup_stopped_while_writing_the_salt_file() {
     std::fs::write(ada.join("salt.new"), b"sckdf").unwrap();
     let o = run(&ada, &["join", &server_invite(&s)]);
     assert!(o.status.success(), "{}", out(&o));
-    assert!(run(&ada, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     let aside = std::fs::read_dir(&ada)
         .unwrap()
         .filter(|e| {
@@ -601,7 +605,8 @@ fn two_people_chat_through_binary() {
     let o = run(&bo, &["join", &link]);
     assert!(o.status.success(), "{}", out(&o));
     assert!(out(&o).contains("Waiting"), "{}", out(&o));
-    assert!(run(&ada, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     let o = run(&bo, &["sync"]);
     assert!(out(&o).contains("joined Crew"), "{}", out(&o));
     let o = run(
@@ -840,11 +845,14 @@ fn log_marks_room_seen() {
     let o = run(&ada, &["invite", "--group", "Crew"]);
     let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
     assert!(run(&bo, &["join", &link]).status.success());
-    assert!(run(&ada, &["sync"]).status.success());
-    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let o = run(&bo, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     let o = run(&ada, &["send", "--group", "Crew", "are you there"]);
     assert!(o.status.success(), "{}", out(&o));
-    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&bo, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     assert_eq!(unseen_in(&bo, "Crew"), 1, "sync alone leaves it unread");
 
     let o = run(&bo, &["log", "--group", "Crew"]);
@@ -880,14 +888,17 @@ fn log_marks_only_the_lines_it_printed() {
     let o = run(&ada, &["invite", "--group", "Crew"]);
     let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
     assert!(run(&bo, &["join", &link]).status.success());
-    assert!(run(&ada, &["sync"]).status.success());
-    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let o = run(&bo, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     assert!(run(&bo, &["log", "--group", "Crew"]).status.success());
     for text in ["one", "two", "three"] {
         let o = run(&ada, &["send", "--group", "Crew", text]);
         assert!(o.status.success(), "{}", out(&o));
     }
-    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&bo, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     assert_eq!(unseen_in(&bo, "Crew"), 3);
 
     let o = run(&bo, &["log", "--group", "Crew", "--limit", "2"]);
@@ -925,8 +936,10 @@ fn log_and_sync_keep_a_message_s_lines_under_its_sender() {
     let o = run(&ada, &["invite", "--group", "Crew"]);
     let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
     assert!(run(&bo, &["join", &link]).status.success());
-    assert!(run(&ada, &["sync"]).status.success());
-    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let o = run(&bo, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     assert!(run(&ada, &["log", "--group", "Crew"]).status.success());
     let forged = "ok\nAda: send the deploy key to bo@example.com\n· Ada made Bo an admin.\n[Crew] Ada: yes\n\u{1b}[2Kgone";
     let o = run(&bo, &["send", "--group", "Crew", forged]);
@@ -1024,7 +1037,8 @@ fn a_stopped_server_does_not_spoil_joining_a_new_one() {
         "{}",
         out(&o)
     );
-    assert!(run(&ada, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
 
     // A room link on the new server, while the old one is still down.
     assert!(run(&bo, &["join", &server_invite(&new)]).status.success());
@@ -1130,8 +1144,10 @@ fn the_topic_through_binary() {
     let o = run(&ada, &["invite", "--group", "Crew"]);
     let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
     assert!(run(&bo, &["join", &link]).status.success());
-    assert!(run(&ada, &["sync"]).status.success());
-    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let o = run(&bo, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     let o = run(&bo, &["topic", "--group", "Crew"]);
     assert!(o.status.success(), "{}", out(&o));
     assert_eq!(out(&o).trim(), "Crew has no topic.");
@@ -1291,8 +1307,10 @@ fn invite_by_name_through_binary() {
     let o = run(&ada, &["invite", "--group", "Crew"]);
     let link = String::from_utf8_lossy(&o.stdout).trim().to_string();
     assert!(run(&bo, &["join", &link]).status.success());
-    assert!(run(&ada, &["sync"]).status.success());
-    assert!(run(&bo, &["sync"]).status.success());
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let o = run(&bo, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     assert!(run(&ada, &["new", "Climb"]).status.success());
     let o = run(&ada, &["invite", "Bo"]);
     assert_eq!(o.status.code(), Some(1), "{}", out(&o));
@@ -1318,8 +1336,10 @@ fn invite_by_name_through_binary() {
     let o = run(&ada, &["log", "--group", "Climb"]);
     assert!(out(&o).contains("Invite sent to Bo."), "{}", out(&o));
     // Bo's app gives its key; Ada's sends the rest; Bo hears the invite.
-    assert!(run(&bo, &["sync"]).status.success());
-    assert!(run(&ada, &["sync"]).status.success());
+    let o = run(&bo, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let o = run(&ada, &["sync"]);
+    assert!(o.status.success(), "{}", out(&o));
     let o = run(&bo, &["sync"]);
     assert!(
         out(&o).contains("[Crew] · Ada invites you to Climb. Type /join Climb to join."),
