@@ -20,9 +20,9 @@ expression: s
 │ │Rooms on this server: 3                                                   │ │
 │ │                                                                          │ │
 │ │App                                                                       │ │
-│ │Version: 0.6.0                                                            │ │
+│ │Version: 0.6.1                                                            │ │
 └─│Update check: on, once a day. Last checked 2026-10-19 at 12:00. The newest│─┘
 ┌─│release then was 0.5.2.                                                   │─┐
 │ │↓ more                                                                    │ │
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Esc close                                                       socketchat 0.6.0
+Esc close                                                       socketchat 0.6.1

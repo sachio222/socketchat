@@ -25,4 +25,4 @@ expression: s
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-/forget <number> forgets a server · Esc close                   socketchat 0.6.0
+/forget <number> forgets a server · Esc close                   socketchat 0.6.1

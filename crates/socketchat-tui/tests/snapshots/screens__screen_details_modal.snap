@@ -25,4 +25,4 @@ expression: s
 ┌─│file sizes, IP addresses, a random key for each member, which of them are │─┐
 │ │admins, and the room's settings.                                          │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Esc close                                                       socketchat 0.6.0
+Esc close                                                       socketchat 0.6.1

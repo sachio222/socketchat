@@ -25,4 +25,4 @@ expression: s
 ┌─│Members: 3, 2 verified                                                    │─┐
 │ │↓ more                                                                    │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Esc close                                                       socketchat 0.6.0
+Esc close                                                       socketchat 0.6.1

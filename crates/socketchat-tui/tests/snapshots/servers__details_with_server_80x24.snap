@@ -25,4 +25,4 @@ expression: "render(&app, &crew(), 80, 24)"
 ┌─│admins, and the room's settings.                                          │─┐
 │ └────────────────────────────────────────────────────────────────[ Close ]─┘s│
 └──────────────────────────────────────────────────────────────────────────────┘
-Esc close                                                       socketchat 0.6.0
+Esc close                                                       socketchat 0.6.1

@@ -25,4 +25,4 @@ expression: "render(&app, &vm, 50, 24)"
 ┌─│Members: 3, 2 verified                      │─┐
 │ │↓ more                                      │ │
 └─└──────────────────────────────────[ Close ]─┘─┘
-Esc close                         socketchat 0.6.0
+Esc close                         socketchat 0.6.1

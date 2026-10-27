@@ -3664,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clap",
  "directories",
@@ -3681,7 +3681,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -3713,7 +3713,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat-proto"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "postcard",
@@ -3725,7 +3725,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat-server"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "openmls",
  "openmls_rust_crypto",
@@ -3749,7 +3749,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat-testkit"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "openmls",
  "openmls_rust_crypto",
@@ -3765,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "socketchat-tui"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "chrono",
  "crossterm",

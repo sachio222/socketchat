@@ -25,4 +25,4 @@ expression: first
 ┌─│/leave                leave this chat and delete its history here         │─┐
 │ │↓ more                                                                    │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Up/Down pick a command · Enter use it · Esc close               socketchat 0.6.0
+Up/Down pick a command · Enter use it · Esc close               socketchat 0.6.1

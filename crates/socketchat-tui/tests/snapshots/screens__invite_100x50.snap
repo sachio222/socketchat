@@ -51,4 +51,4 @@ expression: "render(&app, &crew(), 100, 50)"
 ┌───────────│                                                                          │───────────┐
 │  What's on└────────────────────────────────────────────────────────────────[ Close ]─┘or commands│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-C copy an invite message · Esc close                                                socketchat 0.6.0
+C copy an invite message · Esc close                                                socketchat 0.6.1
