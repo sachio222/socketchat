@@ -2,6 +2,30 @@
 
 Each release of socketchat has a section here. Version numbers follow [Semantic Versioning](https://semver.org): the first number changes when something stops working the old way, the second for new features, the third for fixes.
 
+## 0.6.2 - 2026-10-27
+
+This release makes a file someone sends easy to save, and keeps the path of a file on your computer out of the chat.
+
+### New
+
+- **A file line says how to save it**: when someone sends a file, the room shows "Ada sent report.pdf (1.2 MB). Type /save report.pdf to save it to Downloads.", with the command in the accent color. When the room holds more than one file with that name, the command names this one, as `/save report.pdf:2`, and a name with spaces comes in quotes. Lines from earlier versions stay as they were.
+- **Click a file line to save it**: one click on a line that says someone sent a file saves that file to Downloads. A second click says where it went. Dragging over the line still selects and copies it, and `/mouse off` turns clicks off.
+- **`/save` alone** saves the newest file someone else sent in the open room.
+- **Tab completes the file after `/save`**: `/save ` and Tab, or Up and Down, go through the room's files, newest first. A name two files share comes up as `report.pdf:1` and `report.pdf:2`.
+
+### Changed
+
+- **A saved file leaves a line in the room**: "Saved report.pdf to ~/Downloads/report.pdf." Only you see it. Before, the bottom line said where the file went until the next key.
+- **`/help`** shows `/save [file] [folder]`, says it saves to Downloads unless you name a folder, and says Tab completes the name.
+
+### Security
+
+- **A path to a file on your computer never goes out as a message**: when Enter would send nothing but the path of a file on this computer, Socketchat attaches the file instead and says so on the bottom line, as in "The path stays on this computer. File 1 is report.pdf, 1.2 MB. Enter sends it." A message that mentions a path among other words still sends as text, and commands run as before.
+
+### Fixed
+
+- **Drop a file in a terminal that types it**: some terminals type a dropped file's path into the window instead of pasting it. Enter now turns that path into `[File 1]`, as a pasted drop does, and the next Enter sends the file.
+
 ## 0.6.1 - 2026-10-27
 
 This release makes dropping a file on the window work on Windows.

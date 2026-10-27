@@ -25,4 +25,4 @@ expression: "render(&app, &crew(), 80, 24)"
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-Type to filter · Enter open · Esc cancel                        socketchat 0.6.1
+Type to filter · Enter open · Esc cancel                        socketchat 0.6.2

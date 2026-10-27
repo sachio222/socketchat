@@ -25,4 +25,4 @@ expression: at_end
 ┌─│terminal instead, hold Shift as you drag (Option or Fn on a Mac), or type │─┐
 │ │/mouse off.                                                               │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Up/Down pick a command · Enter use it · Esc close               socketchat 0.6.1
+Up/Down pick a command · Enter use it · Esc close               socketchat 0.6.2

@@ -25,4 +25,4 @@ expression: first
 ┌─│19. Room 19: expires in 24 hours                                          │─┐
 │ │↓ more                                                                    │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-/cancel <number> stops a link · Esc close                       socketchat 0.6.1
+/cancel <number> stops a link · Esc close                       socketchat 0.6.2

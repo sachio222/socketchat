@@ -28,4 +28,4 @@ expression: "render_selection(&app, &vm, 80, 24)"
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-Drag to copy · PgUp/PgDn or Up/Down scroll · Tab move           socketchat 0.6.1
+Drag to copy · PgUp/PgDn or Up/Down scroll · Tab move           socketchat 0.6.2

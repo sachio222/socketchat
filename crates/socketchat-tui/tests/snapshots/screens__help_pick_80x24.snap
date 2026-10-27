@@ -25,4 +25,4 @@ expression: "render_marked(&app, &vm, 80, 24)"
 ┌─│/leave                leave this chat and delete its history here         │─┐
 │ │↓ more                                                                    │ │
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Up/Down pick a command · Enter use it · Esc close               socketchat 0.6.1
+Up/Down pick a command · Enter use it · Esc close               socketchat 0.6.2

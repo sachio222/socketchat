@@ -25,4 +25,4 @@ expression: s
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  What's on your mind? #Book club                               / for commands│
 └──────────────────────────────────────────────────────────────────────────────┘
-/cancel <number> stops a link · Esc close                       socketchat 0.6.1
+/cancel <number> stops a link · Esc close                       socketchat 0.6.2

@@ -17,7 +17,7 @@ expression: s
 │ │and the link to the server are not post-quantum yet.                      │ │
 │ │                                                                          │ │
 │ │App                                                                       │ │
-│ │Version: 0.6.1                                                            │ │
+│ │Version: 0.6.2                                                            │ │
 │ │Update check: on, once a day. Last checked 2026-10-19 at 12:00. The newest│ │
 │ │release then was 0.5.2.                                                   │ │
 │ │Theme: phosphor                                                           │ │
@@ -25,4 +25,4 @@ expression: s
 ┌─│                                                                          │─┐
 │ │/details lists what the server can and cannot see in each room.           │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Esc close                                                       socketchat 0.6.1
+Esc close                                                       socketchat 0.6.2

@@ -25,4 +25,4 @@ expression: "render(&app, &vm, 50, 24)"
 ┌─│App                                         │─┐
 │ │↓ more                                      │…│
 └─└──────────────────────────────────[ Close ]─┘─┘
-Esc close                         socketchat 0.6.1
+Esc close                         socketchat 0.6.2

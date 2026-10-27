@@ -25,4 +25,4 @@ expression: "render(&app, &vm, 50, 24)"
 ┌─│Post-quantum: yes for messages and files    │─┐
 │ │↓ more                                      │s│
 └─└──────────────────────────────────[ Close ]─┘─┘
-Esc close                         socketchat 0.6.1
+Esc close                         socketchat 0.6.2

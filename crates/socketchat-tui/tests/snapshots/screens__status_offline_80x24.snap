@@ -25,4 +25,4 @@ expression: s
 ┌─│Your role: admin                                                          │─┐
 │ │↓ more                                                                    │s│
 └─└────────────────────────────────────────────────────────────────[ Close ]─┘─┘
-Esc close                                                       socketchat 0.6.1
+Esc close                                                       socketchat 0.6.2
