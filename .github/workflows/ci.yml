@@ -1,19 +1,58 @@
 name: CI
 
+# Every push to any branch runs CI, so a branch shows Windows and lint
+# failures before it reaches main. A pull request from a branch in this
+# repository already has that push run on its head commit, so the
+# pull_request run skips its jobs; pull requests from forks run in full.
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
 
 permissions:
   contents: read
 
+# A newer push to the same branch cancels the older run. Runs on main each
+# get their own group, so every commit on main keeps a full result.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  # Incremental builds only pay off on a machine that keeps target/ between
+  # edits; in CI they make target/ and the cache bigger.
+  CARGO_INCREMENTAL: 0
+  # Test builds keep file and line numbers for backtraces but drop the rest
+  # of the debug info, which makes linking and the cache much smaller. Panic
+  # messages carry their file and line either way.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # What actions/cache keeps: downloaded crates and the git index, not the
+  # unpacked sources (Cargo unpacks them again from the downloads), and the
+  # build output.
+  CARGO_CACHE_PATHS: |
+    ~/.cargo/registry/index/
+    ~/.cargo/registry/cache/
+    ~/.cargo/git/db/
+    target/
+
+# Caching, in every job that builds:
+#   - the key names the job, the runner, rust-toolchain.toml and Cargo.lock;
+#     a run with a new Cargo.lock starts from the newest cache of the same
+#     job, runner and toolchain;
+#   - a job saves only when it found no exact match, and only after its
+#     build step passed, so a failing test still leaves the build cached;
+#   - before saving it removes this workspace's own crates, which every
+#     commit rebuilds anyway, so a cache holds dependencies alone;
+#   - a target/ restored from an older Cargo.lock that has grown past
+#     4 GB is thrown away, so old dependency versions do not pile up.
+# Branches read the caches main saved; a branch saves its own only when its
+# Cargo.lock differs from main's.
 
 jobs:
   test:
     name: Test (${{ matrix.os }})
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -49,11 +88,44 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12 (no release tags)
         with:
           toolchain: 1.98.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Restore the Cargo cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: cargo-test-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-test-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Throw away a restored target/ over 4 GB
+        shell: bash
+        env:
+          EXACT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          mb=$(du -sm target 2>/dev/null | cut -f1)
+          echo "Restored target/: ${mb:-0} MB"
+          if [ "$EXACT" != true ] && [ "${mb:-0}" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
+      - name: Build the tests
+        id: build
+        run: cargo test --workspace --locked --no-run ${{ matrix.features }}
       - run: cargo test --workspace --locked --no-fail-fast ${{ matrix.features }}
+      - name: Remove this workspace's crates from target/ before saving
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set --
+          for p in $(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[].name' | tr -d '\r'); do set -- "$@" -p "$p"; done
+          cargo clean --locked "$@"
+          du -sm target
+      - name: Save the Cargo cache
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   lint:
     name: Format and clippy
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -64,12 +136,42 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Restore the Cargo cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: cargo-lint-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-lint-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Throw away a restored target/ over 4 GB
+        env:
+          EXACT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          mb=$(du -sm target 2>/dev/null | cut -f1)
+          echo "Restored target/: ${mb:-0} MB"
+          if [ "$EXACT" != true ] && [ "${mb:-0}" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
+      - name: Clippy
+        id: build
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Remove this workspace's crates from target/ before saving
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        run: |
+          set --
+          for p in $(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[].name'); do set -- "$@" -p "$p"; done
+          cargo clean --locked "$@"
+          du -sm target
+      - name: Save the Cargo cache
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   deny:
     name: Dependency policy
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -81,19 +183,26 @@ jobs:
 
   crate-age:
     name: Crate release ages
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           fetch-depth: 0
+      # A pull request compares with its base, a push with the commit before
+      # it. The first push of a new branch has no commit before it, so it
+      # compares with the commit where the branch left main.
       - name: Check crate release ages when a lock file or the allow list changed
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            BASE="$(git merge-base origin/main HEAD 2>/dev/null || true)"
+          fi
           if git cat-file -e "$BASE^{commit}" 2>/dev/null &&
              git diff --quiet "$BASE" HEAD -- Cargo.lock fuzz/Cargo.lock scripts/crate-age-allow.txt; then
-            echo "The lock files and the allow list are unchanged."
+            echo "The lock files and the allow list are unchanged since $BASE."
           else
             sh scripts/crate-age-check.sh
             sh scripts/crate-age-check.sh --lock fuzz/Cargo.lock
@@ -105,6 +214,7 @@ jobs:
   # token only on the step that creates the release.
   workflows:
     name: Workflow rules
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -116,6 +226,7 @@ jobs:
 
   aarch64:
     name: Build for Linux aarch64 (Raspberry Pi)
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -125,9 +236,40 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12 (no release tags)
         with:
           toolchain: 1.98.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build --release --locked -p socketchat
+      - name: Restore the Cargo cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: cargo-aarch64-ubuntu-24.04-arm-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-aarch64-ubuntu-24.04-arm-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Throw away a restored target/ over 4 GB
+        env:
+          EXACT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          mb=$(du -sm target 2>/dev/null | cut -f1)
+          echo "Restored target/: ${mb:-0} MB"
+          if [ "$EXACT" != true ] && [ "${mb:-0}" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
+      - name: Build the program
+        id: build
+        run: cargo build --release --locked -p socketchat
+      - name: Build the tests
+        run: cargo test --workspace --release --locked --no-run
       - run: cargo test --workspace --release --locked
+      - name: Remove this workspace's crates from target/ before saving
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        run: |
+          set --
+          for p in $(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[].name'); do set -- "$@" -p "$p"; done
+          cargo clean --locked --release "$@"
+          du -sm target
+      - name: Save the Cargo cache
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # Release binaries (release.yml, configured in dist-workspace.toml) build
   # OpenSSL from source and link it in. Check that build on every push, on the
@@ -135,6 +277,7 @@ jobs:
   # binary loads no OpenSSL library at run time.
   vendored:
     name: Release-style build (no system OpenSSL)
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -143,8 +286,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12 (no release tags)
         with:
           toolchain: 1.98.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build --profile dist --locked -p socketchat --features vendored-openssl
+      - name: Restore the Cargo cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: cargo-vendored-ubuntu-22.04-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-vendored-ubuntu-22.04-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Throw away a restored target/ over 4 GB
+        env:
+          EXACT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          mb=$(du -sm target 2>/dev/null | cut -f1)
+          echo "Restored target/: ${mb:-0} MB"
+          if [ "$EXACT" != true ] && [ "${mb:-0}" -gt 4096 ]; then rm -rf target; echo "Removed it."; fi
+      - name: Build the release binary
+        id: build
+        run: cargo build --profile dist --locked -p socketchat --features vendored-openssl
       - name: Binary needs no libssl or libcrypto
         run: |
           ldd target/dist/socketchat
@@ -158,9 +317,23 @@ jobs:
           target/dist/socketchat server init --data-dir "$RUNNER_TEMP/srv" --host 127.0.0.1
       - name: Binary holds no test-only code
         run: sh scripts/release-binary-check.sh target/dist/socketchat
+      - name: Remove this workspace's crates from target/ before saving
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        run: |
+          set --
+          for p in $(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[].name'); do set -- "$@" -p "$p"; done
+          cargo clean --locked --profile dist "$@"
+          du -sm target
+      - name: Save the Cargo cache
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   fuzz:
     name: Fuzz the frame decoder (60 s)
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
