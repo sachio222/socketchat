@@ -41,11 +41,25 @@ fn files(made: &[(&str, &[u8])]) -> (tempfile::TempDir, Vec<PathBuf>) {
     (d, paths)
 }
 
-/// As Terminal.app pastes a drop.
+/// As this system's terminals paste a drop: Terminal.app and the like
+/// put a backslash before each space; Windows Terminal, the console and
+/// VS Code put double quotes around a path with spaces. A space follows
+/// each.
 fn dropped(paths: &[PathBuf]) -> String {
     paths
         .iter()
-        .map(|p| format!("{} ", p.display().to_string().replace(' ', "\\ ")))
+        .map(|p| {
+            let s = p.display().to_string();
+            if cfg!(windows) {
+                if s.contains(' ') {
+                    format!("\"{s}\" ")
+                } else {
+                    format!("{s} ")
+                }
+            } else {
+                format!("{} ", s.replace(' ', "\\ "))
+            }
+        })
         .collect()
 }
 

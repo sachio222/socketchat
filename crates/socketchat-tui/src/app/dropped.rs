@@ -139,16 +139,58 @@ pub(crate) fn not_sent(a: &Attachment, why: Unsendable) -> String {
 /// paths to things that exist. `None` means the paste is text.
 pub fn dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
     let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
-    parse(text, home.as_deref())
+    parse(text, home.as_deref(), Platform::HOST, &|p| {
+        std::fs::metadata(p).is_ok()
+    })
 }
 
-/// Terminals paste a drop in different ways: with a backslash before each
-/// space (Terminal.app, iTerm2, Ghostty, WezTerm), in single or double
-/// quotes (VS Code, WezTerm's other modes, Windows Terminal), as
-/// `file://` links (kitty and some Linux terminals), or as they are, one
-/// per line. The paste is read as shell words first, then one path per
-/// line.
-fn parse(text: &str, home: Option<&Path>) -> Option<Vec<PathBuf>> {
+/// Whose rules a terminal pastes a dropped path by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Platform {
+    Unix,
+    Windows,
+}
+
+impl Platform {
+    /// The system Socketchat runs on.
+    const HOST: Platform = if cfg!(windows) {
+        Platform::Windows
+    } else {
+        Platform::Unix
+    };
+
+    /// Whether `p` names a place from the top of a disk: on Unix it
+    /// starts with `/`; on Windows with a drive, as `C:\` or `C:/`, or a
+    /// network share, as `\\server\share`.
+    fn is_absolute(self, p: &str) -> bool {
+        match self {
+            Platform::Unix => p.starts_with('/'),
+            Platform::Windows => {
+                let b = p.as_bytes();
+                p.starts_with(r"\\")
+                    || (b.len() > 2
+                        && b[0].is_ascii_alphabetic()
+                        && b[1] == b':'
+                        && matches!(b[2], b'\\' | b'/'))
+            }
+        }
+    }
+}
+
+/// Terminals paste a drop in different ways. On Unix: with a backslash
+/// before each space (Terminal.app, iTerm2, Ghostty, WezTerm), in single
+/// or double quotes (VS Code, WezTerm's other modes), or as `file://`
+/// links (kitty and some Linux terminals). On Windows, where a backslash
+/// separates folders: as the plain path, in double quotes when it has
+/// spaces (Windows Terminal, the console, VS Code). Anywhere, as they
+/// are, one per line. The paste is read as words first, then one path per
+/// line, and only paths that exist count.
+fn parse(
+    text: &str,
+    home: Option<&Path>,
+    platform: Platform,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Option<Vec<PathBuf>> {
     let text = text.trim();
     if text.is_empty() {
         return None;
@@ -159,20 +201,21 @@ fn parse(text: &str, home: Option<&Path>) -> Option<Vec<PathBuf>> {
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect();
-    [words(text), Some(lines)]
-        .into_iter()
-        .flatten()
-        .find_map(|ws| {
-            ws.iter()
-                .map(|w| path_of(w, home))
-                .collect::<Option<Vec<_>>>()
-                .filter(|ps| !ps.is_empty())
-        })
+    let words = match platform {
+        Platform::Unix => shell_words(text),
+        Platform::Windows => quoted_words(text),
+    };
+    [words, Some(lines)].into_iter().flatten().find_map(|ws| {
+        ws.iter()
+            .map(|w| path_of(w, home, platform, exists))
+            .collect::<Option<Vec<_>>>()
+            .filter(|ps| !ps.is_empty())
+    })
 }
 
-/// `text` split as a shell splits words: backslashes and quotes come off.
-/// `None` when a quote is left open or a backslash ends the text.
-fn words(text: &str) -> Option<Vec<String>> {
+/// `text` split as a Unix shell splits words: backslashes and quotes come
+/// off. `None` when a quote is left open or a backslash ends the text.
+fn shell_words(text: &str) -> Option<Vec<String>> {
     let mut out = vec![];
     let mut cur = String::new();
     let mut in_word = false;
@@ -231,24 +274,74 @@ fn words(text: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// The absolute path a word names, when something is there.
-fn path_of(word: &str, home: Option<&Path>) -> Option<PathBuf> {
-    let p = if let Some(rest) = word.strip_prefix("file://") {
-        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-        let decoded = percent_decoded(rest)?;
-        // `file:///C:/Users/...` on Windows.
-        let b = decoded.as_bytes();
-        if cfg!(windows) && b.len() > 2 && b[0] == b'/' && b[2] == b':' {
-            PathBuf::from(&decoded[1..])
-        } else {
-            PathBuf::from(decoded)
+/// `text` split at spaces outside double quotes, which come off, as
+/// Windows terminals write several paths. A backslash is a folder
+/// separator, never an escape. `None` when a quote is left open.
+fn quoted_words(text: &str) -> Option<Vec<String>> {
+    let mut out = vec![];
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    for c in text.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                in_word = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if in_word {
+                    out.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                in_word = true;
+            }
         }
+    }
+    if quoted {
+        return None;
+    }
+    if in_word {
+        out.push(cur);
+    }
+    Some(out)
+}
+
+/// The absolute path a word names, when something is there.
+fn path_of(
+    word: &str,
+    home: Option<&Path>,
+    platform: Platform,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let p = if let Some(rest) = word.strip_prefix("file://") {
+        PathBuf::from(link_path(rest, platform)?)
     } else if let Some(rest) = word.strip_prefix("~/") {
         home?.join(rest)
-    } else {
+    } else if platform.is_absolute(word) {
         PathBuf::from(word)
+    } else {
+        return None;
     };
-    (p.is_absolute() && std::fs::metadata(&p).is_ok()).then_some(p)
+    exists(&p).then_some(p)
+}
+
+/// The path a `file://` link names, from what follows `file://`: on
+/// Windows `file:///C:/Users/...` is `C:\Users\...` and
+/// `file://server/share/...` is `\\server\share\...`.
+fn link_path(rest: &str, platform: Platform) -> Option<String> {
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let decoded = percent_decoded(rest)?;
+    let path = match platform {
+        Platform::Unix => decoded,
+        Platform::Windows => match decoded.strip_prefix('/') {
+            Some(local) => local.replace('/', "\\"),
+            None => format!(r"\\{}", decoded.replace('/', "\\")),
+        },
+    };
+    platform.is_absolute(&path).then_some(path)
 }
 
 /// `%20` and the like turned back into the characters they stand for.
@@ -495,178 +588,405 @@ pub(crate) fn cleaned_status(names: &[String]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, sendable, Unsendable};
+    use super::{parse, sendable, Platform, Unsendable};
     use std::path::{Path, PathBuf};
 
-    /// A folder with these files in it, each holding a few bytes.
-    fn files(names: &[&str]) -> (tempfile::TempDir, Vec<PathBuf>) {
-        let d = tempfile::tempdir().unwrap();
-        let paths = names
-            .iter()
-            .map(|n| {
-                let p = d.path().join(n);
-                std::fs::write(&p, b"some bytes").unwrap();
-                p
-            })
-            .collect();
-        (d, paths)
+    /// Parses `text` by `platform`'s rules against a made-up disk that
+    /// holds exactly `disk`, so both systems' forms run on every system.
+    fn on(platform: Platform, disk: &[&str], text: &str) -> Option<Vec<PathBuf>> {
+        let disk: Vec<PathBuf> = disk.iter().map(PathBuf::from).collect();
+        parse(text, Some(Path::new("/u/a")), platform, &|p| {
+            disk.iter().any(|d| d == p)
+        })
     }
 
-    fn s(p: &Path) -> String {
-        p.display().to_string()
+    fn paths(ps: &[&str]) -> Option<Vec<PathBuf>> {
+        Some(ps.iter().map(PathBuf::from).collect())
     }
 
-    /// `p` with a backslash before each character a shell would split
-    /// on, as Terminal.app, iTerm2, Ghostty and WezTerm paste a drop.
-    fn escaped(p: &Path) -> String {
-        let mut out = String::new();
-        for c in s(p).chars() {
-            if " '\"()&;$`!*?[]{}<>|#~\\".contains(c) {
-                out.push('\\');
-            }
-            out.push(c);
+    mod unix {
+        use super::{on, paths};
+        use crate::app::dropped::Platform::Unix;
+
+        const DISK: &[&str] = &[
+            "/u/a/beach.jpg",
+            "/u/a/My Photo (1).jpg",
+            "/u/a/Bo's & Cy's #2.png",
+            "/u/a/Bo's.png",
+            "/u/a/say \"hi\".txt",
+            "/u/a/Bo's 100%.png",
+            "/u/a/Our trip 2.mov",
+            r"C:\u\beach.jpg",
+        ];
+
+        fn find(text: &str) -> Option<Vec<std::path::PathBuf>> {
+            on(Unix, DISK, text)
         }
-        out
-    }
 
-    fn percent(p: &Path) -> String {
-        s(p).replace('%', "%25")
-            .replace(' ', "%20")
-            .replace('\'', "%27")
-    }
+        #[test]
+        fn a_plain_path_with_what_terminals_add_after_it() {
+            for text in ["/u/a/beach.jpg", "/u/a/beach.jpg ", "/u/a/beach.jpg\n"] {
+                assert_eq!(find(text), paths(&["/u/a/beach.jpg"]), "{text:?}");
+            }
+        }
 
-    #[test]
-    fn a_plain_absolute_path_is_a_drop() {
-        let (_d, p) = files(&["beach.jpg"]);
-        assert_eq!(parse(&s(&p[0]), None), Some(p.clone()));
-        // Terminals add a space or a line break after the path.
-        assert_eq!(parse(&format!("{} ", s(&p[0])), None), Some(p.clone()));
-        assert_eq!(parse(&format!("{}\n", s(&p[0])), None), Some(p));
-    }
-
-    /// Terminal.app, iTerm2, Ghostty and WezTerm put a backslash before a
-    /// space and other characters a shell reads, and a space after.
-    #[test]
-    fn backslash_escapes_come_off() {
-        let (_d, p) = files(&["My Photo (1).jpg", "Bo's & Cy's #2.png"]);
-        for one in &p {
+        /// Terminal.app, iTerm2, Ghostty and WezTerm put a backslash
+        /// before a space and other characters a shell reads.
+        #[test]
+        fn backslash_escapes_come_off() {
+            let photo = r"/u/a/My\ Photo\ \(1\).jpg";
+            let bo = r"/u/a/Bo\'s\ \&\ Cy\'s\ \#2.png";
             assert_eq!(
-                parse(&format!("{} ", escaped(one)), None),
-                Some(vec![one.clone()])
+                find(&format!("{photo} ")),
+                paths(&["/u/a/My Photo (1).jpg"])
+            );
+            assert_eq!(find(&format!("{bo} ")), paths(&["/u/a/Bo's & Cy's #2.png"]));
+            assert_eq!(
+                find(&format!("{photo} {bo} ")),
+                paths(&["/u/a/My Photo (1).jpg", "/u/a/Bo's & Cy's #2.png"])
             );
         }
-        let both = format!("{} {} ", escaped(&p[0]), escaped(&p[1]));
-        assert_eq!(parse(&both, None), Some(p));
-    }
 
-    /// VS Code's terminal and WezTerm's Posix mode quote with single
-    /// quotes; Windows Terminal and WezTerm's Windows mode with double.
-    #[test]
-    fn quoted_paths_lose_their_quotes() {
-        let (_d, p) = files(&["My Photo.jpg", "Bo's.png", "say \"hi\".txt"]);
-        assert_eq!(
-            parse(&format!("'{}'", s(&p[0])), None),
-            Some(vec![p[0].clone()])
-        );
-        assert_eq!(
-            parse(&format!("\"{}\"", s(&p[0])), None),
-            Some(vec![p[0].clone()])
-        );
-        // A single quote inside single quotes, as a shell writes it.
-        let bo = s(&p[1]).replace('\'', "'\\''");
-        assert_eq!(parse(&format!("'{bo}'"), None), Some(vec![p[1].clone()]));
-        let hi = s(&p[2]).replace('"', "\\\"");
-        assert_eq!(parse(&format!("\"{hi}\""), None), Some(vec![p[2].clone()]));
-        let all = format!("'{}' '{bo}' \"{hi}\"", s(&p[0]));
-        assert_eq!(parse(&all, None), Some(p));
-    }
-
-    /// kitty and some Linux terminals paste `file://` links, one per line,
-    /// with spaces and other characters written as `%20` and so on.
-    #[test]
-    fn file_links_are_decoded() {
-        let (_d, p) = files(&["My Photo.jpg", "Bo's 100%.png"]);
-        let one = format!("file://{}", percent(&p[0]));
-        assert_eq!(parse(&one, None), Some(vec![p[0].clone()]));
-        let host = format!("file://localhost{}", percent(&p[1]));
-        assert_eq!(parse(&host, None), Some(vec![p[1].clone()]));
-        let lines = format!("file://{}\r\nfile://{}\r\n", percent(&p[0]), percent(&p[1]));
-        assert_eq!(parse(&lines, None), Some(p));
-        assert_eq!(parse("file:///no/such%2", None), None, "a broken escape");
-    }
-
-    /// A terminal that pastes a path as it is, spaces and all, one path
-    /// per line.
-    #[test]
-    fn unescaped_paths_one_per_line() {
-        let (_d, p) = files(&["My Photo.jpg", "Our trip 2.mov"]);
-        assert_eq!(parse(&s(&p[0]), None), Some(vec![p[0].clone()]));
-        let lines = format!("{}\n{}\n", s(&p[0]), s(&p[1]));
-        assert_eq!(parse(&lines, None), Some(p));
-    }
-
-    #[test]
-    fn a_path_from_home() {
-        let (d, p) = files(&["beach.jpg"]);
-        assert_eq!(parse("~/beach.jpg", Some(d.path())), Some(p.clone()));
-        assert_eq!(parse("'~/beach.jpg'", Some(d.path())), Some(p.clone()));
-        assert_eq!(parse("~/beach.jpg", None), None, "no home folder");
-    }
-
-    #[test]
-    fn several_paths_on_several_lines() {
-        let (_d, p) = files(&["a.jpg", "b c.png", "d.txt"]);
-        let text = format!("{}\n{}\n{}", escaped(&p[0]), escaped(&p[1]), escaped(&p[2]));
-        assert_eq!(parse(&text, None), Some(p));
-    }
-
-    /// A folder is a drop too, so the person hears why it cannot go.
-    #[test]
-    fn a_folder_is_a_drop_that_cannot_go() {
-        let (d, p) = files(&["beach.jpg"]);
-        assert_eq!(
-            parse(&s(d.path()), None),
-            Some(vec![d.path().to_path_buf()])
-        );
-        assert_eq!(sendable(d.path()), Err(Unsendable::Folder));
-        assert_eq!(sendable(&p[0]), Ok(10));
-        assert_eq!(sendable(&d.path().join("gone")), Err(Unsendable::Gone));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_file_nobody_may_read_cannot_go() {
-        use std::os::unix::fs::PermissionsExt;
-        let (_d, p) = files(&["secret.pdf"]);
-        std::fs::set_permissions(&p[0], std::fs::Permissions::from_mode(0o000)).unwrap();
-        // Someone with every permission still reads it.
-        if std::fs::File::open(&p[0]).is_err() {
-            assert_eq!(sendable(&p[0]), Err(Unsendable::Unreadable));
+        /// VS Code's terminal and WezTerm's Posix mode quote with single
+        /// quotes, writing a single quote inside as `'\''`.
+        #[test]
+        fn quoted_paths_lose_their_quotes() {
+            assert_eq!(
+                find("'/u/a/My Photo (1).jpg'"),
+                paths(&["/u/a/My Photo (1).jpg"])
+            );
+            assert_eq!(
+                find("\"/u/a/My Photo (1).jpg\""),
+                paths(&["/u/a/My Photo (1).jpg"])
+            );
+            assert_eq!(find(r"'/u/a/Bo'\''s.png'"), paths(&["/u/a/Bo's.png"]));
+            assert_eq!(
+                find(r#""/u/a/say \"hi\".txt""#),
+                paths(&["/u/a/say \"hi\".txt"])
+            );
+            assert_eq!(
+                find(r#"'/u/a/Bo'\''s.png' "/u/a/say \"hi\".txt" /u/a/beach.jpg"#),
+                paths(&["/u/a/Bo's.png", "/u/a/say \"hi\".txt", "/u/a/beach.jpg"])
+            );
         }
-        assert_eq!(parse(&s(&p[0]), None), Some(p));
+
+        /// kitty and some Linux terminals paste `file://` links, one per
+        /// line.
+        #[test]
+        fn file_links_are_decoded() {
+            assert_eq!(
+                find("file:///u/a/My%20Photo%20(1).jpg"),
+                paths(&["/u/a/My Photo (1).jpg"])
+            );
+            assert_eq!(
+                find("file://localhost/u/a/Bo%27s%20100%25.png"),
+                paths(&["/u/a/Bo's 100%.png"])
+            );
+            assert_eq!(
+                find("file:///u/a/beach.jpg\r\nfile:///u/a/Bo%27s.png\r\n"),
+                paths(&["/u/a/beach.jpg", "/u/a/Bo's.png"])
+            );
+            assert_eq!(find("file:///u/a/beach%2"), None, "a broken escape");
+            assert_eq!(
+                find("file://server/u/a/beach.jpg"),
+                None,
+                "another computer"
+            );
+        }
+
+        /// A terminal that pastes paths as they are, one per line.
+        #[test]
+        fn unescaped_paths_one_per_line() {
+            assert_eq!(
+                find("/u/a/My Photo (1).jpg"),
+                paths(&["/u/a/My Photo (1).jpg"])
+            );
+            assert_eq!(
+                find("/u/a/My Photo (1).jpg\n/u/a/Our trip 2.mov\n"),
+                paths(&["/u/a/My Photo (1).jpg", "/u/a/Our trip 2.mov"])
+            );
+            assert_eq!(
+                find("/u/a/beach.jpg\n/u/a/Bo\\'s.png"),
+                paths(&["/u/a/beach.jpg", "/u/a/Bo's.png"])
+            );
+        }
+
+        #[test]
+        fn a_path_from_home() {
+            assert_eq!(find("~/beach.jpg"), paths(&["/u/a/beach.jpg"]));
+            assert_eq!(find("'~/beach.jpg'"), paths(&["/u/a/beach.jpg"]));
+        }
+
+        #[test]
+        fn anything_else_is_text() {
+            for text in [
+                "",
+                "   \n",
+                "hello",
+                "/u/a/gone.jpg",
+                "look at /u/a/beach.jpg",
+                "/u/a/beach.jpg is the one",
+                "/u/a/beach.jpg /u/a/gone.jpg",
+                "beach.jpg",
+                "./beach.jpg",
+                "'/u/a/beach.jpg",
+                "/u/a/beach.jpg\\",
+                "file:///u/a/beach.jpg?x",
+                r"C:\u\beach.jpg",
+            ] {
+                assert_eq!(find(text), None, "{text:?}");
+            }
+        }
     }
 
-    /// Anything else stays text: a missing file, a path among other
-    /// words, a path that is not absolute, an open quote.
-    #[test]
-    fn anything_else_is_text() {
-        let (d, p) = files(&["beach.jpg"]);
-        let gone = d.path().join("gone.jpg");
-        for text in [
-            String::new(),
-            "   \n".to_string(),
-            "hello".to_string(),
-            s(&gone),
-            format!("look at {}", s(&p[0])),
-            format!("{} is the one", s(&p[0])),
-            format!("{} {}", s(&p[0]), s(&gone)),
-            "beach.jpg".to_string(),
-            "./beach.jpg".to_string(),
-            format!("'{}", s(&p[0])),
-            format!("{}\\", s(&p[0])),
-            format!("file://{}?x", s(&p[0])),
-        ] {
-            assert_eq!(parse(&text, None), None, "{text:?}");
+    mod windows {
+        use super::{on, paths};
+        use crate::app::dropped::Platform::Windows;
+
+        const DISK: &[&str] = &[
+            r"C:\Users\a\beach.jpg",
+            r"C:\Users\a\My Photo (1).jpg",
+            r"C:\Users\a\Bo's & Cy's #2.png",
+            r"D:\Trip 2\clip.mp4",
+            "C:/Users/a/beach.jpg",
+            r"\\server\share\Our trip.jpg",
+            r"\\server\share\beach.jpg",
+            r"C:\Users\a\Bo's 100%.png",
+            "/u/a/beach.jpg",
+        ];
+
+        fn find(text: &str) -> Option<Vec<std::path::PathBuf>> {
+            on(Windows, DISK, text)
+        }
+
+        #[test]
+        fn a_plain_path_with_what_terminals_add_after_it() {
+            for text in [
+                r"C:\Users\a\beach.jpg",
+                r"C:\Users\a\beach.jpg ",
+                "C:\\Users\\a\\beach.jpg\r\n",
+            ] {
+                assert_eq!(find(text), paths(&[r"C:\Users\a\beach.jpg"]), "{text:?}");
+            }
+            assert_eq!(
+                find("C:/Users/a/beach.jpg"),
+                paths(&["C:/Users/a/beach.jpg"])
+            );
+        }
+
+        /// Windows Terminal, the console and VS Code wrap a path with
+        /// spaces in double quotes, and put a space between files.
+        #[test]
+        fn double_quotes_come_off() {
+            assert_eq!(
+                find(r#""C:\Users\a\My Photo (1).jpg""#),
+                paths(&[r"C:\Users\a\My Photo (1).jpg"])
+            );
+            assert_eq!(
+                find(r#""C:\Users\a\My Photo (1).jpg" C:\Users\a\beach.jpg "D:\Trip 2\clip.mp4" "#),
+                paths(&[
+                    r"C:\Users\a\My Photo (1).jpg",
+                    r"C:\Users\a\beach.jpg",
+                    r"D:\Trip 2\clip.mp4"
+                ])
+            );
+        }
+
+        /// A backslash is a folder separator, and a single quote is part
+        /// of the name.
+        #[test]
+        fn backslashes_and_single_quotes_stay() {
+            assert_eq!(
+                find(r#""C:\Users\a\Bo's & Cy's #2.png""#),
+                paths(&[r"C:\Users\a\Bo's & Cy's #2.png"])
+            );
+            assert_eq!(
+                find(r"C:\Users\a\My\ Photo\ (1).jpg"),
+                None,
+                "escapes are Unix"
+            );
+        }
+
+        #[test]
+        fn network_shares() {
+            assert_eq!(
+                find(r#""\\server\share\Our trip.jpg""#),
+                paths(&[r"\\server\share\Our trip.jpg"])
+            );
+            assert_eq!(
+                find(r"\\server\share\beach.jpg"),
+                paths(&[r"\\server\share\beach.jpg"])
+            );
+        }
+
+        #[test]
+        fn file_links_are_decoded() {
+            assert_eq!(
+                find("file:///C:/Users/a/My%20Photo%20(1).jpg"),
+                paths(&[r"C:\Users\a\My Photo (1).jpg"])
+            );
+            assert_eq!(
+                find("file://localhost/C:/Users/a/Bo%27s%20100%25.png"),
+                paths(&[r"C:\Users\a\Bo's 100%.png"])
+            );
+            assert_eq!(
+                find("file://server/share/beach.jpg"),
+                paths(&[r"\\server\share\beach.jpg"])
+            );
+            assert_eq!(
+                find("file:///C:/Users/a/beach.jpg\r\nfile:///D:/Trip%202/clip.mp4\r\n"),
+                paths(&[r"C:\Users\a\beach.jpg", r"D:\Trip 2\clip.mp4"])
+            );
+            assert_eq!(find("file:///C:/Users/a/beach%2"), None, "a broken escape");
+        }
+
+        #[test]
+        fn unquoted_paths_one_per_line() {
+            assert_eq!(
+                find(r"C:\Users\a\My Photo (1).jpg"),
+                paths(&[r"C:\Users\a\My Photo (1).jpg"])
+            );
+            assert_eq!(
+                find("C:\\Users\\a\\My Photo (1).jpg\r\nD:\\Trip 2\\clip.mp4\r\n"),
+                paths(&[r"C:\Users\a\My Photo (1).jpg", r"D:\Trip 2\clip.mp4"])
+            );
+        }
+
+        #[test]
+        fn anything_else_is_text() {
+            for text in [
+                "",
+                "hello",
+                r"C:\Users\a\gone.jpg",
+                r"look at C:\Users\a\beach.jpg",
+                r"C:\Users\a\beach.jpg C:\Users\a\gone.jpg",
+                r"Users\a\beach.jpg",
+                r"\Users\a\beach.jpg",
+                "C:beach.jpg",
+                r#""C:\Users\a\beach.jpg"#,
+                "/u/a/beach.jpg",
+                "file:///u/a/beach.jpg",
+            ] {
+                assert_eq!(find(text), None, "{text:?}");
+            }
+        }
+    }
+
+    /// Real files, pasted as this system's terminals paste them.
+    mod on_this_system {
+        use super::{parse, sendable, Platform, Unsendable};
+        use std::path::{Path, PathBuf};
+
+        /// A folder with these files in it, each holding a few bytes.
+        /// Every name is one both systems allow.
+        fn files(names: &[&str]) -> (tempfile::TempDir, Vec<PathBuf>) {
+            let d = tempfile::tempdir().unwrap();
+            let paths = names
+                .iter()
+                .map(|n| {
+                    let p = d.path().join(n);
+                    std::fs::write(&p, b"some bytes").unwrap();
+                    p
+                })
+                .collect();
+            (d, paths)
+        }
+
+        fn find(text: &str) -> Option<Vec<PathBuf>> {
+            parse(text, None, Platform::HOST, &|p| {
+                std::fs::metadata(p).is_ok()
+            })
+        }
+
+        /// As this system's terminals paste a drop: a backslash before
+        /// each space on Unix, double quotes around a path with spaces on
+        /// Windows, a space after each.
+        fn pasted(ps: &[PathBuf]) -> String {
+            ps.iter()
+                .map(|p| {
+                    let s = p.display().to_string();
+                    match Platform::HOST {
+                        Platform::Windows if s.contains(' ') => format!("\"{s}\" "),
+                        Platform::Windows => format!("{s} "),
+                        Platform::Unix => {
+                            let mut out = String::new();
+                            for c in s.chars() {
+                                if " '\"()&;$`!*?[]{}<>|#~\\".contains(c) {
+                                    out.push('\\');
+                                }
+                                out.push(c);
+                            }
+                            out + " "
+                        }
+                    }
+                })
+                .collect()
+        }
+
+        /// A `file://` link to `p`, as kitty pastes one on Unix.
+        fn link(p: &Path) -> String {
+            let s = p.display().to_string();
+            let s = match Platform::HOST {
+                Platform::Windows => format!("/{}", s.replace('\\', "/")),
+                Platform::Unix => s,
+            };
+            format!(
+                "file://{}",
+                s.replace('%', "%25")
+                    .replace(' ', "%20")
+                    .replace('\'', "%27")
+            )
+        }
+
+        #[test]
+        fn a_drop_of_real_files_finds_them() {
+            let (_d, p) = files(&["beach.jpg", "My Photo (1).jpg", "Bo's & Cy's #2.png"]);
+            for one in &p {
+                assert_eq!(
+                    find(&pasted(std::slice::from_ref(one))),
+                    Some(vec![one.clone()])
+                );
+                assert_eq!(find(&link(one)), Some(vec![one.clone()]));
+            }
+            assert_eq!(find(&pasted(&p)), Some(p.clone()));
+            let lines: Vec<String> = p.iter().map(|x| x.display().to_string()).collect();
+            assert_eq!(find(&lines.join("\n")), Some(p));
+        }
+
+        #[test]
+        fn a_missing_file_or_other_words_are_text() {
+            let (d, p) = files(&["beach.jpg"]);
+            let gone = d.path().join("gone.jpg");
+            assert_eq!(find(&pasted(std::slice::from_ref(&gone))), None);
+            assert_eq!(find(&format!("look at {}", pasted(&p))), None);
+            assert_eq!(find("beach.jpg"), None);
+        }
+
+        /// A folder is a drop too, so the person hears why it cannot go.
+        #[test]
+        fn a_folder_is_a_drop_that_cannot_go() {
+            let (d, p) = files(&["beach.jpg"]);
+            let dir = d.path().to_path_buf();
+            assert_eq!(
+                find(&pasted(std::slice::from_ref(&dir))),
+                Some(vec![dir.clone()])
+            );
+            assert_eq!(sendable(&dir), Err(Unsendable::Folder));
+            assert_eq!(sendable(&p[0]), Ok(10));
+            assert_eq!(sendable(&dir.join("gone")), Err(Unsendable::Gone));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_file_nobody_may_read_cannot_go() {
+            use std::os::unix::fs::PermissionsExt;
+            let (_d, p) = files(&["secret.pdf"]);
+            std::fs::set_permissions(&p[0], std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Someone with every permission still reads it.
+            if std::fs::File::open(&p[0]).is_err() {
+                assert_eq!(sendable(&p[0]), Err(Unsendable::Unreadable));
+            }
+            assert_eq!(find(&pasted(&p)), Some(p));
         }
     }
 }
