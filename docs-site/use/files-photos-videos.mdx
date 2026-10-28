@@ -33,14 +33,23 @@ When a file cannot go, the bottom line names it with the reason and the draft wa
 - A file moved or deleted since the drop is named when you press Enter.
 - A file over the server's size limit, 100 MB by default, is named when you press Enter.
 
+A message that holds nothing but the path of a file on your computer never goes out as text. Enter attaches the file instead, and the bottom line says "The path stays on this computer. File 1 is beach.jpg, 2.4 MB. Enter sends it."
+
 ## Save a file
+
+When someone sends a file, the room shows a line such as "Ana sent beach.jpg (2.4 MB). Type /save beach.jpg to save it to Downloads." Save it any of these ways:
+
+- Click the line.
+- Type `/save` on its own to save the newest file someone else sent.
+- Type `/save ` and press Tab, or Up and Down, to go through the room's files, newest first.
+- Type the name, with a folder after it to save somewhere else:
 
 ```text
 /save beach.jpg
 /save beach.jpg ~/Desktop
 ```
 
-`/save` uses the name shown in the chat. Files go to your Downloads folder unless you name another folder. The status line says whose file you saved and where it went, such as "Saved Ana's beach.jpg to ~/Downloads/beach.jpg".
+Files go to your Downloads folder unless you name another folder. The room then keeps a line only you see, such as "Saved beach.jpg to ~/Downloads/beach.jpg." Clicking the file line again says where it went.
 
 **When two files share a name**, `/save` saves nothing and lists the newest few instead, each with a number, the person who sent it and when. Add the number after a colon to pick one:
 
