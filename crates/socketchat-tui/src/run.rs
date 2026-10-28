@@ -1662,26 +1662,110 @@ enum Read {
     Stop,
 }
 
-/// One look at the terminal, waiting at most 200 ms for something.
-fn read_terminal() -> Read {
-    match event::poll(Duration::from_millis(200)) {
-        // A failed read is skipped, as before.
-        Ok(true) => match event::read()
-            .ok()
-            .and_then(|ev| input_of(ev, Instant::now()))
+/// The next event from the terminal, waiting at most `wait` for one.
+/// `Err` means the terminal can no longer be read; a read that fails is
+/// skipped.
+fn terminal_event(wait: Duration) -> std::io::Result<Option<TermEvent>> {
+    Ok(match event::poll(wait)? {
+        true => event::read().ok(),
+        false => None,
+    })
+}
+
+/// The fewest plain characters that, arriving together in one read, are
+/// a paste rather than typing. A terminal hands over each key as it is
+/// pressed, so typing and a held key's repeats come one character per
+/// read, and two keys pressed at once can share a read. Three or more at
+/// once come from a program writing text, such as a terminal that writes
+/// a dropped file's path as keys without paste markers. Text typed while
+/// the screen was busy can pile up too, and goes in as a paste would: the
+/// same text in the message box.
+const BURST_CHARS: usize = 3;
+
+/// A key that types its character as it is: no Ctrl or Alt, though Shift
+/// for a capital is fine.
+fn plain_char(ev: &TermEvent) -> Option<KeyEvent> {
+    match ev {
+        TermEvent::Key(k)
+            if k.kind == KeyEventKind::Press
+                && matches!(k.code, KeyCode::Char(_))
+                && (k.modifiers - KeyModifiers::SHIFT).is_empty() =>
         {
-            Some(i) => Read::Got(i),
-            None => Read::Nothing,
-        },
-        Ok(false) => Read::Nothing,
-        Err(_) => Read::Stop,
+            Some(*k)
+        }
+        _ => None,
+    }
+}
+
+/// Reads the terminal for the chat screen, and tells a burst of
+/// characters written all at once from typing.
+struct Reader<S> {
+    /// The terminal's next event, waiting at most the time given.
+    source: S,
+    /// Input already read, to hand over before reading more.
+    held: std::collections::VecDeque<Input>,
+}
+
+impl<S: FnMut(Duration) -> std::io::Result<Option<TermEvent>>> Reader<S> {
+    fn new(source: S) -> Reader<S> {
+        Reader {
+            source,
+            held: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// One look at the terminal, waiting at most 200 ms for something.
+    /// After a plain character, every event already waiting is read too:
+    /// the plain characters up to the first other key, click or resize
+    /// are a paste when there are [`BURST_CHARS`] or more of them, and
+    /// keys as typed otherwise. Key releases and events that carry
+    /// nothing do not end a burst.
+    fn next(&mut self) -> Read {
+        if let Some(i) = self.held.pop_front() {
+            return Read::Got(i);
+        }
+        let ev = match (self.source)(Duration::from_millis(200)) {
+            Ok(Some(ev)) => ev,
+            Ok(None) => return Read::Nothing,
+            Err(_) => return Read::Stop,
+        };
+        let at = Instant::now();
+        let Some(first) = plain_char(&ev) else {
+            return input_of(ev, at).map_or(Read::Nothing, Read::Got);
+        };
+        let mut keys = vec![first];
+        let mut after = None;
+        while let Ok(Some(ev)) = (self.source)(Duration::ZERO) {
+            if let Some(k) = plain_char(&ev) {
+                keys.push(k);
+            } else if let Some(i) = input_of(ev, Instant::now()) {
+                after = Some(i);
+                break;
+            }
+        }
+        if keys.len() >= BURST_CHARS {
+            let text = keys
+                .iter()
+                .filter_map(|k| match k.code {
+                    KeyCode::Char(c) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            self.held.push_back(Input::Paste(text));
+        } else {
+            self.held
+                .extend(keys.into_iter().map(|k| Input::Key(k, at)));
+        }
+        self.held.extend(after);
+        self.held.pop_front().map_or(Read::Nothing, Read::Got)
     }
 }
 
 /// Reads keys, pastes and the mouse on a plain thread and hands them to the async
 /// loop.
 fn key_reader() -> mpsc::UnboundedReceiver<Input> {
-    reader(read_terminal)
+    let mut terminal = Reader::new(terminal_event);
+    reader(move || terminal.next())
 }
 
 /// Runs `next` on a plain thread until it stops or nobody listens, and
@@ -2033,6 +2117,7 @@ async fn run_inner(client: Client) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod bursts;
     mod drops;
     mod saves;
 

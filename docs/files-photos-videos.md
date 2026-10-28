@@ -21,7 +21,7 @@ In the chat screen, type:
 
 The line that says someone sent a file also says how to save it, for example "Ana sent beach.jpg (2.1 MB). Type /save beach.jpg to save it to Downloads." While the mouse is on, a click on that line saves the file to Downloads, and a second click says where it went. After a save, a line that only you see says where the file went, for example "Saved beach.jpg to ~/Downloads/beach.jpg." On a computer with no Downloads folder, files go to the folder Socketchat started in, and the lines say so.
 
-Enter never sends the path of a file on your computer as a message. Some terminals type a dropped file's path instead of pasting it; when the message box holds nothing but such a path, Enter attaches the file as `[File 1]`, and the next Enter sends it.
+Some terminals write a dropped file's path as typed keys instead of pasting it. Socketchat reads keys that arrive all at once as a paste, so the drop still shows as `[File 1]`. And Enter never sends the path of a file on your computer as a message: when the message box holds nothing but such a path, Enter attaches the file as `[File 1]`, and the next Enter sends it.
 
 When more than one file in the chat has the same name, `/save` saves nothing. It lists the three newest instead, each with a number, the person who sent it and the time it arrived, and gives the numbers of any older ones. Add the number after a colon to save that one, for example `/save beach.jpg:2`. Put a name with spaces in quotes: `/save "beach day.jpg":2`. The line for each file already shows the command that saves it.
 

@@ -293,3 +293,25 @@ async fn a_path_among_words_and_commands_go_as_before() {
     press(&mut bo, KeyCode::Enter).await;
     assert_eq!(sent_names(&bo, g), vec!["a.txt"]);
 }
+
+/// What Nyx writes for a dropped file, single quotes around the path and
+/// its spaces left bare, typed into the box as keys: Enter attaches the
+/// file and sends no path.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_single_quoted_path_typed_as_keys_is_attached_at_enter() {
+    let srv = TestServer::start().await;
+    let (g, _a, mut bo, _dir) = room_with_bo(&srv).await;
+    bo.act(Action::Select(g)).await;
+    let (_d, p) = files(&[("engineering_interview_cribsheet (1).pdf", b"%PDF-1.7")]);
+    let before = texts(&bo, g);
+    type_text(&mut bo, &format!("'{}'", p[0].display())).await;
+    press(&mut bo, KeyCode::Enter).await;
+    assert_eq!(texts(&bo, g), before, "nothing went");
+    assert_eq!(bo.app.input, "[File 1] ", "{:?}", bo.app.status);
+    press(&mut bo, KeyCode::Enter).await;
+    assert_eq!(
+        sent_names(&bo, g),
+        vec!["engineering_interview_cribsheet (1).pdf"]
+    );
+}

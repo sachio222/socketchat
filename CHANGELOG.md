@@ -24,7 +24,7 @@ This release makes a file someone sends easy to save, and keeps the path of a fi
 
 ### Fixed
 
-- **Drop a file in a terminal that types it**: some terminals type a dropped file's path into the window instead of pasting it. Enter now turns that path into `[File 1]`, as a pasted drop does, and the next Enter sends the file.
+- **Drop a file in a terminal that types it**: some terminals, such as Nyx, write a dropped file's path into the window as typed keys instead of as a paste. Socketchat now reads keys that arrive all at once as a paste, so the drop shows as `[File 1]` straight away and Enter sends the file. Typing and held keys work as before.
 
 ## 0.6.1 - 2026-10-27
 
